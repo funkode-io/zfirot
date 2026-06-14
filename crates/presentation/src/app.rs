@@ -72,7 +72,7 @@ fn ZfirotLogo() -> Element {
 fn Board(slices: Vec<Slice>) -> Element {
     rsx! {
         div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
-            for state in SliceState::ALL {
+            for state in SliceState::BOARD {
                 BoardColumn {
                     state,
                     label: state_label(state).to_string(),

@@ -18,6 +18,7 @@ pub fn state_label(state: SliceState) -> &'static str {
         SliceState::Ready => "Ready",
         SliceState::Wip => "WIP",
         SliceState::Blocked => "Blocked",
+        SliceState::Done => "Done",
     }
 }
 
@@ -27,5 +28,6 @@ pub fn state_badge_class(state: SliceState) -> &'static str {
         SliceState::Ready => "badge-success",
         SliceState::Wip => "badge-warning",
         SliceState::Blocked => "badge-error",
+        SliceState::Done => "badge-neutral",
     }
 }
