@@ -18,4 +18,8 @@ async fn load_board_returns_slices_across_states() {
     assert!(slices.iter().any(|s| s.state == SliceState::Ready));
     assert!(slices.iter().any(|s| s.state == SliceState::Wip));
     assert!(slices.iter().any(|s| s.state == SliceState::Blocked));
+    assert!(
+        slices.iter().all(|s| s.number != 2),
+        "the closed (Done) Slice should be hidden from the board"
+    );
 }

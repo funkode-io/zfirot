@@ -9,4 +9,4 @@ mod slice;
 
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
 pub use repo::RepoRef;
-pub use slice::{Slice, SliceState};
+pub use slice::{RawSlice, Slice, SliceState};
