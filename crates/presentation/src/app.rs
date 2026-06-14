@@ -7,11 +7,9 @@ use infrastructure::FakeGitHubPort;
 
 use crate::components::{state_badge_class, state_label, BoardColumn};
 
-/// daisyUI + Tailwind + Iconify, loaded into the webview head. Sourced from CDNs
-/// for the walking skeleton; a local Tailwind/daisyUI build is a later slice.
-const TAILWIND_CDN: &str = "https://cdn.tailwindcss.com";
-const DAISYUI_CDN: &str = "https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css";
-const ICONIFY_CDN: &str = "https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js";
+/// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
+/// Build it with `make css` (runs `npm run build:css` in crates/presentation).
+const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 #[component]
 pub fn App() -> Element {
@@ -23,13 +21,11 @@ pub fn App() -> Element {
 
     rsx! {
         document::Title { "Zfirot" }
-        document::Script { src: TAILWIND_CDN }
-        document::Link { rel: "stylesheet", href: DAISYUI_CDN }
-        document::Script { src: ICONIFY_CDN }
+        document::Stylesheet { href: TAILWIND_CSS }
 
         div { class: "min-h-screen bg-base-200 p-6",
             header { class: "flex items-center gap-2 mb-6",
-                div { dangerous_inner_html: r#"<iconify-icon icon="mdi:view-dashboard-outline" width="28" height="28"></iconify-icon>"# }
+                span { class: "icon-[lucide--layout-dashboard] size-7" }
                 h1 { class: "text-2xl font-bold", "Zfirot" }
             }
 
@@ -58,7 +54,7 @@ fn Board(slices: Vec<Slice>) -> Element {
                     label: state_label(state).to_string(),
                     badge_class: state_badge_class(state).to_string(),
                     slices: slices.iter().filter(|s| s.state == state).cloned().collect::<Vec<_>>(),
-                    on_assign: move |_number| {} // Assign-self is wired in a later slice. No-op for now.,
+                    on_assign: move |_number| {}, // Assign-self is wired in a later slice. No-op for now.,
                 }
             }
         }

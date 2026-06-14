@@ -143,6 +143,12 @@ impl Error for AppError {
     }
 }
 
+/// A fallible operation that yields a value of type `T` on success.
+pub type AppResult<T> = Result<T, AppError>;
+
+/// A fallible action performed for its effect, yielding nothing on success.
+pub type AppAction = Result<(), AppError>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

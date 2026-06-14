@@ -18,3 +18,15 @@ Load this when creating branches, committing, or opening PRs.
 - Sync with main via a MERGE commit (`git merge upstream/main`), never rebase.
 - NEVER force-push a branch with an open PR; address review with new commits.
 - Remotes: `upstream` = funkode-io/zfirot, `origin` = carlos-verdes/zfirot.
+
+## During code review
+
+- NEVER force-push. Push only NEW commits on top of the branch; never amend,
+  rebase, or otherwise rewrite already-pushed history while a PR is open — it
+  breaks incremental review.
+- Address each piece of feedback with a fresh commit.
+- PRs are merged with **squash merge**, so the individual review commits are
+  flattened into one on merge — there is no need to tidy history by force-pushing.
+- The PR title MUST be a valid Conventional Commit (e.g.
+  `feat(presentation): …`, `fix(domain): …`), because the squash-merge commit
+  message is derived from it.

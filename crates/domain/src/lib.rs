@@ -7,6 +7,6 @@ mod error;
 mod repo;
 mod slice;
 
-pub use error::{AppError, AppErrorKind};
+pub use error::{AppAction, AppError, AppErrorKind, AppResult};
 pub use repo::RepoRef;
 pub use slice::{Slice, SliceState};
