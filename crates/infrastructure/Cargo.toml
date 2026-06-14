@@ -1,0 +1,13 @@
+[package]
+name = "infrastructure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+domain.workspace = true
+application.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

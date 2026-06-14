@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  />
+  <title>Zfirot logo preview</title>
+  <style>
+    :root {
+      /* Play with this — it drives the monogram fill. */
+      --brand: #000000;
+
+      /* Card / canvas behind the mark. */
+      --canvas: #ffffff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2rem;
+      background: #11151c;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #e6edf3;
+    }
+
+    .stage {
+      width: min(560px, 90vw);
+      aspect-ratio: 41 / 39;
+      background: var(--canvas);
+      border-radius: 16px;
+      padding: 1.5rem;
+    }
+
+    .stage svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* Different sizes to check legibility as a favicon / sidebar mark. */
+    .sizes {
+      display: flex;
+      align-items: flex-end;
+      gap: 1.5rem;
+    }
+
+    .sizes .stage {
+      padding: .5rem;
+    }
+
+    .s128 {
+      width: 128px;
+    }
+
+    .s64 {
+      width: 64px;
+    }
+
+    .s32 {
+      width: 32px;
+    }
+
+    /* Show the mark on a dark surface too (transparent background test). */
+    .dark {
+      background: #0a192f;
+    }
+
+    .controls {
+      display: flex;
+      gap: 1.5rem;
+      align-items: center;
+      background: #0d1117;
+      border: 1px solid #222c3a;
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+    }
+
+    .controls label {
+      display: flex;
+      flex-direction: column;
+      gap: .35rem;
+      font-size: .8rem;
+    }
+
+    .controls input[type="color"] {
+      width: 56px;
+      height: 36px;
+      border: none;
+      background: none;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <!-- Reusable SVG symbol so we can drop it at multiple sizes. -->
+  <svg
+    width="0"
+    height="0"
+    style="position:absolute"
+    aria-hidden="true"
+  >
+    <symbol
+      id="zfirot-logo"
+      viewBox="90 110 410 390"
+    >
+      <!-- Both letters are drawn as strokes of equal width, with round caps and
+           joins, so they share the same size/weight and have rounded corners.
+           The Z's bottom bar sits at the F's middle height and runs right,
+           through the F stem, to form the F's middle arm. A slight forward lean
+           (skewX) plus gently bowed strokes give it a hand-written feel. -->
+      <g
+        fill="none"
+        stroke="var(--brand)"
+        stroke-width="56"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        transform="translate(34,0) skewX(-7)"
+      >
+        <!-- Letter Z: top bar -> diagonal -> bottom bar (extends into the F). -->
+        <path d="M 138,156
+                 Q 216,146 292,152
+                 Q 224,250 150,338
+                 Q 300,348 452,334" />
+
+        <!-- Letter F: stem + top bar (middle arm is the Z's bottom bar). -->
+        <path d="M 352,188
+                 Q 345,314 350,440
+                 M 350,188
+                 Q 406,182 462,194" />
+      </g>
+    </symbol>
+  </svg>
+
+  <div class="stage">
+    <svg>
+      <use href="#zfirot-logo" />
+    </svg>
+  </div>
+
+  <div class="sizes">
+    <div class="stage s128"><svg>
+        <use href="#zfirot-logo" />
+      </svg></div>
+    <div class="stage s64"><svg>
+        <use href="#zfirot-logo" />
+      </svg></div>
+    <div class="stage s32"><svg>
+        <use href="#zfirot-logo" />
+      </svg></div>
+    <div class="stage s128 dark"><svg>
+        <use href="#zfirot-logo" />
+      </svg></div>
+  </div>
+
+  <div class="controls">
+    <label>Brand
+      <input
+        type="color"
+        value="#000000"
+        oninput="document.documentElement.style.setProperty('--brand', this.value)"
+      />
+    </label>
+    <label>Canvas
+      <input
+        type="color"
+        value="#ffffff"
+        oninput="document.documentElement.style.setProperty('--canvas', this.value)"
+      />
+    </label>
+  </div>
+</body>
+</html>

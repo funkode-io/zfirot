@@ -1,0 +1,16 @@
+{
+  "name": "zfirot-styles",
+  "private": true,
+  "description": "Tailwind + daisyUI stylesheet build for the Zfirot desktop app.",
+  "scripts": {
+    "build:css": "tailwindcss -i ./tailwind.css -o ./assets/tailwind.css --minify",
+    "watch:css": "tailwindcss -i ./tailwind.css -o ./assets/tailwind.css --watch"
+  },
+  "devDependencies": {
+    "@iconify-json/lucide": "^1.2.0",
+    "@iconify/tailwind4": "^1.0.0",
+    "@tailwindcss/cli": "^4.1.0",
+    "daisyui": "^5.0.0",
+    "tailwindcss": "^4.1.0"
+  }
+}

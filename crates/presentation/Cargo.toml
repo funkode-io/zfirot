@@ -1,0 +1,15 @@
+[package]
+name = "zfirot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zfirot"
+path = "src/main.rs"
+
+[dependencies]
+domain.workspace = true
+application.workspace = true
+infrastructure.workspace = true
+dioxus = { version = "0.7", features = ["desktop"] }

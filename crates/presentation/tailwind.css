@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+/* Scan the Dioxus rsx! markup for utility classes. */
+@source "./src/**/*.rs";
+
+/* daisyUI component library (Tailwind v4 plugin). */
+@plugin "daisyui";
+
+/* Iconify icons as utility classes, e.g. `icon-[lucide--layout-dashboard]`. */
+@plugin "@iconify/tailwind4";
