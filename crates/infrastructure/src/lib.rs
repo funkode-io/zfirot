@@ -21,11 +21,12 @@ impl GitHubPort for FakeGitHubPort {
 
 /// Canned board Slices spanning every state, derived from raw GitHub-shaped data
 /// so the fake exercises the same `SliceState` derivation as the real adapter
-/// will. The closed (Done) Slice is filtered out, demonstrating board hiding.
+/// will. A closed (Done) issue is included; the board hides Done by rendering
+/// only [`SliceState::BOARD`], while the data is retained for future use.
 pub fn sample_slices() -> Vec<Slice> {
     sample_raw_slices()
         .into_iter()
-        .filter_map(RawSlice::into_slice)
+        .map(RawSlice::into_slice)
         .collect()
 }
 

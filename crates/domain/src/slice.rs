@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// The derived state of a [`Slice`] on the board.
+/// The derived state of a [`Slice`].
 ///
-/// Precedence is Blocked > WIP > Ready. `Done` (a closed Slice) is hidden from
-/// the board and is therefore not represented here. The state is a pure
-/// derivation over current GitHub data (computed in a later slice).
+/// Precedence among active states is Blocked > WIP > Ready. `Done` (a closed
+/// Slice) is a real state too, so the derivation is total; the board simply
+/// omits it from its columns ([`SliceState::BOARD`]), keeping the data around so
+/// Done Slices can be shown later if needed. The state is a pure derivation over
+/// current GitHub data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SliceState {
     /// Blockers all closed, no open linked PR, and no assignee.
@@ -13,11 +15,14 @@ pub enum SliceState {
     Wip,
     /// At least one open "blocked by" dependency.
     Blocked,
+    /// A closed Slice. Hidden from the active board.
+    Done,
 }
 
 impl SliceState {
-    /// Board column order, left to right.
-    pub const ALL: [SliceState; 3] = [SliceState::Ready, SliceState::Wip, SliceState::Blocked];
+    /// Board column order, left to right. `Done` is intentionally excluded so
+    /// closed Slices are hidden from the active board.
+    pub const BOARD: [SliceState; 3] = [SliceState::Ready, SliceState::Wip, SliceState::Blocked];
 }
 
 /// A read model of a GitHub issue that is a Slice of a PRD.
@@ -54,38 +59,37 @@ pub struct RawSlice {
 }
 
 impl RawSlice {
-    /// Project this raw issue into a board [`Slice`], or `None` when it is Done
-    /// (closed) and therefore hidden from the board.
-    pub fn into_slice(self) -> Option<Slice> {
-        let state = self.derive_state()?;
-        Some(Slice {
+    /// Project this raw issue into a [`Slice`] with its derived [`SliceState`].
+    pub fn into_slice(self) -> Slice {
+        let state = self.derive_state();
+        Slice {
             number: self.number,
             title: self.title,
             prd_title: self.prd_title,
             assignee: self.assignee,
             state,
-        })
+        }
     }
 
-    /// The pure `SliceState` derivation. Returns `None` for Done (closed)
-    /// Slices, which are hidden from the board.
+    /// The pure `SliceState` derivation.
     ///
-    /// Precedence is Blocked > WIP > Ready:
+    /// A closed Slice is always `Done`. Otherwise precedence is
+    /// Blocked > WIP > Ready:
     /// - **Blocked**: at least one open "blocked by" dependency.
     /// - **WIP**: an open linked PR, or an assignee has claimed it to start work
     ///   (an assigned Slice is by definition no longer Ready).
     /// - **Ready**: all blockers closed, no open linked PR, and no assignee.
-    fn derive_state(&self) -> Option<SliceState> {
+    fn derive_state(&self) -> SliceState {
         if self.closed {
-            return None;
+            return SliceState::Done;
         }
         if self.open_blocker_count > 0 {
-            return Some(SliceState::Blocked);
+            return SliceState::Blocked;
         }
         if self.has_open_linked_pr || self.assignee.is_some() {
-            return Some(SliceState::Wip);
+            return SliceState::Wip;
         }
-        Some(SliceState::Ready)
+        SliceState::Ready
     }
 }
 
@@ -107,14 +111,14 @@ mod tests {
     }
 
     #[test]
-    fn derives_each_state_and_hides_done() {
+    fn derives_each_state_including_done() {
         struct Case {
             name: &'static str,
             closed: bool,
             assignee: Option<&'static str>,
             has_open_linked_pr: bool,
             open_blocker_count: u32,
-            expected: Option<SliceState>,
+            expected: SliceState,
         }
 
         let cases = [
@@ -124,7 +128,7 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: false,
                 open_blocker_count: 0,
-                expected: Some(SliceState::Ready),
+                expected: SliceState::Ready,
             },
             Case {
                 name: "open linked PR -> WIP",
@@ -132,7 +136,7 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: true,
                 open_blocker_count: 0,
-                expected: Some(SliceState::Wip),
+                expected: SliceState::Wip,
             },
             Case {
                 name: "assigned but no PR -> WIP (no longer Ready)",
@@ -140,7 +144,7 @@ mod tests {
                 assignee: Some("octocat"),
                 has_open_linked_pr: false,
                 open_blocker_count: 0,
-                expected: Some(SliceState::Wip),
+                expected: SliceState::Wip,
             },
             Case {
                 name: "open blocker -> Blocked",
@@ -148,7 +152,7 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: false,
                 open_blocker_count: 1,
-                expected: Some(SliceState::Blocked),
+                expected: SliceState::Blocked,
             },
             Case {
                 name: "Blocked outranks WIP (PR + open blocker)",
@@ -156,7 +160,7 @@ mod tests {
                 assignee: Some("octocat"),
                 has_open_linked_pr: true,
                 open_blocker_count: 2,
-                expected: Some(SliceState::Blocked),
+                expected: SliceState::Blocked,
             },
             Case {
                 name: "WIP outranks Ready (assignee present)",
@@ -164,15 +168,15 @@ mod tests {
                 assignee: Some("octocat"),
                 has_open_linked_pr: false,
                 open_blocker_count: 0,
-                expected: Some(SliceState::Wip),
+                expected: SliceState::Wip,
             },
             Case {
-                name: "closed -> Done, hidden from the board",
+                name: "closed -> Done",
                 closed: true,
                 assignee: None,
                 has_open_linked_pr: false,
                 open_blocker_count: 0,
-                expected: None,
+                expected: SliceState::Done,
             },
             Case {
                 name: "closed wins even with an open blocker",
@@ -180,7 +184,7 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: false,
                 open_blocker_count: 3,
-                expected: None,
+                expected: SliceState::Done,
             },
         ];
 
@@ -198,6 +202,14 @@ mod tests {
     }
 
     #[test]
+    fn done_is_excluded_from_the_board_columns() {
+        assert!(
+            !SliceState::BOARD.contains(&SliceState::Done),
+            "Done must not be a board column"
+        );
+    }
+
+    #[test]
     fn into_slice_carries_fields_and_derived_state() {
         let raw = RawSlice {
             number: 42,
@@ -207,7 +219,7 @@ mod tests {
             ..ready_raw()
         };
 
-        let slice = raw.into_slice().expect("an open Slice is on the board");
+        let slice = raw.into_slice();
 
         assert_eq!(slice.number, 42);
         assert_eq!(slice.title, "Wire the thing");
@@ -217,12 +229,12 @@ mod tests {
     }
 
     #[test]
-    fn into_slice_is_none_for_done() {
+    fn into_slice_is_done_for_a_closed_issue() {
         let raw = RawSlice {
             closed: true,
             ..ready_raw()
         };
 
-        assert_eq!(raw.into_slice(), None);
+        assert_eq!(raw.into_slice().state, SliceState::Done);
     }
 }

@@ -625,6 +625,12 @@
       --badge-fg: var(--color-error-content);
     }
   }
+  .badge-neutral {
+    @layer daisyui.l1.l2 {
+      --badge-color: var(--color-neutral);
+      --badge-fg: var(--color-neutral-content);
+    }
+  }
   .badge-success {
     @layer daisyui.l1.l2 {
       --badge-color: var(--color-success);
