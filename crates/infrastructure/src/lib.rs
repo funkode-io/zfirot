@@ -6,7 +6,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AppResult, RawSlice, RepoRef, Slice};
+use domain::{derive_board, AppResult, IssueRef, RawSlice, RepoRef, Slice};
 
 mod github;
 
@@ -24,22 +24,29 @@ impl GitHubPort for FakeGitHubPort {
 }
 
 /// Canned board Slices spanning every state, derived from raw GitHub-shaped data
-/// so the fake exercises the same `SliceState` derivation as the real adapter
-/// will. A closed (Done) issue is included; the board hides Done by rendering
-/// only [`SliceState::BOARD`], while the data is retained for future use.
+/// so the fake exercises the same `SliceState` derivation and reverse-edge
+/// resolution as the real adapter. A closed (Done) issue is included; the board
+/// hides Done by rendering only [`SliceState::BOARD`], while the data is retained
+/// for future use.
 pub fn sample_slices() -> Vec<Slice> {
-    sample_raw_slices()
-        .into_iter()
-        .map(RawSlice::into_slice)
-        .collect()
+    derive_board(sample_raw_slices())
+}
+
+/// Build a blocker reference to the canned issue numbered `number`.
+fn blocker_ref(number: u64) -> IssueRef {
+    IssueRef {
+        number,
+        url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+    }
 }
 
 /// Raw, GitHub-shaped issues for the fake, covering every derived state plus a
-/// Done (closed) issue that must be hidden from the board.
+/// Done (closed) issue that must be hidden from the board. The Blocked issues
+/// list real open issues as blockers so the reverse "unblocks" edges resolve.
 fn sample_raw_slices() -> Vec<RawSlice> {
     let prd = Some("Zfirot desktop dashboard".to_string());
     vec![
-        // Ready: no blockers, no PR, no assignee.
+        // Ready: no blockers, no PR, no assignee. Unblocks #6 and #7.
         RawSlice {
             number: 4,
             title: "Live GitHub read: real board for a hardcoded repo".to_string(),
@@ -48,7 +55,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         },
         RawSlice {
             number: 5,
@@ -58,7 +65,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         },
         // WIP: an open Pull Request is linked.
         RawSlice {
@@ -69,9 +76,9 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: Some("carlos-verdes".to_string()),
             has_open_linked_pr: true,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         },
-        // Blocked: at least one open "blocked by" dependency.
+        // Blocked: blocked by the Ready issue #4.
         RawSlice {
             number: 6,
             title: "PAT authentication via the OS secure store".to_string(),
@@ -80,7 +87,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 1,
+            blockers: vec![blocker_ref(4)],
         },
         RawSlice {
             number: 7,
@@ -90,7 +97,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 2,
+            blockers: vec![blocker_ref(4), blocker_ref(5)],
         },
         // Done: closed, so hidden from the board.
         RawSlice {
@@ -101,7 +108,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd,
             assignee: Some("carlos-verdes".to_string()),
             has_open_linked_pr: false,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         },
     ]
 }

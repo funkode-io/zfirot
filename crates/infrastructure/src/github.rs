@@ -11,10 +11,12 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{parse_prose, AppError, AppResult, ProseLinks, RawSlice, RepoRef, Slice};
+use domain::{
+    derive_board, parse_prose, AppError, AppResult, IssueRef, ProseLinks, RawSlice, RepoRef, Slice,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 
@@ -32,7 +34,7 @@ query Board($owner: String!, $name: String!, $cursor: String) {
         body
         assignees(first: 1) { nodes { login } }
         parent { title }
-        blockedBy(first: 50) { nodes { state } }
+        blockedBy(first: 50) { nodes { number url state } }
         closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
       }
     }
@@ -130,10 +132,7 @@ impl GitHubPort for GitHubClient {
             }
         }
 
-        Ok(resolve_board(issues)
-            .into_iter()
-            .map(RawSlice::into_slice)
-            .collect())
+        Ok(derive_board(resolve_board(issues)))
     }
 }
 
@@ -225,18 +224,31 @@ pub fn parse_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<String>)> 
 ///
 /// Native links win; when an issue has none, its parsed prose references are
 /// resolved against the issues fetched in the same load: a prose parent yields
-/// that issue's title for the PRD tag, and a prose blocker counts toward Blocked
-/// only if it is still open (open issues are the only ones in the fetched set).
+/// that issue's title for the PRD tag, and a prose blocker resolves to that
+/// issue's reference (number + url) only if it is still open (open issues are
+/// the only ones in the fetched set). The reverse "unblocks" edge is derived
+/// later by [`derive_board`] over these resolved blockers.
 pub fn resolve_board(issues: Vec<RawIssue>) -> Vec<RawSlice> {
-    let open_numbers: HashSet<u64> = issues.iter().map(|issue| issue.number).collect();
     let title_by_number: HashMap<u64, String> = issues
         .iter()
         .map(|issue| (issue.number, issue.title.clone()))
         .collect();
+    let ref_by_number: HashMap<u64, IssueRef> = issues
+        .iter()
+        .map(|issue| {
+            (
+                issue.number,
+                IssueRef {
+                    number: issue.number,
+                    url: issue.url.clone(),
+                },
+            )
+        })
+        .collect();
 
     issues
         .into_iter()
-        .map(|issue| resolve_issue(issue, &open_numbers, &title_by_number))
+        .map(|issue| resolve_issue(issue, &ref_by_number, &title_by_number))
         .collect()
 }
 
@@ -244,7 +256,7 @@ pub fn resolve_board(issues: Vec<RawIssue>) -> Vec<RawSlice> {
 /// falling back to its prose references resolved against the fetched board.
 fn resolve_issue(
     issue: RawIssue,
-    open_numbers: &HashSet<u64>,
+    ref_by_number: &HashMap<u64, IssueRef>,
     title_by_number: &HashMap<u64, String>,
 ) -> RawSlice {
     let prd_title = match issue.native_parent {
@@ -255,19 +267,27 @@ fn resolve_issue(
             .and_then(|number| title_by_number.get(&number).cloned()),
     };
 
-    let open_blocker_count = if issue.native_blocker_states.is_empty() {
+    let blockers = if issue.native_blockers.is_empty() {
+        // Prose fallback: resolve each referenced number against the fetched
+        // open set, dropping closed/absent references that are not present.
         issue
             .prose
             .blocked_by
             .iter()
-            .filter(|number| open_numbers.contains(number))
-            .count() as u32
+            .filter_map(|number| ref_by_number.get(number).cloned())
+            .collect()
     } else {
+        // Native links carry their own number + url + state; keep only the open
+        // ones, which are the blockers that make this Slice Blocked.
         issue
-            .native_blocker_states
-            .iter()
-            .filter(|state| state.as_str() == "OPEN")
-            .count() as u32
+            .native_blockers
+            .into_iter()
+            .filter(|blocker| blocker.state == "OPEN")
+            .map(|blocker| IssueRef {
+                number: blocker.number,
+                url: blocker.url,
+            })
+            .collect()
     };
 
     RawSlice {
@@ -278,7 +298,7 @@ fn resolve_issue(
         prd_title,
         assignee: issue.assignee,
         has_open_linked_pr: issue.has_open_linked_pr,
-        open_blocker_count,
+        blockers,
     }
 }
 
@@ -306,11 +326,15 @@ fn map_issue(node: IssueNode) -> RawIssue {
         native_parent: node.parent.map(|parent| NativeParent {
             title: parent.title,
         }),
-        native_blocker_states: node
+        native_blockers: node
             .blocked_by
             .nodes
             .into_iter()
-            .map(|blocker| blocker.state)
+            .map(|blocker| NativeBlocker {
+                number: blocker.number,
+                url: blocker.url,
+                state: blocker.state,
+            })
             .collect(),
         prose: parse_prose(&node.body),
     }
@@ -326,8 +350,17 @@ pub struct RawIssue {
     assignee: Option<String>,
     has_open_linked_pr: bool,
     native_parent: Option<NativeParent>,
-    native_blocker_states: Vec<String>,
+    native_blockers: Vec<NativeBlocker>,
     prose: ProseLinks,
+}
+
+/// A native "blocked by" dependency, with the reference and state needed to keep
+/// only the open blockers and render them as clickable badges.
+#[derive(Debug)]
+struct NativeBlocker {
+    number: u64,
+    url: String,
+    state: String,
 }
 
 /// The native sub-issue parent of an issue, carrying the PRD title to tag with.
@@ -382,7 +415,7 @@ struct IssueNode {
     body: String,
     assignees: LoginConnection,
     parent: Option<ParentIssue>,
-    blocked_by: StateConnection,
+    blocked_by: BlockerConnection,
     closed_by_pull_requests_references: StateConnection,
 }
 
@@ -408,5 +441,17 @@ struct StateConnection {
 
 #[derive(Deserialize)]
 struct StateNode {
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct BlockerConnection {
+    nodes: Vec<BlockerNode>,
+}
+
+#[derive(Deserialize)]
+struct BlockerNode {
+    number: u64,
+    url: String,
     state: String,
 }

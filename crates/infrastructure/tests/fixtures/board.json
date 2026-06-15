@@ -81,9 +81,13 @@
             "blockedBy": {
               "nodes": [
                 {
+                  "number": 4,
+                  "url": "https://github.com/funkode-io/zfirot/issues/4",
                   "state": "OPEN"
                 },
                 {
+                  "number": 10,
+                  "url": "https://github.com/funkode-io/zfirot/issues/10",
                   "state": "CLOSED"
                 }
               ]
@@ -104,6 +108,8 @@
             "blockedBy": {
               "nodes": [
                 {
+                  "number": 11,
+                  "url": "https://github.com/funkode-io/zfirot/issues/11",
                   "state": "CLOSED"
                 }
               ]
