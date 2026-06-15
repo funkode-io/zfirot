@@ -27,5 +27,8 @@ dist/
 # Node / Tailwind toolchain
 node_modules/
 
+# Local environment (GITHUB_TOKEN etc.); .env.example is committed
+.env
+
 # Editor
 .vscode/

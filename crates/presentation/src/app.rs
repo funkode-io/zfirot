@@ -1,11 +1,10 @@
-//! Root component: loads the board (via a fake port for now) and renders it.
+//! Root component: loads the board from the wired GitHub port and renders it.
 
-use application::BoardService;
 use dioxus::prelude::*;
-use domain::{RepoRef, Slice, SliceState};
-use infrastructure::FakeGitHubPort;
+use domain::{Slice, SliceState};
 
-use crate::components::{state_badge_class, state_label, BoardColumn};
+use crate::components::{state_badge_class, state_label, BoardColumn, ErrorBanner};
+use crate::state::Boot;
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
 /// Build it with `make css` (runs `npm run build:css` in crates/presentation).
@@ -13,10 +12,15 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 #[component]
 pub fn App() -> Element {
-    let board = use_resource(|| async {
-        let service = BoardService::new(FakeGitHubPort);
-        let repo = RepoRef::new("funkode-io", "zfirot");
-        service.load_board(&repo).await
+    let boot = use_context::<Boot>();
+    let board = use_resource(move || {
+        let boot = boot.clone();
+        async move {
+            match boot {
+                Boot::Ready(state) => state.load_board().await,
+                Boot::Failed(message) => Err(domain::AppError::unauthorized(message)),
+            }
+        }
     });
 
     rsx! {
@@ -34,7 +38,7 @@ pub fn App() -> Element {
                     Board { slices: slices.clone() }
                 },
                 Some(Err(error)) => rsx! {
-                    div { class: "alert alert-error", "{error}" }
+                    ErrorBanner { message: error.to_string() }
                 },
                 None => rsx! {
                     span { class: "loading loading-spinner loading-lg" }

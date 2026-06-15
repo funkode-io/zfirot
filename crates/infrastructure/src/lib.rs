@@ -1,12 +1,16 @@
 //! Infrastructure layer: adapters that implement the application's port traits.
 //!
-//! For the walking skeleton this provides a [`FakeGitHubPort`] returning canned
-//! data so the board can render end-to-end without GitHub access. The real
-//! GraphQL adapter arrives in a later slice.
+//! [`GitHubClient`] is the real GraphQL adapter. [`FakeGitHubPort`] returns
+//! canned data so the board can render end-to-end (and tests can run) without
+//! GitHub access.
 
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{AppResult, RawSlice, RepoRef, Slice};
+
+mod github;
+
+pub use github::{parse_response, GitHubClient};
 
 /// A fake [`GitHubPort`] that returns a fixed set of Slices.
 #[derive(Debug, Default, Clone, Copy)]
