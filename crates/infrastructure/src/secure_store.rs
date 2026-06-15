@@ -59,7 +59,10 @@ impl SecureStorePort for KeyringSecureStore {
 
     async fn load_token(&self) -> AppResult<Option<GitHubToken>> {
         match self.entry()?.get_password() {
-            Ok(secret) => Ok(Some(GitHubToken::from_stored(secret))),
+            // Re-validate the stored secret: a malformed value (corrupted or
+            // written by another tool) is treated as "signed out" rather than
+            // flowing through to fail later in HTTP header construction.
+            Ok(secret) => Ok(GitHubToken::parse(secret).ok()),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(err) => Err(
                 AppError::internal("Could not read the Personal Access Token.")

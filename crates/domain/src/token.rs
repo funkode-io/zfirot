@@ -32,11 +32,6 @@ impl GitHubToken {
         Ok(Self(trimmed))
     }
 
-    /// Wrap an already-validated secret read back from the secure store.
-    pub fn from_stored(secret: impl Into<String>) -> Self {
-        Self(secret.into())
-    }
-
     /// The raw secret, for authorising requests. Treat the result as sensitive.
     pub fn expose(&self) -> &str {
         &self.0
