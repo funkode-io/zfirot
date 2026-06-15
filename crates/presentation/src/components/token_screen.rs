@@ -4,9 +4,14 @@ use dioxus::prelude::*;
 /// Token and it is emitted via `on_submit`. Callback-only — it never touches the
 /// secure store or GitHub; the page wires it to the application use-cases. An
 /// optional `error` (e.g. an invalid or insufficient-permission token) is shown
-/// inline.
+/// inline. While `saving` is set the submit is in flight: the button shows a
+/// spinner and is disabled so the token is not validated twice.
 #[component]
-pub fn TokenScreen(on_submit: EventHandler<String>, error: Option<String>) -> Element {
+pub fn TokenScreen(
+    on_submit: EventHandler<String>,
+    error: Option<String>,
+    #[props(default)] saving: bool,
+) -> Element {
     let mut token = use_signal(String::new);
     let is_blank = token.read().trim().is_empty();
 
@@ -50,9 +55,14 @@ pub fn TokenScreen(on_submit: EventHandler<String>, error: Option<String>) -> El
                     div { class: "card-actions justify-end mt-2",
                         button {
                             class: "btn btn-primary",
-                            disabled: is_blank,
+                            disabled: is_blank || saving,
                             onclick: move |_| on_submit.call(token.read().clone()),
-                            "Save token"
+                            if saving {
+                                span { class: "loading loading-spinner" }
+                                "Validating…"
+                            } else {
+                                "Save token"
+                            }
                         }
                     }
                 }

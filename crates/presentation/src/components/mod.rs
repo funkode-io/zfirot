@@ -10,6 +10,7 @@ mod home_screen;
 mod other_issue_card;
 mod prd_lane;
 mod slice_card;
+mod spinner;
 mod token_screen;
 
 pub use board_column::BoardColumn;
@@ -18,6 +19,7 @@ pub use home_screen::HomeScreen;
 pub use other_issue_card::OtherIssueCard;
 pub use prd_lane::PrdLane;
 pub use slice_card::SliceCard;
+pub use spinner::{LoadingScreen, Spinner};
 pub use token_screen::TokenScreen;
 
 use domain::SliceState;

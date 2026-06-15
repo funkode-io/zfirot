@@ -10,7 +10,9 @@ use application::{AuthService, ClassifiedBoard, OtherIssue, ProjectsRefresh, Sec
 use dioxus::prelude::*;
 use domain::{group_into_lanes, AppErrorKind, GitHubToken, Project, RepoRef, Slice};
 
-use crate::components::{ErrorBanner, HomeScreen, OtherIssueCard, PrdLane, TokenScreen};
+use crate::components::{
+    ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner, TokenScreen,
+};
 use crate::state::{
     assign_self, cached_projects, last_opened, open_project, refresh_projects,
     refresh_recent_projects, secure_store, AppState,
@@ -73,6 +75,10 @@ pub fn App() -> Element {
     // home screen, not on every `reload` bump. Reset when the user navigates
     // back to Home so returning revalidates again.
     let mut revalidated = use_signal(|| false);
+    // True while a freshly-pasted token is being validated and persisted. This
+    // save is a mutation, not part of the read-only `view` resource, so it needs
+    // its own in-flight flag to drive the spinner on the submit button.
+    let mut saving = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -108,6 +114,7 @@ pub fn App() -> Element {
 
     let on_submit = move |raw: String| {
         spawn(async move {
+            saving.set(true);
             let auth = AuthService::new(secure_store());
             match auth.save_token(&raw).await {
                 Ok(()) => {
@@ -116,6 +123,7 @@ pub fn App() -> Element {
                 }
                 Err(error) => token_error.set(Some(error.to_string())),
             }
+            saving.set(false);
         });
     };
 
@@ -137,23 +145,53 @@ pub fn App() -> Element {
         reload += 1;
     };
 
+    // The view resource keeps its previous value while it re-resolves, so a bare
+    // `read()` would leave stale content (or a blank first paint) on screen with
+    // no sign that work is in flight. Reading its state lets every async board /
+    // home transition show a spinner instead.
+    let pending = matches!(*view.state().read(), UseResourceState::Pending);
+
     rsx! {
         document::Title { "Zfirot" }
         document::Stylesheet { href: TAILWIND_CSS }
 
-        match &*view.read_unchecked() {
-            // No token yet, or a stored token was rejected: show the paste-token
-            // screen. A fresh submit error takes precedence over a stale reject
-            // reason carried by the view.
-            Some(View::NeedToken { reason }) => rsx! {
-                TokenScreen { error: token_error().or_else(|| reason.clone()), on_submit }
+        match (&*view.read_unchecked(), pending, nav()) {
+            // A specific project's board is (re)loading: opening it from the home
+            // screen, reopening on launch, or re-polling after claiming a Slice.
+            // Show the board chrome with a spinner so the transition has feedback
+            // instead of leaving the previous screen frozen.
+            (_, true, Nav::Project(repo)) => rsx! {
+                BoardShell { repo: repo.to_string(), on_home,
+                    div { class: "flex justify-center py-16",
+                        Spinner { label: "Loading board…" }
+                    }
+                }
             },
-            // Token present but no project open: show recent projects.
-            Some(View::Home { projects, .. }) => rsx! {
+            // Token present but no project open: show recent projects. Kept
+            // visible while the list silently revalidates (stale-while-revalidate)
+            // so the background refresh does not flash a spinner.
+            (Some(View::Home { projects, .. }), ..) => rsx! {
                 HomeScreen { projects: projects.clone(), on_open }
             },
+            // Any other in-flight transition with no stale screen worth keeping —
+            // the first launch resolve, or re-resolving after a token was saved —
+            // shows a full-screen spinner rather than a frozen or blank screen.
+            (_, true, _) => rsx! {
+                LoadingScreen { label: "Loading…" }
+            },
+            // No token yet, or a stored token was rejected: show the paste-token
+            // screen. A fresh submit error takes precedence over a stale reject
+            // reason carried by the view. `saving` drives the submit spinner while
+            // a freshly-pasted token is validated.
+            (Some(View::NeedToken { reason }), ..) => rsx! {
+                TokenScreen {
+                    error: token_error().or_else(|| reason.clone()),
+                    saving: saving(),
+                    on_submit,
+                }
+            },
             // Token present and the board loaded.
-            Some(View::Board { repo, board }) => {
+            (Some(View::Board { repo, board }), ..) => {
                 // Claim the Slice on GitHub, then re-poll so the now-assigned
                 // Slice derives Wip and leaves Ready. On failure the board is
                 // left unchanged and the error is surfaced above it.
@@ -182,15 +220,13 @@ pub fn App() -> Element {
                     }
                 }
             }
-            Some(View::Error(message)) => rsx! {
+            (Some(View::Error(message)), ..) => rsx! {
                 BoardShell { on_home,
                     ErrorBanner { message: message.clone() }
                 }
             },
-            None => rsx! {
-                div { class: "min-h-screen bg-base-200 grid place-items-center",
-                    span { class: "loading loading-spinner loading-lg" }
-                }
+            (None, ..) => rsx! {
+                LoadingScreen { label: "Loading…" }
             },
         }
     }
