@@ -4,11 +4,13 @@
 //! of truth). This crate has no dependencies on other layers.
 
 mod error;
+mod prose;
 mod repo;
 mod slice;
 mod token;
 
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
+pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
 pub use slice::{RawSlice, Slice, SliceState};
 pub use token::GitHubToken;

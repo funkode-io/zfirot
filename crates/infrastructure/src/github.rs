@@ -1,17 +1,20 @@
 //! The real [`GitHubPort`] adapter: one GraphQL query per board load.
 //!
-//! Relationships are read from GitHub's **native** links only — the sub-issue
-//! `parent` for the PRD, and `blockedBy` dependencies for the Blocked state. A
-//! prose fallback (parsing `## Parent` / `## Blocked by` issue bodies) is a
-//! separate slice. The HTTP boundary is kept thin; the payload-to-[`RawSlice`]
-//! projection lives in the pure [`parse_response`] function so it is testable
-//! offline against a recorded fixture.
+//! Relationships are read from GitHub's **native** links first — the sub-issue
+//! `parent` for the PRD, and `blockedBy` dependencies for the Blocked state —
+//! and fall back to parsing the issue body's `## Parent` / `## Blocked by` prose
+//! when those native links are absent. Prose references are resolved against the
+//! issues fetched in the same load, so a prose parent yields the real PRD title
+//! and only prose blockers that are still open count toward Blocked. The HTTP
+//! boundary is kept thin; the payload projection lives in the pure
+//! [`parse_response`] / [`resolve_board`] functions so it is testable offline.
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AppError, AppResult, RawSlice, RepoRef, Slice};
+use domain::{parse_prose, AppError, AppResult, ProseLinks, RawSlice, RepoRef, Slice};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 
@@ -25,6 +28,8 @@ query Board($owner: String!, $name: String!, $cursor: String) {
       nodes {
         number
         title
+        url
+        body
         assignees(first: 1) { nodes { login } }
         parent { title }
         blockedBy(first: 50) { nodes { state } }
@@ -112,20 +117,23 @@ impl GitHubClient {
 #[async_trait]
 impl GitHubPort for GitHubClient {
     async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        let mut raw = Vec::new();
+        let mut issues = Vec::new();
         let mut cursor: Option<String> = None;
 
         loop {
             let body = self.fetch_page(repo, cursor.as_deref()).await?;
             let (page, next) = parse_response(&body)?;
-            raw.extend(page);
+            issues.extend(page);
             match next {
                 Some(end) => cursor = Some(end),
                 None => break,
             }
         }
 
-        Ok(raw.into_iter().map(RawSlice::into_slice).collect())
+        Ok(resolve_board(issues)
+            .into_iter()
+            .map(RawSlice::into_slice)
+            .collect())
     }
 }
 
@@ -156,9 +164,10 @@ fn status_error(status: reqwest::StatusCode, response: &reqwest::Response) -> Ap
     }
 }
 
-/// Parse a GraphQL response body into a page of [`RawSlice`]s and the cursor of
-/// the next page (if any). Pure and offline: the primary test seam.
-pub fn parse_response(body: &str) -> AppResult<(Vec<RawSlice>, Option<String>)> {
+/// Parse a GraphQL response body into a page of [`RawIssue`]s and the cursor of
+/// the next page (if any). Pure and offline: the primary test seam. Prose
+/// references are resolved later by [`resolve_board`], once every page is in.
+pub fn parse_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<String>)> {
     let response: GraphQlResponse = serde_json::from_str(body).map_err(|err| {
         AppError::internal("GitHub returned a malformed response")
             .with_operation("parse_response")
@@ -166,18 +175,31 @@ pub fn parse_response(body: &str) -> AppResult<(Vec<RawSlice>, Option<String>)> 
     })?;
 
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        let not_found = errors.iter().any(|error| {
+            error.error_type.as_deref() == Some("NOT_FOUND")
+                || error
+                    .message
+                    .to_lowercase()
+                    .contains("could not resolve to a repository")
+        });
         let message = errors
             .into_iter()
             .map(|error| error.message)
             .collect::<Vec<_>>()
             .join("; ");
         let lowered = message.to_lowercase();
-        let error = if lowered.contains("rate limit") {
-            AppError::rate_limited("GitHub rate limit exceeded").with_context("errors", message)
+        // A repository GitHub reports via the `errors` array (e.g. private or
+        // renamed) is still a NotFound, not an Internal failure.
+        let error = if not_found {
+            AppError::not_found("Repository not found or not visible to the token")
+        } else if lowered.contains("rate limit") {
+            AppError::rate_limited("GitHub rate limit exceeded")
         } else {
-            AppError::internal("GitHub reported a query error").with_context("errors", message)
+            AppError::internal("GitHub reported a query error")
         };
-        return Err(error.with_operation("parse_response"));
+        return Err(error
+            .with_operation("parse_response")
+            .with_context("errors", message));
     }
 
     let repository = response
@@ -189,37 +211,91 @@ pub fn parse_response(body: &str) -> AppResult<(Vec<RawSlice>, Option<String>)> 
         })?;
 
     let issues = repository.issues;
-    let slices = issues.nodes.into_iter().map(map_issue).collect();
+    let raw = issues.nodes.into_iter().map(map_issue).collect();
     let next = if issues.page_info.has_next_page {
         issues.page_info.end_cursor
     } else {
         None
     };
 
-    Ok((slices, next))
+    Ok((raw, next))
 }
 
-/// Project one GraphQL issue node into a [`RawSlice`]. Only open issues are
-/// queried, so `closed` is always `false` here.
-fn map_issue(node: IssueNode) -> RawSlice {
-    let open_blocker_count = node
-        .blocked_by
-        .nodes
+/// Resolve native-or-prose relationships across a whole board into [`RawSlice`]s.
+///
+/// Native links win; when an issue has none, its parsed prose references are
+/// resolved against the issues fetched in the same load: a prose parent yields
+/// that issue's title for the PRD tag, and a prose blocker counts toward Blocked
+/// only if it is still open (open issues are the only ones in the fetched set).
+pub fn resolve_board(issues: Vec<RawIssue>) -> Vec<RawSlice> {
+    let open_numbers: HashSet<u64> = issues.iter().map(|issue| issue.number).collect();
+    let title_by_number: HashMap<u64, String> = issues
         .iter()
-        .filter(|issue| issue.state == "OPEN")
-        .count() as u32;
+        .map(|issue| (issue.number, issue.title.clone()))
+        .collect();
 
+    issues
+        .into_iter()
+        .map(|issue| resolve_issue(issue, &open_numbers, &title_by_number))
+        .collect()
+}
+
+/// Project one [`RawIssue`] into a [`RawSlice`], preferring native links and
+/// falling back to its prose references resolved against the fetched board.
+fn resolve_issue(
+    issue: RawIssue,
+    open_numbers: &HashSet<u64>,
+    title_by_number: &HashMap<u64, String>,
+) -> RawSlice {
+    let prd_title = match issue.native_parent {
+        Some(parent) => Some(parent.title),
+        None => issue
+            .prose
+            .parent
+            .and_then(|number| title_by_number.get(&number).cloned()),
+    };
+
+    let open_blocker_count = if issue.native_blocker_states.is_empty() {
+        issue
+            .prose
+            .blocked_by
+            .iter()
+            .filter(|number| open_numbers.contains(number))
+            .count() as u32
+    } else {
+        issue
+            .native_blocker_states
+            .iter()
+            .filter(|state| state.as_str() == "OPEN")
+            .count() as u32
+    };
+
+    RawSlice {
+        number: issue.number,
+        title: issue.title,
+        url: issue.url,
+        closed: false,
+        prd_title,
+        assignee: issue.assignee,
+        has_open_linked_pr: issue.has_open_linked_pr,
+        open_blocker_count,
+    }
+}
+
+/// Project one GraphQL issue node into a [`RawIssue`]: its native facts plus the
+/// prose relationships parsed from its body, to be resolved by [`resolve_board`].
+/// Only open issues are queried, so a closed issue never reaches this mapping.
+fn map_issue(node: IssueNode) -> RawIssue {
     let has_open_linked_pr = node
         .closed_by_pull_requests_references
         .nodes
         .iter()
         .any(|pr| pr.state == "OPEN");
 
-    RawSlice {
+    RawIssue {
         number: node.number,
         title: node.title,
-        closed: false,
-        prd_title: node.parent.map(|parent| parent.title),
+        url: node.url,
         assignee: node
             .assignees
             .nodes
@@ -227,8 +303,37 @@ fn map_issue(node: IssueNode) -> RawSlice {
             .next()
             .map(|user| user.login),
         has_open_linked_pr,
-        open_blocker_count,
+        native_parent: node.parent.map(|parent| NativeParent {
+            title: parent.title,
+        }),
+        native_blocker_states: node
+            .blocked_by
+            .nodes
+            .into_iter()
+            .map(|blocker| blocker.state)
+            .collect(),
+        prose: parse_prose(&node.body),
     }
+}
+
+/// A single issue's native facts plus the prose relationships parsed from its
+/// body, before references are resolved against the rest of the board.
+#[derive(Debug)]
+pub struct RawIssue {
+    number: u64,
+    title: String,
+    url: String,
+    assignee: Option<String>,
+    has_open_linked_pr: bool,
+    native_parent: Option<NativeParent>,
+    native_blocker_states: Vec<String>,
+    prose: ProseLinks,
+}
+
+/// The native sub-issue parent of an issue, carrying the PRD title to tag with.
+#[derive(Debug)]
+struct NativeParent {
+    title: String,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +345,8 @@ struct GraphQlResponse {
 #[derive(Deserialize)]
 struct GraphQlError {
     message: String,
+    #[serde(rename = "type")]
+    error_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +378,8 @@ struct PageInfo {
 struct IssueNode {
     number: u64,
     title: String,
+    url: String,
+    body: String,
     assignees: LoginConnection,
     parent: Option<ParentIssue>,
     blocked_by: StateConnection,

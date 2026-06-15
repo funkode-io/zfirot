@@ -12,7 +12,7 @@ use domain::{AppResult, RawSlice, RepoRef, Slice};
 mod github;
 mod secure_store;
 
-pub use github::{parse_response, GitHubClient};
+pub use github::{parse_response, resolve_board, GitHubClient, RawIssue};
 pub use secure_store::{FakeSecureStore, KeyringSecureStore};
 
 /// A fake [`GitHubPort`] that returns a fixed set of Slices.
@@ -46,6 +46,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 4,
             title: "Live GitHub read: real board for a hardcoded repo".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/4".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: None,
@@ -55,6 +56,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 5,
             title: "Two-tier issue classification".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/5".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: None,
@@ -65,6 +67,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 3,
             title: "Derive SliceState as a pure domain function".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/3".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: Some("carlos-verdes".to_string()),
@@ -75,6 +78,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 6,
             title: "PAT authentication via the OS secure store".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/6".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: None,
@@ -84,6 +88,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 7,
             title: "Home screen: recent projects, reopen last".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/7".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: None,
@@ -94,6 +99,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 2,
             title: "Walking skeleton".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/2".to_string(),
             closed: true,
             prd_title: prd,
             assignee: Some("carlos-verdes".to_string()),

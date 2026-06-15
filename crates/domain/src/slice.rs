@@ -31,6 +31,8 @@ pub struct Slice {
     /// The GitHub issue number.
     pub number: u64,
     pub title: String,
+    /// The issue's URL on GitHub, for opening it in a browser.
+    pub url: String,
     /// Title of the parent PRD, when known.
     pub prd_title: Option<String>,
     /// GitHub login of the assignee, when assigned.
@@ -46,6 +48,8 @@ pub struct RawSlice {
     /// The GitHub issue number.
     pub number: u64,
     pub title: String,
+    /// The issue's URL on GitHub, for opening it in a browser.
+    pub url: String,
     /// `true` when the issue is closed; a closed Slice is Done and hidden.
     pub closed: bool,
     /// Title of the parent PRD, when known.
@@ -65,6 +69,7 @@ impl RawSlice {
         Slice {
             number: self.number,
             title: self.title,
+            url: self.url,
             prd_title: self.prd_title,
             assignee: self.assignee,
             state,
@@ -102,6 +107,7 @@ mod tests {
         RawSlice {
             number: 1,
             title: "A Slice".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/1".to_string(),
             closed: false,
             prd_title: Some("A PRD".to_string()),
             assignee: None,
@@ -223,6 +229,7 @@ mod tests {
 
         assert_eq!(slice.number, 42);
         assert_eq!(slice.title, "Wire the thing");
+        assert_eq!(slice.url, "https://github.com/funkode-io/zfirot/issues/1");
         assert_eq!(slice.prd_title.as_deref(), Some("A PRD"));
         assert_eq!(slice.assignee.as_deref(), Some("octocat"));
         assert_eq!(slice.state, SliceState::Wip);
