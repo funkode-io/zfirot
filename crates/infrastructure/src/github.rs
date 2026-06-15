@@ -611,6 +611,7 @@ pub fn parse_projects_response(body: &str) -> AppResult<(Vec<Project>, Option<St
 }
 
 /// The resolved node IDs the assign-self mutation needs.
+#[cfg_attr(test, derive(Debug))]
 struct AssignIds {
     assignable_id: String,
     assignee_id: String,
@@ -670,8 +671,9 @@ fn parse_assign_mutation(body: &str) -> AppAction {
 ///
 /// A `FORBIDDEN` here almost always means the fine-grained token can *read*
 /// issues (the board loaded) but lacks *write* access to assign them, so the
-/// message names the exact permission to grant. GitHub's own text is appended
-/// so the underlying reason is visible without digging into the logs.
+/// message names the exact permission to grant. GitHub's own text is kept out
+/// of the user-facing message (it can carry backend detail) and attached as
+/// diagnostic `errors` context instead.
 fn assign_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError {
     let forbidden = errors.iter().any(|error| {
         matches!(error.error_type.as_deref(), Some("FORBIDDEN"))
@@ -688,12 +690,11 @@ fn assign_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError 
         .join("; ");
     let lowered = message.to_lowercase();
     let error = if forbidden {
-        AppError::forbidden(format!(
+        AppError::forbidden(
             "GitHub denied the assignment. Your fine-grained token needs the \
              repository \"Issues\" permission set to \"Read and write\" (or \
-             \"Pull requests: Read and write\" if the Slice is a pull request). \
-             GitHub said: {message}"
-        ))
+             \"Pull requests: Read and write\" if the Slice is a pull request).",
+        )
     } else if lowered.contains("rate limit") {
         AppError::rate_limited("GitHub rate limit exceeded")
     } else if lowered.contains("could not resolve") || lowered.contains("not_found") {
@@ -1122,4 +1123,96 @@ struct ParentRepositoryNode {
 #[derive(Deserialize)]
 struct RepositoryOwner {
     login: String,
+}
+
+#[cfg(test)]
+mod tests {
+    //! Offline tests for the assign-self response/error parsers, pinned against
+    //! recorded GraphQL bodies so a GitHub schema or message change can't break
+    //! assign-self without a test catching it.
+    use super::*;
+    use domain::AppErrorKind;
+
+    #[test]
+    fn parse_assign_ids_extracts_viewer_and_issue_ids() {
+        let body = r#"{
+            "data": {
+                "viewer": { "id": "VIEWER_1" },
+                "repository": { "issue": { "id": "ISSUE_42" } }
+            }
+        }"#;
+
+        let ids = parse_assign_ids(body, 42).expect("ids should parse");
+
+        assert_eq!(ids.assignee_id, "VIEWER_1");
+        assert_eq!(ids.assignable_id, "ISSUE_42");
+    }
+
+    #[test]
+    fn parse_assign_ids_missing_issue_is_not_found_with_context() {
+        let body = r#"{
+            "data": { "viewer": { "id": "VIEWER_1" }, "repository": { "issue": null } }
+        }"#;
+
+        let error = parse_assign_ids(body, 7).expect_err("a missing issue should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+        assert!(
+            format!("{error:?}").contains("issue=7"),
+            "the issue number should be attached as context: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_assign_mutation_succeeds_when_no_errors() {
+        let body = r#"{ "data": { "addAssigneesToAssignable": { "clientMutationId": null } } }"#;
+
+        parse_assign_mutation(body).expect("a clean mutation response should be Ok");
+    }
+
+    #[test]
+    fn assign_error_forbidden_is_actionable_and_hides_github_text() {
+        let body = r#"{
+            "data": null,
+            "errors": [
+                { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token" }
+            ]
+        }"#;
+
+        let error = parse_assign_mutation(body).expect_err("a FORBIDDEN response should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::Forbidden);
+        // The user-facing message names the permission to grant...
+        let display = error.to_string();
+        assert!(
+            display.contains("Read and write"),
+            "the message should name the permission to grant: {display}"
+        );
+        // ...but never leaks GitHub's raw backend text into the UI message.
+        assert!(
+            !display.contains("personal access token"),
+            "GitHub's raw text must not reach the user-facing message: {display}"
+        );
+        // The raw text is kept for diagnostics in the error context instead.
+        assert!(
+            format!("{error:?}").contains("personal access token"),
+            "GitHub's raw text should be attached as diagnostic context: {error:?}"
+        );
+    }
+
+    #[test]
+    fn assign_error_maps_rate_limit_and_resolution_failures() {
+        let rate_limited = r#"{ "errors": [ { "message": "API rate limit exceeded" } ] }"#;
+        assert_eq!(
+            parse_assign_mutation(rate_limited).unwrap_err().kind(),
+            AppErrorKind::RateLimited
+        );
+
+        let unresolved =
+            r#"{ "errors": [ { "message": "Could not resolve to a node with the global id" } ] }"#;
+        assert_eq!(
+            parse_assign_mutation(unresolved).unwrap_err().kind(),
+            AppErrorKind::NotFound
+        );
+    }
 }

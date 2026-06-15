@@ -113,31 +113,28 @@ pub fn App() -> Element {
             },
             // Token present and the board loaded.
             Some(View::Board { repo, board }) => {
+                // Claim the Slice on GitHub, then re-poll so the now-assigned
+                // Slice derives Wip and leaves Ready. On failure the board is
+                // left unchanged and the error is surfaced above it.
                 let assign_repo = repo.clone();
+                let on_assign = move |number: u64| {
+                    let repo = assign_repo.clone();
+                    spawn(async move {
+                        match assign_self(&repo, number).await {
+                            Ok(()) => {
+                                assign_error.set(None);
+                                reload += 1;
+                            }
+                            Err(error) => assign_error.set(Some(error.to_string())),
+                        }
+                    });
+                };
                 rsx! {
                     BoardShell { repo: repo.to_string(), on_home,
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
                         }
-                        Board {
-                            slices: board.slices.clone(),
-                            on_assign: move |number: u64| {
-                                // Claim the Slice on GitHub, then re-poll so the
-                                // now-assigned Slice derives Wip and leaves Ready.
-                                // On failure the board is left unchanged and the
-                                // error is surfaced above it.
-                                let repo = assign_repo.clone();
-                                spawn(async move {
-                                    match assign_self(&repo, number).await {
-                                        Ok(()) => {
-                                            assign_error.set(None);
-                                            reload += 1;
-                                        }
-                                        Err(error) => assign_error.set(Some(error.to_string())),
-                                    }
-                                });
-                            },
-                        }
+                        Board { slices: board.slices.clone(), on_assign }
                         if !board.other.is_empty() {
                             OtherIssues { issues: board.other.clone() }
                         }
