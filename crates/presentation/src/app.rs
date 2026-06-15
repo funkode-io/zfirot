@@ -6,13 +6,14 @@
 //! discarded and the user is routed back to the paste-token screen to enter a
 //! new one, with the reason shown inline.
 
-use application::{AuthService, ClassifiedBoard, OtherIssue, SecureStorePort};
+use application::{AuthService, ClassifiedBoard, OtherIssue, ProjectsRefresh, SecureStorePort};
 use dioxus::prelude::*;
 use domain::{group_into_lanes, AppErrorKind, GitHubToken, Project, RepoRef, Slice};
 
 use crate::components::{ErrorBanner, HomeScreen, OtherIssueCard, PrdLane, TokenScreen};
 use crate::state::{
-    assign_self, last_opened, open_project, recent_projects, secure_store, AppState,
+    assign_self, cached_projects, last_opened, open_project, refresh_projects,
+    refresh_recent_projects, secure_store, AppState,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -65,6 +66,21 @@ pub fn App() -> Element {
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
         resolve_view(nav()).await
+    });
+
+    // Stale-while-revalidate: once the home screen has painted from the cache,
+    // refresh the recent-projects list from GitHub in the background and
+    // re-resolve the view only when it changed (an unchanged refresh is a no-op,
+    // so there is no flicker). A failed refresh leaves the cached list in place.
+    use_effect(move || {
+        let on_home = matches!(view.read().as_ref(), Some(View::Home(_)));
+        if on_home {
+            spawn(async move {
+                if let Ok(ProjectsRefresh::Changed(_)) = refresh_recent_projects().await {
+                    reload += 1;
+                }
+            });
+        }
     });
 
     let on_submit = move |raw: String| {
@@ -208,12 +224,24 @@ async fn resolve_view(nav: Nav) -> View {
     }
 }
 
-/// The home screen's recent-projects view. A token GitHub rejects while listing
-/// (`Unauthorized`/`Forbidden`) is discarded and routes back to the paste-token
-/// screen, just like the board path; any other failure is a transient error.
+/// The home screen's recent-projects view, with stale-while-revalidate caching:
+/// a warm cache paints instantly (the background refresh in `App` revalidates
+/// it), while a cold cache falls back to a blocking live fetch — shown with the
+/// loading state — that also seeds the cache. A token GitHub rejects while
+/// listing (`Unauthorized`/`Forbidden`) is discarded and routes back to the
+/// paste-token screen, just like the board path; any other failure is transient.
 async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToken) -> View {
-    match recent_projects(token).await {
-        Ok(projects) => View::Home(projects),
+    // Warm cache: render immediately without waiting on GitHub.
+    if let Ok(Some(projects)) = cached_projects().await {
+        return View::Home(projects);
+    }
+    // Cold (or unreadable) cache: block on a live fetch that seeds the cache.
+    match refresh_projects(token).await {
+        Ok(ProjectsRefresh::Changed(projects)) => View::Home(projects),
+        // The cache was populated concurrently and already matches: render it.
+        Ok(ProjectsRefresh::Unchanged) => {
+            View::Home(cached_projects().await.ok().flatten().unwrap_or_default())
+        }
         Err(error) if is_auth_failure(error.kind()) => {
             // A rejected token must not strand the user on an error screen.
             // Discard it (best-effort) and route back to paste a new one.

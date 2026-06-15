@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use application::{
     AuthService, BoardService, ClassifiedBoard, GitHubPort, LastOpenedService, ProjectStorePort,
-    ProjectsService, SecureStorePort,
+    ProjectsRefresh, RecentProjectsService, SecureStorePort,
 };
 use domain::{AppAction, AppResult, GitHubToken, Project, RepoRef};
 #[cfg(debug_assertions)]
@@ -35,11 +35,14 @@ pub fn project_store() -> AppResult<Arc<dyn ProjectStorePort>> {
     Ok(Arc::new(FileProjectStore::new()?))
 }
 
-/// The projects use-case (recent projects) wired from a stored Personal Access
-/// Token. Listing repositories needs GitHub, so it needs a token.
-pub fn projects_from_token(token: &GitHubToken) -> AppResult<ProjectsService<Arc<dyn GitHubPort>>> {
+/// The projects use-case with stale-while-revalidate caching, wired from a
+/// stored Personal Access Token (the live fetch) and the on-device project store
+/// (the cache). Listing repositories needs GitHub, so it needs a token.
+fn recent_projects_service(
+    token: &GitHubToken,
+) -> AppResult<RecentProjectsService<Arc<dyn GitHubPort>, Arc<dyn ProjectStorePort>>> {
     let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
-    Ok(ProjectsService::new(port))
+    Ok(RecentProjectsService::new(port, project_store()?))
 }
 
 /// The last-opened use-cases, wired from the on-device project store. Purely
@@ -88,9 +91,27 @@ impl AppState {
     }
 }
 
-/// The accessible projects, most-recently-pushed first, for the home screen.
-pub async fn recent_projects(token: &GitHubToken) -> AppResult<Vec<Project>> {
-    projects_from_token(token)?.recent_projects().await
+/// The recent-projects list cached on the last successful fetch, for an instant
+/// first paint of the home screen, or `None` on a cold cache. A local store
+/// read: no token or network involved.
+pub async fn cached_projects() -> AppResult<Option<Vec<Project>>> {
+    project_store()?.cached_projects().await
+}
+
+/// Refresh the recent-projects list from GitHub, rewriting the local cache only
+/// when it changed, and report the outcome. The caller holds the resolved token
+/// (e.g. the cold-cache blocking fetch on the home screen).
+pub async fn refresh_projects(token: &GitHubToken) -> AppResult<ProjectsRefresh> {
+    recent_projects_service(token)?.refresh().await
+}
+
+/// Background stale-while-revalidate refresh: resolve the stored token, refresh
+/// the recent-projects list from GitHub, and report whether it changed. Used
+/// after the cached list has already painted, so a failure simply leaves the
+/// cached list in place.
+pub async fn refresh_recent_projects() -> AppResult<ProjectsRefresh> {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    refresh_projects(&token).await
 }
 
 /// The project to reopen on launch, or `None` to show the home screen. A local
