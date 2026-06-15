@@ -12,8 +12,8 @@
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{
-    parse_prose, AppAction, AppError, AppResult, PrdRef, Project, ProseLinks, RawIssue, RawSlice,
-    RepoRef, Slice,
+    parse_prose, AppAction, AppError, AppResult, DependencyRef, PrdRef, Project, ProseLinks,
+    RawIssue, RawSlice, RepoRef, Slice,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -35,7 +35,7 @@ query Board($owner: String!, $name: String!, $cursor: String) {
         body
         assignees(first: 1) { nodes { login } }
         parent { number title url }
-        blockedBy(first: 50) { nodes { state } }
+        blockedBy(first: 50) { nodes { number title url state } }
         closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
       }
     }
@@ -748,10 +748,14 @@ pub fn resolve_board(issues: Vec<IssueData>) -> Vec<RawSlice> {
         })
         .collect();
 
-    issues
+    let mut raws: Vec<RawSlice> = issues
         .into_iter()
         .map(|issue| resolve_issue(issue, &open_numbers, &prd_by_number))
-        .collect()
+        .collect();
+    // The reverse "unblocks" edge is derived across the whole board once every
+    // Slice's blockers are resolved.
+    domain::resolve_unblocks(&mut raws);
+    raws
 }
 
 /// Project one [`IssueData`] into a [`RawSlice`], preferring native links and
@@ -769,19 +773,34 @@ fn resolve_issue(
             .and_then(|number| prd_by_number.get(&number).cloned()),
     };
 
-    let open_blocker_count = if issue.native_blocker_states.is_empty() {
+    let open_blocker_refs = if issue.native_blockers.is_empty() {
+        // No native blockers: fall back to the parsed prose, resolving each
+        // still-open blocker number to its ref (with title) against the board.
         issue
             .prose
             .blocked_by
             .iter()
             .filter(|number| open_numbers.contains(number))
-            .count() as u32
+            .filter_map(|number| {
+                prd_by_number.get(number).map(|prd| DependencyRef {
+                    number: *number,
+                    title: prd.title.clone(),
+                    url: prd.url.clone(),
+                })
+            })
+            .collect()
     } else {
+        // Native links win: keep only the still-open blockers, with their refs.
         issue
-            .native_blocker_states
+            .native_blockers
             .iter()
-            .filter(|state| state.as_str() == "OPEN")
-            .count() as u32
+            .filter(|blocker| blocker.state.as_str() == "OPEN")
+            .map(|blocker| DependencyRef {
+                number: blocker.number,
+                title: blocker.title.clone(),
+                url: blocker.url.clone(),
+            })
+            .collect()
     };
 
     RawSlice {
@@ -792,7 +811,9 @@ fn resolve_issue(
         prd,
         assignee: issue.assignee,
         has_open_linked_pr: issue.has_open_linked_pr,
-        open_blocker_count,
+        blockers: open_blocker_refs,
+        // Filled by `resolve_unblocks` once the whole board is mapped.
+        unblocks: Vec::new(),
     }
 }
 
@@ -822,12 +843,7 @@ fn map_issue(node: IssueNode) -> IssueData {
             title: parent.title,
             url: parent.url,
         }),
-        native_blocker_states: node
-            .blocked_by
-            .nodes
-            .into_iter()
-            .map(|blocker| blocker.state)
-            .collect(),
+        native_blockers: node.blocked_by.nodes,
         prose: parse_prose(&node.body),
     }
 }
@@ -900,7 +916,7 @@ pub struct IssueData {
     assignee: Option<String>,
     has_open_linked_pr: bool,
     native_parent: Option<PrdRef>,
-    native_blocker_states: Vec<String>,
+    native_blockers: Vec<BoardBlocker>,
     prose: ProseLinks,
 }
 
@@ -977,7 +993,7 @@ struct IssueNode {
     body: String,
     assignees: LoginConnection,
     parent: Option<ParentIssue>,
-    blocked_by: StateConnection,
+    blocked_by: BoardBlockerConnection,
     closed_by_pull_requests_references: StateConnection,
 }
 
@@ -1005,6 +1021,21 @@ struct StateConnection {
 
 #[derive(Deserialize)]
 struct StateNode {
+    state: String,
+}
+
+/// A native `blockedBy` dependency on the board query, with the reference the
+/// blocker badges link to plus the state used to drop closed blockers.
+#[derive(Deserialize)]
+struct BoardBlockerConnection {
+    nodes: Vec<BoardBlocker>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BoardBlocker {
+    number: u64,
+    title: String,
+    url: String,
     state: String,
 }
 

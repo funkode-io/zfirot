@@ -87,9 +87,15 @@
             "blockedBy": {
               "nodes": [
                 {
+                  "number": 4,
+                  "title": "Live GitHub read: real board for a hardcoded repo",
+                  "url": "https://github.com/funkode-io/zfirot/issues/4",
                   "state": "OPEN"
                 },
                 {
+                  "number": 7,
+                  "title": "Home screen: recent projects, reopen last",
+                  "url": "https://github.com/funkode-io/zfirot/issues/7",
                   "state": "CLOSED"
                 }
               ]
@@ -110,6 +116,9 @@
             "blockedBy": {
               "nodes": [
                 {
+                  "number": 1,
+                  "title": "PRD: Zfirot desktop dashboard",
+                  "url": "https://github.com/funkode-io/zfirot/issues/1",
                   "state": "CLOSED"
                 }
               ]

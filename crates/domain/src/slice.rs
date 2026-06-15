@@ -27,6 +27,21 @@ impl SliceState {
     pub const BOARD: [SliceState; 3] = [SliceState::Ready, SliceState::Wip, SliceState::Blocked];
 }
 
+/// A reference to a related issue, for rendering a clickable dependency badge on
+/// a card: either a **blocker** (an issue this Slice is blocked by) or an issue
+/// this Slice **unblocks** (the reverse edge). Carries the issue number (shown
+/// on the badge), its title (shown as a tooltip), and its URL (the badge links
+/// to it on GitHub).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyRef {
+    /// The referenced GitHub issue number.
+    pub number: u64,
+    /// The referenced issue's title, shown as the badge tooltip.
+    pub title: String,
+    /// The referenced issue's URL on GitHub, for opening it in a browser.
+    pub url: String,
+}
+
 /// A read model of a GitHub issue that is a Slice of a PRD.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slice {
@@ -40,6 +55,11 @@ pub struct Slice {
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
     pub state: SliceState,
+    /// The still-open issues this Slice is blocked by, for the blocker badges.
+    pub blockers: Vec<DependencyRef>,
+    /// The issues this Slice unblocks (the reverse "blocked by" edge), for the
+    /// unblocks badges. Derived across the board by [`resolve_unblocks`].
+    pub unblocks: Vec<DependencyRef>,
 }
 
 /// Raw, GitHub-shaped facts about a single issue, before its [`SliceState`] is
@@ -60,8 +80,12 @@ pub struct RawSlice {
     pub assignee: Option<String>,
     /// `true` when an open Pull Request is linked via its closing reference.
     pub has_open_linked_pr: bool,
-    /// Number of "blocked by" dependencies that are still open.
-    pub open_blocker_count: u32,
+    /// The still-open "blocked by" dependencies, with their references. A
+    /// non-empty list makes the Slice Blocked.
+    pub blockers: Vec<DependencyRef>,
+    /// The issues this Slice unblocks, derived across the board by
+    /// [`resolve_unblocks`]; empty until then.
+    pub unblocks: Vec<DependencyRef>,
 }
 
 impl RawSlice {
@@ -75,6 +99,8 @@ impl RawSlice {
             prd: self.prd,
             assignee: self.assignee,
             state,
+            blockers: self.blockers,
+            unblocks: self.unblocks,
         }
     }
 
@@ -90,13 +116,46 @@ impl RawSlice {
         if self.closed {
             return SliceState::Done;
         }
-        if self.open_blocker_count > 0 {
+        if !self.blockers.is_empty() {
             return SliceState::Blocked;
         }
         if self.has_open_linked_pr || self.assignee.is_some() {
             return SliceState::Wip;
         }
         SliceState::Ready
+    }
+}
+
+/// Derive each Slice's reverse **"unblocks"** edge from the blocker edges across
+/// the whole board: a Slice unblocks every Slice that lists it as a blocker.
+///
+/// Pure and order-preserving — a Slice's `unblocks` list follows board input
+/// order. Only fetched Slices contribute edges, so references to issues outside
+/// the fetched set (e.g. closed or absent blockers) are naturally omitted.
+pub fn resolve_unblocks(slices: &mut [RawSlice]) {
+    use std::collections::HashMap;
+
+    // For each blocker issue number, the references of the Slices it unblocks
+    // (i.e. the Slices that listed it as a blocker), in board order.
+    let mut unblocks_by_number: HashMap<u64, Vec<DependencyRef>> = HashMap::new();
+    for slice in slices.iter() {
+        let dependent = DependencyRef {
+            number: slice.number,
+            title: slice.title.clone(),
+            url: slice.url.clone(),
+        };
+        for blocker in &slice.blockers {
+            unblocks_by_number
+                .entry(blocker.number)
+                .or_default()
+                .push(dependent.clone());
+        }
+    }
+    for slice in slices.iter_mut() {
+        // Always reset from the current blocker edges (defaulting to empty) so
+        // the derivation is pure: re-running it never leaves stale reverse-edge
+        // data on a Slice that no longer unblocks anything.
+        slice.unblocks = unblocks_by_number.remove(&slice.number).unwrap_or_default();
     }
 }
 
@@ -118,8 +177,20 @@ mod tests {
             }),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 0,
+            blockers: vec![],
+            unblocks: vec![],
         }
+    }
+
+    /// `n` distinct open blocker references, for exercising state derivation.
+    fn blockers(n: u64) -> Vec<DependencyRef> {
+        (0..n)
+            .map(|i| DependencyRef {
+                number: 100 + i,
+                title: format!("Blocker {}", 100 + i),
+                url: format!("https://github.com/funkode-io/zfirot/issues/{}", 100 + i),
+            })
+            .collect()
     }
 
     #[test]
@@ -129,7 +200,7 @@ mod tests {
             closed: bool,
             assignee: Option<&'static str>,
             has_open_linked_pr: bool,
-            open_blocker_count: u32,
+            open_blocker_count: u64,
             expected: SliceState,
         }
 
@@ -205,7 +276,7 @@ mod tests {
                 closed: case.closed,
                 assignee: case.assignee.map(str::to_string),
                 has_open_linked_pr: case.has_open_linked_pr,
-                open_blocker_count: case.open_blocker_count,
+                blockers: blockers(case.open_blocker_count),
                 ..ready_raw()
             };
 
@@ -252,5 +323,104 @@ mod tests {
         };
 
         assert_eq!(raw.into_slice().state, SliceState::Done);
+    }
+
+    /// A blocker reference helper for the reverse-edge tests.
+    fn dep(number: u64) -> DependencyRef {
+        DependencyRef {
+            number,
+            title: format!("Slice {number}"),
+            url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+        }
+    }
+
+    fn raw_with(number: u64, blockers: Vec<DependencyRef>) -> RawSlice {
+        RawSlice {
+            number,
+            title: format!("Slice {number}"),
+            url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+            blockers,
+            ..ready_raw()
+        }
+    }
+
+    /// `resolve_unblocks` fills each Slice's reverse edge from the board's
+    /// blocker edges, in board order, and omits references to issues outside the
+    /// fetched set.
+    #[test]
+    fn resolve_unblocks_derives_the_reverse_edge_across_the_board() {
+        // #4 blocks #6; #6 blocks #9; #9 also lists #99 (absent from the board)
+        // as a blocker, which must not produce any reverse edge.
+        let mut board = vec![
+            raw_with(4, vec![]),
+            raw_with(6, vec![dep(4)]),
+            raw_with(9, vec![dep(6), dep(99)]),
+        ];
+
+        resolve_unblocks(&mut board);
+
+        let unblocks = |number: u64| -> Vec<u64> {
+            board
+                .iter()
+                .find(|s| s.number == number)
+                .unwrap()
+                .unblocks
+                .iter()
+                .map(|d| d.number)
+                .collect()
+        };
+
+        // #4 unblocks #6; #6 unblocks #9; #9 unblocks nothing.
+        assert_eq!(unblocks(4), vec![6]);
+        assert_eq!(unblocks(6), vec![9]);
+        assert_eq!(unblocks(9), Vec::<u64>::new());
+        // The absent blocker #99 produced no reverse edge.
+        assert!(board.iter().all(|s| s.number != 99));
+    }
+
+    /// A Slice blocking several others collects all of them, in board order,
+    /// each carrying the dependent's number and url for the badge link.
+    #[test]
+    fn resolve_unblocks_collects_all_dependents_in_order() {
+        let mut board = vec![
+            raw_with(1, vec![]),
+            raw_with(5, vec![dep(1)]),
+            raw_with(3, vec![dep(1)]),
+        ];
+
+        resolve_unblocks(&mut board);
+
+        let one = board.iter().find(|s| s.number == 1).unwrap();
+        assert_eq!(
+            one.unblocks,
+            vec![dep(5), dep(3)],
+            "dependents follow board input order with their refs"
+        );
+    }
+
+    /// `resolve_unblocks` is pure: re-running it after the blocker edges change
+    /// resets each Slice's reverse edge rather than leaving stale data behind.
+    #[test]
+    fn resolve_unblocks_clears_stale_reverse_edges_on_rerun() {
+        // First pass: #6 lists #4 as a blocker, so #4 unblocks #6.
+        let mut board = vec![raw_with(4, vec![]), raw_with(6, vec![dep(4)])];
+        resolve_unblocks(&mut board);
+        let four = board.iter().find(|s| s.number == 4).unwrap();
+        assert_eq!(four.unblocks, vec![dep(6)]);
+
+        // The blocker edge is removed; re-running must clear #4's reverse edge.
+        board
+            .iter_mut()
+            .find(|s| s.number == 6)
+            .unwrap()
+            .blockers
+            .clear();
+        resolve_unblocks(&mut board);
+
+        let four = board.iter().find(|s| s.number == 4).unwrap();
+        assert!(
+            four.unblocks.is_empty(),
+            "a Slice that no longer blocks anything has no stale reverse edge"
+        );
     }
 }

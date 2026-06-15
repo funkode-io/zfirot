@@ -84,6 +84,8 @@ mod tests {
             prd,
             assignee: None,
             state,
+            blockers: vec![],
+            unblocks: vec![],
         }
     }
 

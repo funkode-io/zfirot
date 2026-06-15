@@ -22,5 +22,5 @@ pub use prd::{Prd, PrdRef};
 pub use project::Project;
 pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
-pub use slice::{RawSlice, Slice, SliceState};
+pub use slice::{resolve_unblocks, DependencyRef, RawSlice, Slice, SliceState};
 pub use token::GitHubToken;
