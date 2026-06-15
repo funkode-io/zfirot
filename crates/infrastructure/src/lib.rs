@@ -2,15 +2,18 @@
 //!
 //! [`GitHubClient`] is the real GraphQL adapter. [`FakeGitHubPort`] returns
 //! canned data so the board can render end-to-end (and tests can run) without
-//! GitHub access.
+//! GitHub access. Authentication is backed by the OS secure store through
+//! [`KeyringSecureStore`] (see [`secure_store`]).
 
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{AppResult, Blocker, RawSlice, RepoRef, Slice};
 
 mod github;
+mod secure_store;
 
 pub use github::{parse_response, resolve_board, GitHubClient, RawIssue};
+pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
 
 /// A fake [`GitHubPort`] that returns a fixed set of Slices.
 #[derive(Debug, Default, Clone, Copy)]
