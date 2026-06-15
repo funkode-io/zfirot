@@ -175,18 +175,31 @@ pub fn parse_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<String>)> 
     })?;
 
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        let not_found = errors.iter().any(|error| {
+            error.error_type.as_deref() == Some("NOT_FOUND")
+                || error
+                    .message
+                    .to_lowercase()
+                    .contains("could not resolve to a repository")
+        });
         let message = errors
             .into_iter()
             .map(|error| error.message)
             .collect::<Vec<_>>()
             .join("; ");
         let lowered = message.to_lowercase();
-        let error = if lowered.contains("rate limit") {
-            AppError::rate_limited("GitHub rate limit exceeded").with_context("errors", message)
+        // A repository GitHub reports via the `errors` array (e.g. private or
+        // renamed) is still a NotFound, not an Internal failure.
+        let error = if not_found {
+            AppError::not_found("Repository not found or not visible to the token")
+        } else if lowered.contains("rate limit") {
+            AppError::rate_limited("GitHub rate limit exceeded")
         } else {
-            AppError::internal("GitHub reported a query error").with_context("errors", message)
+            AppError::internal("GitHub reported a query error")
         };
-        return Err(error.with_operation("parse_response"));
+        return Err(error
+            .with_operation("parse_response")
+            .with_context("errors", message));
     }
 
     let repository = response
@@ -332,6 +345,8 @@ struct GraphQlResponse {
 #[derive(Deserialize)]
 struct GraphQlError {
     message: String,
+    #[serde(rename = "type")]
+    error_type: Option<String>,
 }
 
 #[derive(Deserialize)]

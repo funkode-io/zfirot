@@ -110,3 +110,12 @@ fn reports_a_missing_repository_as_not_found() {
 
     assert_eq!(error.kind(), domain::AppErrorKind::NotFound);
 }
+
+#[test]
+fn reports_a_repository_not_found_graphql_error_as_not_found() {
+    let body = r#"{ "errors": [{ "type": "NOT_FOUND", "message": "Could not resolve to a Repository with the name 'funkode-io/missing'." }] }"#;
+
+    let error = parse_response(body).expect_err("a NOT_FOUND GraphQL error must map to NotFound");
+
+    assert_eq!(error.kind(), domain::AppErrorKind::NotFound);
+}
