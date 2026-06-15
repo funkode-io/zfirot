@@ -36,7 +36,7 @@ fn maps_native_relationships_into_raw_slices() {
     );
     assert_eq!(ready.assignee, None);
     assert!(!ready.has_open_linked_pr);
-    assert_eq!(ready.open_blocker_count, 0);
+    assert!(ready.blockers.is_empty());
     assert!(!ready.closed);
 
     // WIP: an open linked PR and an assignee.
@@ -44,14 +44,20 @@ fn maps_native_relationships_into_raw_slices() {
     assert_eq!(wip.assignee.as_deref(), Some("carlos-verdes"));
     assert!(wip.has_open_linked_pr);
 
-    // Blocked: one OPEN native blocker; the CLOSED one is not counted.
+    // Blocked: one OPEN native blocker; the CLOSED one is not counted, and the
+    // open blocker is carried with its number and title for the Blocked card.
     let blocked = raw_by_number(&raws, 6);
-    assert_eq!(blocked.open_blocker_count, 1);
+    assert_eq!(blocked.blockers.len(), 1);
+    assert_eq!(blocked.blockers[0].number, 4);
+    assert_eq!(
+        blocked.blockers[0].title.as_deref(),
+        Some("Live GitHub read: real board for a hardcoded repo")
+    );
 
     // No native parent and only-closed native blockers, with no prose either.
     let orphan = raw_by_number(&raws, 8);
     assert_eq!(orphan.prd_title, None);
-    assert_eq!(orphan.open_blocker_count, 0);
+    assert!(orphan.blockers.is_empty());
 }
 
 #[test]
@@ -68,9 +74,14 @@ fn falls_back_to_prose_when_native_links_are_absent() {
         Some("PRD: Zfirot desktop dashboard")
     );
 
-    // Two prose blockers: #6 is open (in the fetched set) so it counts; #99 is
-    // not in the set (closed/absent) so it does not.
-    assert_eq!(prose_only.open_blocker_count, 1);
+    // Two prose blockers: #6 is open (in the fetched set) so it counts and is
+    // resolved to its title; #99 is not in the set (closed/absent) so it does not.
+    assert_eq!(prose_only.blockers.len(), 1);
+    assert_eq!(prose_only.blockers[0].number, 6);
+    assert_eq!(
+        prose_only.blockers[0].title.as_deref(),
+        Some("PAT authentication via the OS secure store")
+    );
     assert_eq!(
         prose_only.clone().into_slice().state,
         SliceState::Blocked,

@@ -81,9 +81,13 @@
             "blockedBy": {
               "nodes": [
                 {
+                  "number": 4,
+                  "title": "Live GitHub read: real board for a hardcoded repo",
                   "state": "OPEN"
                 },
                 {
+                  "number": 2,
+                  "title": "Walking skeleton",
                   "state": "CLOSED"
                 }
               ]
@@ -104,6 +108,8 @@
             "blockedBy": {
               "nodes": [
                 {
+                  "number": 2,
+                  "title": "Walking skeleton",
                   "state": "CLOSED"
                 }
               ]

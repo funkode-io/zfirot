@@ -4,11 +4,15 @@
 //! of truth). This crate has no dependencies on other layers.
 
 mod error;
+mod freshness;
 mod prose;
 mod repo;
 mod slice;
+mod summary;
 
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
+pub use freshness::{format_last_updated, PollInterval};
 pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
-pub use slice::{RawSlice, Slice, SliceState};
+pub use slice::{Blocker, RawSlice, Slice, SliceState};
+pub use summary::BoardSummary;

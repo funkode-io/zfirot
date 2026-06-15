@@ -11,7 +11,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{parse_prose, AppError, AppResult, ProseLinks, RawSlice, RepoRef, Slice};
+use domain::{parse_prose, AppError, AppResult, Blocker, ProseLinks, RawSlice, RepoRef, Slice};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -32,7 +32,7 @@ query Board($owner: String!, $name: String!, $cursor: String) {
         body
         assignees(first: 1) { nodes { login } }
         parent { title }
-        blockedBy(first: 50) { nodes { state } }
+        blockedBy(first: 50) { nodes { number title state } }
         closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
       }
     }
@@ -255,19 +255,27 @@ fn resolve_issue(
             .and_then(|number| title_by_number.get(&number).cloned()),
     };
 
-    let open_blocker_count = if issue.native_blocker_states.is_empty() {
+    let blockers = if issue.native_blockers.is_empty() {
         issue
             .prose
             .blocked_by
             .iter()
             .filter(|number| open_numbers.contains(number))
-            .count() as u32
+            .map(|number| Blocker {
+                number: *number,
+                title: title_by_number.get(number).cloned(),
+            })
+            .collect()
     } else {
         issue
-            .native_blocker_states
-            .iter()
-            .filter(|state| state.as_str() == "OPEN")
-            .count() as u32
+            .native_blockers
+            .into_iter()
+            .filter(|blocker| blocker.state == "OPEN")
+            .map(|blocker| Blocker {
+                number: blocker.number,
+                title: Some(blocker.title),
+            })
+            .collect()
     };
 
     RawSlice {
@@ -278,7 +286,7 @@ fn resolve_issue(
         prd_title,
         assignee: issue.assignee,
         has_open_linked_pr: issue.has_open_linked_pr,
-        open_blocker_count,
+        blockers,
     }
 }
 
@@ -306,11 +314,15 @@ fn map_issue(node: IssueNode) -> RawIssue {
         native_parent: node.parent.map(|parent| NativeParent {
             title: parent.title,
         }),
-        native_blocker_states: node
+        native_blockers: node
             .blocked_by
             .nodes
             .into_iter()
-            .map(|blocker| blocker.state)
+            .map(|blocker| NativeBlocker {
+                number: blocker.number,
+                title: blocker.title,
+                state: blocker.state,
+            })
             .collect(),
         prose: parse_prose(&node.body),
     }
@@ -326,7 +338,7 @@ pub struct RawIssue {
     assignee: Option<String>,
     has_open_linked_pr: bool,
     native_parent: Option<NativeParent>,
-    native_blocker_states: Vec<String>,
+    native_blockers: Vec<NativeBlocker>,
     prose: ProseLinks,
 }
 
@@ -334,6 +346,14 @@ pub struct RawIssue {
 #[derive(Debug)]
 struct NativeParent {
     title: String,
+}
+
+/// A native `blockedBy` dependency, carrying enough to list it on a Blocked card.
+#[derive(Debug)]
+struct NativeBlocker {
+    number: u64,
+    title: String,
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -382,7 +402,7 @@ struct IssueNode {
     body: String,
     assignees: LoginConnection,
     parent: Option<ParentIssue>,
-    blocked_by: StateConnection,
+    blocked_by: BlockerConnection,
     closed_by_pull_requests_references: StateConnection,
 }
 
@@ -408,5 +428,17 @@ struct StateConnection {
 
 #[derive(Deserialize)]
 struct StateNode {
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct BlockerConnection {
+    nodes: Vec<BlockerNode>,
+}
+
+#[derive(Deserialize)]
+struct BlockerNode {
+    number: u64,
+    title: String,
     state: String,
 }

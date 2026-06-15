@@ -25,6 +25,18 @@ impl SliceState {
     pub const BOARD: [SliceState; 3] = [SliceState::Ready, SliceState::Wip, SliceState::Blocked];
 }
 
+/// A Slice that blocks another one: its issue number and, when known, its title.
+///
+/// Carried on a [`Slice`] so a Blocked card can list exactly which Slices are
+/// holding it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocker {
+    /// The GitHub issue number of the blocking Slice.
+    pub number: u64,
+    /// The blocking Slice's title, when it could be resolved.
+    pub title: Option<String>,
+}
+
 /// A read model of a GitHub issue that is a Slice of a PRD.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slice {
@@ -37,6 +49,8 @@ pub struct Slice {
     pub prd_title: Option<String>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
+    /// The still-open Slices blocking this one. Empty unless [`SliceState::Blocked`].
+    pub blockers: Vec<Blocker>,
     pub state: SliceState,
 }
 
@@ -58,8 +72,9 @@ pub struct RawSlice {
     pub assignee: Option<String>,
     /// `true` when an open Pull Request is linked via its closing reference.
     pub has_open_linked_pr: bool,
-    /// Number of "blocked by" dependencies that are still open.
-    pub open_blocker_count: u32,
+    /// The still-open "blocked by" dependencies, by issue number (and title when
+    /// resolved). A non-empty list makes the Slice [`SliceState::Blocked`].
+    pub blockers: Vec<Blocker>,
 }
 
 impl RawSlice {
@@ -72,6 +87,7 @@ impl RawSlice {
             url: self.url,
             prd_title: self.prd_title,
             assignee: self.assignee,
+            blockers: self.blockers,
             state,
         }
     }
@@ -88,7 +104,7 @@ impl RawSlice {
         if self.closed {
             return SliceState::Done;
         }
-        if self.open_blocker_count > 0 {
+        if !self.blockers.is_empty() {
             return SliceState::Blocked;
         }
         if self.has_open_linked_pr || self.assignee.is_some() {
@@ -112,8 +128,18 @@ mod tests {
             prd_title: Some("A PRD".to_string()),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         }
+    }
+
+    /// `n` placeholder open blockers, for the state-precedence table.
+    fn n_blockers(n: u32) -> Vec<Blocker> {
+        (0..n)
+            .map(|i| Blocker {
+                number: 100 + u64::from(i),
+                title: None,
+            })
+            .collect()
     }
 
     #[test]
@@ -199,7 +225,7 @@ mod tests {
                 closed: case.closed,
                 assignee: case.assignee.map(str::to_string),
                 has_open_linked_pr: case.has_open_linked_pr,
-                open_blocker_count: case.open_blocker_count,
+                blockers: n_blockers(case.open_blocker_count),
                 ..ready_raw()
             };
 
@@ -232,7 +258,26 @@ mod tests {
         assert_eq!(slice.url, "https://github.com/funkode-io/zfirot/issues/1");
         assert_eq!(slice.prd_title.as_deref(), Some("A PRD"));
         assert_eq!(slice.assignee.as_deref(), Some("octocat"));
+        assert!(slice.blockers.is_empty());
         assert_eq!(slice.state, SliceState::Wip);
+    }
+
+    #[test]
+    fn into_slice_carries_blockers_for_a_blocked_slice() {
+        let raw = RawSlice {
+            blockers: vec![Blocker {
+                number: 7,
+                title: Some("Set up auth".to_string()),
+            }],
+            ..ready_raw()
+        };
+
+        let slice = raw.into_slice();
+
+        assert_eq!(slice.state, SliceState::Blocked);
+        assert_eq!(slice.blockers.len(), 1);
+        assert_eq!(slice.blockers[0].number, 7);
+        assert_eq!(slice.blockers[0].title.as_deref(), Some("Set up auth"));
     }
 
     #[test]

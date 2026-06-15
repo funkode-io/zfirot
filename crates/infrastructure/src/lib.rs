@@ -6,7 +6,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AppResult, RawSlice, RepoRef, Slice};
+use domain::{AppResult, Blocker, RawSlice, RepoRef, Slice};
 
 mod github;
 
@@ -48,7 +48,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         },
         RawSlice {
             number: 5,
@@ -58,7 +58,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         },
         // WIP: an open Pull Request is linked.
         RawSlice {
@@ -69,9 +69,9 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: Some("carlos-verdes".to_string()),
             has_open_linked_pr: true,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         },
-        // Blocked: at least one open "blocked by" dependency.
+        // Blocked: one open "blocked by" dependency.
         RawSlice {
             number: 6,
             title: "PAT authentication via the OS secure store".to_string(),
@@ -80,7 +80,10 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 1,
+            blockers: vec![Blocker {
+                number: 4,
+                title: Some("Live GitHub read: real board for a hardcoded repo".to_string()),
+            }],
         },
         RawSlice {
             number: 7,
@@ -90,7 +93,16 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd.clone(),
             assignee: None,
             has_open_linked_pr: false,
-            open_blocker_count: 2,
+            blockers: vec![
+                Blocker {
+                    number: 5,
+                    title: Some("Two-tier issue classification".to_string()),
+                },
+                Blocker {
+                    number: 6,
+                    title: Some("PAT authentication via the OS secure store".to_string()),
+                },
+            ],
         },
         // Done: closed, so hidden from the board.
         RawSlice {
@@ -101,7 +113,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             prd_title: prd,
             assignee: Some("carlos-verdes".to_string()),
             has_open_linked_pr: false,
-            open_blocker_count: 0,
+            blockers: Vec::new(),
         },
     ]
 }
