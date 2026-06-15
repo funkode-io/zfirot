@@ -9,14 +9,14 @@
 use application::{AuthService, ClassifiedBoard, OtherIssue, ProjectsRefresh, SecureStorePort};
 use dioxus::prelude::*;
 use domain::{
-    group_into_lanes, AppErrorKind, BoardSummary, GitHubToken, PollInterval, Project, RepoRef,
-    Slice,
+    group_into_lanes, AppErrorKind, BoardSummary, GitHubToken, IssueClassification, PollInterval,
+    Project, RepoRef, Slice,
 };
 
 use crate::components::{ErrorBanner, HomeScreen, OtherIssueCard, PrdLane, TokenScreen};
 use crate::state::{
-    assign_self, cached_projects, last_opened, open_project, refresh_projects,
-    refresh_recent_projects, secure_store, AppState,
+    assign_self, cached_projects, confirm_classification, last_opened, open_project,
+    refresh_projects, refresh_recent_projects, secure_store, AppState,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -69,6 +69,9 @@ pub fn App() -> Element {
     // Set to a client-safe message when assigning self to a Slice fails, shown
     // above the board; cleared on a successful assignment.
     let mut assign_error = use_signal(|| Option::<String>::None);
+    // Set to a client-safe message when confirming a suggested classification
+    // fails, shown above the board; cleared on a successful confirm.
+    let mut confirm_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
     // Where the user wants to be; starts at `Auto` so the last-opened project
@@ -203,6 +206,23 @@ pub fn App() -> Element {
                         }
                     });
                 };
+                // Confirm a suggested classification: add its prd/slice label,
+                // then re-poll so the now-labelled issue classifies tier-1 and
+                // leaves "other open issues". On failure the issue is left
+                // unchanged and the error is surfaced above the board.
+                let confirm_repo = repo.clone();
+                let on_confirm = move |(number, classification): (u64, IssueClassification)| {
+                    let repo = confirm_repo.clone();
+                    spawn(async move {
+                        match confirm_classification(&repo, number, &classification).await {
+                            Ok(()) => {
+                                confirm_error.set(None);
+                                reload += 1;
+                            }
+                            Err(error) => confirm_error.set(Some(error.to_string())),
+                        }
+                    });
+                };
                 let summary = BoardSummary::from_slices(&board.slices);
                 rsx! {
                     BoardShell {
@@ -213,10 +233,13 @@ pub fn App() -> Element {
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
                         }
+                        if let Some(message) = confirm_error() {
+                            ErrorBanner { message }
+                        }
                         BoardSummaryBar { summary }
                         Board { slices: board.slices.clone(), on_assign }
                         if !board.other.is_empty() {
-                            OtherIssues { issues: board.other.clone() }
+                            OtherIssues { issues: board.other.clone(), on_confirm }
                         }
                     }
                 }
@@ -474,10 +497,15 @@ fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
 /// below the Kanban board.
 ///
 /// Suggested issues (tier-2 classification) render with a
-/// "looks like a PRD/Slice — confirm?" badge. Unclassified issues render
-/// without any badge. No write action is performed here.
+/// "looks like a PRD/Slice — confirm?" badge and a Confirm button that emits
+/// `on_confirm` with the issue number and its classification; the board then
+/// adds the `prd`/`slice` label and re-polls. Unclassified issues render
+/// without any badge or action.
 #[component]
-fn OtherIssues(issues: Vec<OtherIssue>) -> Element {
+fn OtherIssues(
+    issues: Vec<OtherIssue>,
+    on_confirm: EventHandler<(u64, IssueClassification)>,
+) -> Element {
     let count = issues.len();
     rsx! {
         section { class: "mt-6",
@@ -490,7 +518,11 @@ fn OtherIssues(issues: Vec<OtherIssue>) -> Element {
                 div { class: "collapse-content",
                     div { class: "flex flex-col gap-2",
                         for issue in issues {
-                            OtherIssueCard { key: "{issue.number}", issue: issue.clone() }
+                            OtherIssueCard {
+                                key: "{issue.number}",
+                                issue: issue.clone(),
+                                on_confirm: move |payload| on_confirm.call(payload),
+                            }
                         }
                     }
                 }

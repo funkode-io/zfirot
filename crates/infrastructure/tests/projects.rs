@@ -85,6 +85,10 @@ impl GitHubPort for UnsortedGitHubPort {
     async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
         Ok(())
     }
+
+    async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
+        Ok(())
+    }
 }
 
 #[tokio::test]
