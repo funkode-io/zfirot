@@ -26,6 +26,22 @@ pub fn SliceCard(slice: Slice, on_assign: EventHandler<u64>) -> Element {
                 if let Some(prd) = slice.prd_title.clone() {
                     div { class: "text-xs opacity-70", "PRD: {prd}" }
                 }
+                if !slice.blockers.is_empty() {
+                    div { class: "text-xs opacity-80",
+                        span { class: "font-medium", "Blocked by:" }
+                        ul { class: "list-disc list-inside",
+                            for blocker in slice.blockers.iter() {
+                                li { key: "{blocker.number}",
+                                    if let Some(title) = blocker.title.clone() {
+                                        "#{blocker.number} {title}"
+                                    } else {
+                                        "#{blocker.number}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 div { class: "card-actions justify-between items-center mt-2",
                     if let Some(assignee) = slice.assignee.clone() {
                         span { class: "text-xs opacity-80", "@{assignee}" }

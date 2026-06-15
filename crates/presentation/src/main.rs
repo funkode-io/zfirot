@@ -26,5 +26,6 @@ fn main() {
     LaunchBuilder::desktop()
         .with_cfg(Config::new().with_window(window))
         .with_context(Boot::from_env())
+        .with_context(state::poll_interval_from_env())
         .launch(app::App);
 }

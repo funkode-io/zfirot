@@ -8,13 +8,24 @@
 use std::sync::Arc;
 
 use application::{BoardService, GitHubPort};
-use domain::{AppError, AppResult, RepoRef, Slice};
+use domain::{AppError, AppResult, PollInterval, RepoRef, Slice};
 use infrastructure::GitHubClient;
 
 /// The repository the v1 desktop app shows. Hardcoded until project selection
 /// lands in a later slice.
 const REPO_OWNER: &str = "funkode-io";
 const REPO_NAME: &str = "zfirot";
+
+/// Environment variable that overrides the background-poll cadence, in seconds.
+const POLL_SECS_ENV: &str = "ZFIROT_POLL_SECS";
+
+/// Resolve the background-poll cadence from the environment (composition root).
+///
+/// Absent or invalid configuration falls back to the [`PollInterval`] default
+/// (~60s); the policy itself lives in `domain` so it stays testable.
+pub fn poll_interval_from_env() -> PollInterval {
+    PollInterval::from_config(std::env::var(POLL_SECS_ENV).ok().as_deref())
+}
 
 /// The app's wired dependencies: a project and the GitHub port behind it.
 #[derive(Clone)]

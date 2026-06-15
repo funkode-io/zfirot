@@ -1,9 +1,13 @@
-//! Root component: loads the board from the wired GitHub port and renders it.
+//! Root component: loads the board from the wired GitHub port and renders it,
+//! with manual Refresh, a background poll, a "last updated" stamp, and summary
+//! counts.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use dioxus::prelude::*;
-use domain::{Slice, SliceState};
+use domain::{format_last_updated, BoardSummary, PollInterval, Slice, SliceState};
 
-use crate::components::{state_badge_class, state_label, BoardColumn, ErrorBanner};
+use crate::components::{state_badge_class, state_label, BoardColumn, ErrorBanner, SummaryBar};
 use crate::state::Boot;
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -13,15 +17,39 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 #[component]
 pub fn App() -> Element {
     let boot = use_context::<Boot>();
-    let board = use_resource(move || {
+    let poll = use_context::<PollInterval>();
+
+    // Seconds-since-epoch of the most recent completed refresh, formatted for
+    // display only once a load has finished.
+    let mut last_updated = use_signal(|| None::<u64>);
+
+    let mut board = use_resource(move || {
         let boot = boot.clone();
         async move {
-            match boot {
+            let result = match boot {
                 Boot::Ready(state) => state.load_board().await,
                 Boot::Failed(message) => Err(domain::AppError::unauthorized(message)),
-            }
+            };
+            last_updated.set(Some(now_unix_secs()));
+            result
         }
     });
+
+    // Background poll: refresh on the configured cadence (default ~60s).
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(poll.as_duration()).await;
+            board.restart();
+        }
+    });
+
+    let board_value = board.read_unchecked();
+    let slices = match &*board_value {
+        Some(Ok(slices)) => slices.clone(),
+        _ => Vec::new(),
+    };
+    let summary = BoardSummary::from_slices(&slices);
+    let last_updated_label = last_updated().map(format_last_updated);
 
     rsx! {
         document::Title { "Zfirot" }
@@ -33,7 +61,14 @@ pub fn App() -> Element {
                 h1 { class: "text-2xl font-bold", "Zfirot" }
             }
 
-            match &*board.read_unchecked() {
+            SummaryBar {
+                summary,
+                last_updated: last_updated_label,
+                poll_secs: poll.as_secs(),
+                on_refresh: move |_| board.restart(),
+            }
+
+            match &*board_value {
                 Some(Ok(slices)) => rsx! {
                     Board { slices: slices.clone() }
                 },
@@ -46,6 +81,15 @@ pub fn App() -> Element {
             }
         }
     }
+}
+
+/// Seconds since the UNIX epoch, for the "last updated" stamp. A clock skewed
+/// before the epoch is reported as `0` rather than panicking.
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 /// The Zfirot ZF monogram: two equal-weight, hand-drawn strokes where the Z's
