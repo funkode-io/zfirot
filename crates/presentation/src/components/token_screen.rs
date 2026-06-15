@@ -38,7 +38,7 @@ pub fn TokenScreen(on_submit: EventHandler<String>, error: Option<String>) -> El
                         }
                         input {
                             r#type: "password",
-                            class: "input input-bordered w-full",
+                            class: "input w-full",
                             placeholder: "github_pat_…",
                             value: "{token}",
                             oninput: move |evt| token.set(evt.value()),
