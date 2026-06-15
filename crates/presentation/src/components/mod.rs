@@ -5,9 +5,11 @@
 //! and tested without GitHub.
 
 mod board_column;
+mod other_issue_card;
 mod slice_card;
 
 pub use board_column::BoardColumn;
+pub use other_issue_card::OtherIssueCard;
 pub use slice_card::SliceCard;
 
 use domain::SliceState;

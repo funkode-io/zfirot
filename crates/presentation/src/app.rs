@@ -1,11 +1,11 @@
 //! Root component: loads the board (via a fake port for now) and renders it.
 
-use application::BoardService;
+use application::{BoardService, ClassifiedBoard, OtherIssue};
 use dioxus::prelude::*;
 use domain::{RepoRef, Slice, SliceState};
 use infrastructure::FakeGitHubPort;
 
-use crate::components::{state_badge_class, state_label, BoardColumn};
+use crate::components::{state_badge_class, state_label, BoardColumn, OtherIssueCard};
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
 /// Build it with `make css` (runs `npm run build:css` in crates/presentation).
@@ -16,7 +16,7 @@ pub fn App() -> Element {
     let board = use_resource(|| async {
         let service = BoardService::new(FakeGitHubPort);
         let repo = RepoRef::new("funkode-io", "zfirot");
-        service.load_board(&repo).await
+        service.classify_board(&repo).await
     });
 
     rsx! {
@@ -30,8 +30,11 @@ pub fn App() -> Element {
             }
 
             match &*board.read_unchecked() {
-                Some(Ok(slices)) => rsx! {
-                    Board { slices: slices.clone() }
+                Some(Ok(classified)) => rsx! {
+                    Board { slices: classified.slices.clone() }
+                    if !classified.other.is_empty() {
+                        OtherIssues { issues: classified.other.clone() }
+                    }
                 },
                 Some(Err(error)) => rsx! {
                     div { class: "alert alert-error", "{error}" }
@@ -79,6 +82,29 @@ fn Board(slices: Vec<Slice>) -> Element {
                     badge_class: state_badge_class(state).to_string(),
                     slices: slices.iter().filter(|s| s.state == state).cloned().collect::<Vec<_>>(),
                     on_assign: move |_number| {}, // Assign-self is wired in a later slice. No-op for now.,
+                }
+            }
+        }
+    }
+}
+
+/// The "other open issues" bucket — shows suggested and unclassified issues
+/// below the Kanban board.
+///
+/// Suggested issues (tier-2 classification) render with a
+/// "looks like a PRD/Slice — confirm?" badge. Unclassified issues render
+/// without any badge. No write action is performed here.
+#[component]
+fn OtherIssues(issues: Vec<OtherIssue>) -> Element {
+    rsx! {
+        section { class: "mt-6",
+            h2 { class: "text-lg font-semibold mb-3", "Other open issues" }
+            div { class: "flex flex-col gap-2",
+                for issue in issues {
+                    OtherIssueCard {
+                        key: "{issue.number}",
+                        issue: issue.clone(),
+                    }
                 }
             }
         }
