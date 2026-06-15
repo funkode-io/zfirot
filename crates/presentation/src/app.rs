@@ -2,8 +2,9 @@
 //!
 //! On launch the stored token (OS secure store) is resolved. With a token the
 //! real board loads; without one the paste-token screen is shown. Saving a valid
-//! token persists it and loads the board, while a rejected token surfaces an
-//! inline, client-safe error.
+//! token persists it and loads the board. A stored token that GitHub rejects is
+//! discarded and the user is routed back to the paste-token screen to enter a
+//! new one, with the reason shown inline.
 
 use application::AuthService;
 use dioxus::prelude::*;
@@ -21,9 +22,12 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 enum View {
     /// A token is stored and the board loaded.
     Board(Vec<Slice>),
-    /// No token stored yet: route the user to the paste-token screen.
-    NeedToken,
-    /// A token is stored but loading the board failed (rejected token, network).
+    /// Show the paste-token screen. `reason` is `Some` when a stored token was
+    /// rejected by GitHub (so the user knows why they are being asked again) and
+    /// `None` on first launch when no token has ever been saved.
+    NeedToken { reason: Option<String> },
+    /// A token is stored but loading the board failed for a non-auth reason
+    /// (network, rate limit): a transient error shown in the board shell.
     Error(String),
 }
 
@@ -58,17 +62,22 @@ pub fn App() -> Element {
         document::Stylesheet { href: TAILWIND_CSS }
 
         match &*view.read_unchecked() {
-            // No token yet: show the paste-token screen.
-            Some(View::NeedToken) => rsx! {
-                TokenScreen { error: token_error(), on_submit }
+            // No token yet, or a stored token was rejected: show the paste-token
+            // screen. A fresh submit error takes precedence over a stale reject
+            // reason carried by the view.
+            Some(View::NeedToken { reason }) => rsx! {
+                TokenScreen { error: token_error().or_else(|| reason.clone()), on_submit }
             },
             // Token present and the board loaded.
             Some(View::Board(slices)) => rsx! {
-                BoardShell { Board { slices: slices.clone() } }
+                BoardShell {
+                    Board { slices: slices.clone() } // Token present but loading failed.
+                }
             },
-            // Token present but loading failed.
             Some(View::Error(message)) => rsx! {
-                BoardShell { ErrorBanner { message: message.clone() } }
+                BoardShell {
+                    ErrorBanner { message: message.clone() }
+                }
             },
             None => rsx! {
                 div { class: "min-h-screen bg-base-200 grid place-items-center",
@@ -81,13 +90,17 @@ pub fn App() -> Element {
 
 /// Resolve the stored token and load the board, mapping the outcome to a [`View`].
 ///
-/// A missing token (`Unauthorized`) routes to the paste-token screen; any other
-/// failure is shown as a client-safe error.
+/// A missing token (`Unauthorized` from `require_token`) routes to the paste-token
+/// screen. A stored token that GitHub rejects while loading the board
+/// (`Unauthorized`/`Forbidden`) is discarded and also routes back to the screen,
+/// carrying the reason. Any other failure is shown as a transient error.
 async fn resolve_view() -> View {
     let auth = AuthService::new(KeyringSecureStore::new());
     let token = match auth.require_token().await {
         Ok(token) => token,
-        Err(error) if error.kind() == AppErrorKind::Unauthorized => return View::NeedToken,
+        Err(error) if error.kind() == AppErrorKind::Unauthorized => {
+            return View::NeedToken { reason: None }
+        }
         Err(error) => return View::Error(error.to_string()),
     };
 
@@ -98,8 +111,24 @@ async fn resolve_view() -> View {
 
     match state.load_board().await {
         Ok(slices) => View::Board(slices),
+        Err(error) if is_auth_failure(error.kind()) => {
+            // The stored token was rejected (revoked, expired, or missing
+            // scopes). Discard it so we do not loop on a known-bad secret, then
+            // route the user back to the screen to paste a new one. Clearing is
+            // best-effort: routing back is what matters.
+            let _ = auth.clear_token().await;
+            View::NeedToken {
+                reason: Some(error.to_string()),
+            }
+        }
         Err(error) => View::Error(error.to_string()),
     }
+}
+
+/// Whether an error means the token itself is the problem (so the user should be
+/// asked for a new one) rather than a transient/network failure.
+fn is_auth_failure(kind: AppErrorKind) -> bool {
+    matches!(kind, AppErrorKind::Unauthorized | AppErrorKind::Forbidden)
 }
 
 /// The board chrome (header + logo) wrapping either the columns or an error.
