@@ -8,10 +8,12 @@
 
 use application::AuthService;
 use dioxus::prelude::*;
-use domain::{AppErrorKind, Slice, SliceState};
+use domain::{AppErrorKind, Project, RepoRef, Slice, SliceState};
 
-use crate::components::{state_badge_class, state_label, BoardColumn, ErrorBanner, TokenScreen};
-use crate::state::{secure_store, AppState};
+use crate::components::{
+    state_badge_class, state_label, BoardColumn, ErrorBanner, HomeScreen, TokenScreen,
+};
+use crate::state::{last_opened, open_project, recent_projects, secure_store, AppState};
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
 /// Build it with `make css` (runs `npm run build:css` in crates/presentation).
@@ -19,28 +21,43 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 /// What the root renders once the stored token has been resolved.
 enum View {
-    /// A token is stored and the board loaded.
-    Board(Vec<Slice>),
+    /// A token is stored but no project is open yet: pick from recent projects.
+    Home(Vec<Project>),
+    /// A token is stored and the board for `repo` loaded.
+    Board { repo: RepoRef, slices: Vec<Slice> },
     /// Show the paste-token screen. `reason` is `Some` when a stored token was
     /// rejected by GitHub (so the user knows why they are being asked again) and
     /// `None` on first launch when no token has ever been saved.
     NeedToken { reason: Option<String> },
-    /// A token is stored but loading the board failed for a non-auth reason
-    /// (network, rate limit): a transient error shown in the board shell.
+    /// A token is stored but loading failed for a non-auth reason (network, rate
+    /// limit): a transient error shown in the board shell.
     Error(String),
+}
+
+/// Where the user wants to be, independent of what is persisted on disk.
+#[derive(Clone, PartialEq)]
+enum Nav {
+    /// Initial launch: reopen the last-opened project, else show the home screen.
+    Auto,
+    /// Explicitly show the home screen (the recent-projects picker).
+    Home,
+    /// Show the board for a project the user just chose.
+    Project(RepoRef),
 }
 
 #[component]
 pub fn App() -> Element {
     // Cleared on success, set to a client-safe message when a token is rejected.
     let mut token_error = use_signal(|| Option::<String>::None);
-    // Bumped after a successful save so the token re-resolves and the board
-    // takes over from the token screen.
+    // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
+    // Where the user wants to be; starts at `Auto` so the last-opened project
+    // reopens on launch, and switches to `Home`/`Project` as they navigate.
+    let mut nav = use_signal(|| Nav::Auto);
 
     let view = use_resource(move || async move {
-        let _ = reload(); // subscribe so a saved token re-resolves the view
-        resolve_view().await
+        let _ = reload(); // subscribe so a save or selection re-resolves the view
+        resolve_view(nav()).await
     });
 
     let on_submit = move |raw: String| {
@@ -56,6 +73,22 @@ pub fn App() -> Element {
         });
     };
 
+    let on_open = move |repo: RepoRef| {
+        spawn(async move {
+            // Persist the choice (best-effort) and navigate to its board.
+            let _ = open_project(&repo).await;
+            nav.set(Nav::Project(repo));
+            reload += 1;
+        });
+    };
+
+    // Back to the project picker. Persistence is untouched, so the next launch
+    // still reopens the last project; this only changes the current session.
+    let on_home = move |_| {
+        nav.set(Nav::Home);
+        reload += 1;
+    };
+
     rsx! {
         document::Title { "Zfirot" }
         document::Stylesheet { href: TAILWIND_CSS }
@@ -67,14 +100,18 @@ pub fn App() -> Element {
             Some(View::NeedToken { reason }) => rsx! {
                 TokenScreen { error: token_error().or_else(|| reason.clone()), on_submit }
             },
+            // Token present but no project open: show recent projects.
+            Some(View::Home(projects)) => rsx! {
+                HomeScreen { projects: projects.clone(), on_open }
+            },
             // Token present and the board loaded.
-            Some(View::Board(slices)) => rsx! {
-                BoardShell {
-                    Board { slices: slices.clone() } // Token present but loading failed. // Token present but loading failed.
+            Some(View::Board { repo, slices }) => rsx! {
+                BoardShell { repo: repo.to_string(), on_home,
+                    Board { slices: slices.clone() }
                 }
             },
             Some(View::Error(message)) => rsx! {
-                BoardShell {
+                BoardShell { on_home,
                     ErrorBanner { message: message.clone() }
                 }
             },
@@ -87,13 +124,16 @@ pub fn App() -> Element {
     }
 }
 
-/// Resolve the stored token and load the board, mapping the outcome to a [`View`].
+/// Resolve the stored token and decide what to show, mapping the outcome to a
+/// [`View`].
 ///
 /// A missing token (`Unauthorized` from `require_token`) routes to the paste-token
-/// screen. A stored token that GitHub rejects while loading the board
-/// (`Unauthorized`/`Forbidden`) is discarded and also routes back to the screen,
-/// carrying the reason. Any other failure is shown as a transient error.
-async fn resolve_view() -> View {
+/// screen. With a token, the requested [`Nav`] decides the board: an explicit
+/// project, the last-opened one (`Auto`), or the home screen (`Home`, or `Auto`
+/// when nothing has been opened yet). A stored token that GitHub rejects while
+/// loading (`Unauthorized`/`Forbidden`) is discarded and routes back to the
+/// screen, carrying the reason. Any other failure is shown as a transient error.
+async fn resolve_view(nav: Nav) -> View {
     let auth = AuthService::new(secure_store());
     let token = match auth.require_token().await {
         Ok(token) => token,
@@ -103,13 +143,26 @@ async fn resolve_view() -> View {
         Err(error) => return View::Error(error.to_string()),
     };
 
-    let state = match AppState::from_token(&token) {
+    // Decide the project to open from where the user wants to be. `Home` always
+    // shows the picker; `Auto` reopens the last-opened project or, failing that,
+    // shows the picker too.
+    let repo = match nav {
+        Nav::Home => return home_view(&token).await,
+        Nav::Project(repo) => repo,
+        Nav::Auto => match last_opened(&token).await {
+            Ok(Some(repo)) => repo,
+            Ok(None) => return home_view(&token).await,
+            Err(error) => return View::Error(error.to_string()),
+        },
+    };
+
+    let state = match AppState::from_token(&token, repo.clone()) {
         Ok(state) => state,
         Err(error) => return View::Error(error.to_string()),
     };
 
     match state.load_board().await {
-        Ok(slices) => View::Board(slices),
+        Ok(slices) => View::Board { repo, slices },
         Err(error) if is_auth_failure(error.kind()) => {
             // The stored token was rejected (revoked, expired, or missing
             // scopes). Discard it so we do not loop on a known-bad secret, then
@@ -124,6 +177,14 @@ async fn resolve_view() -> View {
     }
 }
 
+/// The home screen's recent-projects view, or a transient error if listing fails.
+async fn home_view(token: &domain::GitHubToken) -> View {
+    match recent_projects(token).await {
+        Ok(projects) => View::Home(projects),
+        Err(error) => View::Error(error.to_string()),
+    }
+}
+
 /// Whether an error means the token itself is the problem (so the user should be
 /// asked for a new one) rather than a transient/network failure.
 fn is_auth_failure(kind: AppErrorKind) -> bool {
@@ -131,13 +192,28 @@ fn is_auth_failure(kind: AppErrorKind) -> bool {
 }
 
 /// The board chrome (header + logo) wrapping either the columns or an error.
+/// `repo` names the open project (shown beside the title) when there is one;
+/// `on_home` returns to the project picker.
 #[component]
-fn BoardShell(children: Element) -> Element {
+fn BoardShell(
+    children: Element,
+    on_home: EventHandler<()>,
+    #[props(default)] repo: Option<String>,
+) -> Element {
     rsx! {
         div { class: "min-h-screen bg-base-200 p-6",
             header { class: "flex items-center gap-2 mb-6",
                 ZfirotLogo {}
                 h1 { class: "text-2xl font-bold", "Zfirot" }
+                if let Some(repo) = repo {
+                    span { class: "text-base opacity-60", "/ {repo}" }
+                    button {
+                        class: "btn btn-ghost btn-sm btn-square",
+                        title: "Back to projects",
+                        onclick: move |_| on_home.call(()),
+                        span { class: "icon-[lucide--undo-2] size-5" }
+                    }
+                }
             }
             {children}
         }

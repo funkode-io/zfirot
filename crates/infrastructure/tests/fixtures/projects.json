@@ -1,0 +1,56 @@
+{
+  "data": {
+    "viewer": {
+      "repositories": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Y3Vyc29yOnYyOpHOABCDEF=="
+        },
+        "nodes": [
+          {
+            "name": "replay",
+            "pushedAt": "2024-04-15T09:30:00Z",
+            "isFork": false,
+            "owner": {
+              "login": "funkode-io"
+            },
+            "parent": null
+          },
+          {
+            "name": "zfirot",
+            "pushedAt": "2024-02-01T08:00:00Z",
+            "isFork": true,
+            "owner": {
+              "login": "carlos-verdes"
+            },
+            "parent": {
+              "name": "zfirot",
+              "pushedAt": "2024-05-01T12:00:00Z",
+              "owner": {
+                "login": "funkode-io"
+              }
+            }
+          },
+          {
+            "name": "zfirot",
+            "pushedAt": "2024-03-10T10:00:00Z",
+            "isFork": false,
+            "owner": {
+              "login": "funkode-io"
+            },
+            "parent": null
+          },
+          {
+            "name": "dotfiles",
+            "pushedAt": null,
+            "isFork": false,
+            "owner": {
+              "login": "carlos-verdes"
+            },
+            "parent": null
+          }
+        ]
+      }
+    }
+  }
+}

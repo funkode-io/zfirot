@@ -7,16 +7,13 @@
 
 use std::sync::Arc;
 
-use application::{BoardService, GitHubPort, SecureStorePort};
-use domain::{AppResult, GitHubToken, RepoRef, Slice};
+use application::{
+    AuthService, BoardService, GitHubPort, ProjectStorePort, ProjectsService, SecureStorePort,
+};
+use domain::{AppAction, AppResult, GitHubToken, Project, RepoRef, Slice};
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
-use infrastructure::{GitHubClient, KeyringSecureStore};
-
-/// The repository the v1 desktop app shows. Hardcoded until project selection
-/// lands in a later slice.
-const REPO_OWNER: &str = "funkode-io";
-const REPO_NAME: &str = "zfirot";
+use infrastructure::{FileProjectStore, GitHubClient, KeyringSecureStore};
 
 /// The secure store the running app authenticates against.
 ///
@@ -32,6 +29,20 @@ pub fn secure_store() -> Arc<dyn SecureStorePort> {
     Arc::new(KeyringSecureStore::new())
 }
 
+/// The on-device store remembering which project was last opened.
+pub fn project_store() -> AppResult<Arc<dyn ProjectStorePort>> {
+    Ok(Arc::new(FileProjectStore::new()?))
+}
+
+/// The projects use-cases (recent projects, reopen last), wired from a stored
+/// Personal Access Token and the on-device project store.
+pub fn projects_from_token(
+    token: &GitHubToken,
+) -> AppResult<ProjectsService<Arc<dyn GitHubPort>, Arc<dyn ProjectStorePort>>> {
+    let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
+    Ok(ProjectsService::new(port, project_store()?))
+}
+
 /// The app's wired dependencies: a project and the GitHub port behind it.
 #[derive(Clone)]
 pub struct AppState {
@@ -40,16 +51,14 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Wire the live GitHub adapter from a stored Personal Access Token.
+    /// Wire the live GitHub adapter from a stored Personal Access Token, scoped
+    /// to a chosen repository.
     ///
     /// The token is read from the OS secure store by the caller; this only turns
     /// it into an authenticated [`GitHubClient`].
-    pub fn from_token(token: &GitHubToken) -> AppResult<Self> {
+    pub fn from_token(token: &GitHubToken, repo: RepoRef) -> AppResult<Self> {
         let client = GitHubClient::new(token.expose())?;
-        Ok(Self::with_port(
-            RepoRef::new(REPO_OWNER, REPO_NAME),
-            Arc::new(client),
-        ))
+        Ok(Self::with_port(repo, Arc::new(client)))
     }
 
     /// Build a state around an arbitrary port, for previews and tests.
@@ -63,4 +72,21 @@ impl AppState {
             .load_board(&self.repo)
             .await
     }
+}
+
+/// The accessible projects, most-recently-pushed first, for the home screen.
+pub async fn recent_projects(token: &GitHubToken) -> AppResult<Vec<Project>> {
+    projects_from_token(token)?.recent_projects().await
+}
+
+/// The project to reopen on launch, or `None` to show the home screen.
+pub async fn last_opened(token: &GitHubToken) -> AppResult<Option<RepoRef>> {
+    projects_from_token(token)?.last_opened().await
+}
+
+/// Remember `repo` as the last-opened project, so the next launch reopens it.
+/// Reads the stored token itself, so callers need not hold one.
+pub async fn open_project(repo: &RepoRef) -> AppAction {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    projects_from_token(&token)?.open_project(repo).await
 }

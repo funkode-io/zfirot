@@ -7,12 +7,14 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AppResult, RawSlice, RepoRef, Slice};
+use domain::{AppResult, Project, RawSlice, RepoRef, Slice};
 
 mod github;
+mod project_store;
 mod secure_store;
 
-pub use github::{parse_response, resolve_board, GitHubClient, RawIssue};
+pub use github::{parse_projects_response, parse_response, resolve_board, GitHubClient, RawIssue};
+pub use project_store::{FakeProjectStore, FileProjectStore};
 pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
 
 /// A fake [`GitHubPort`] that returns a fixed set of Slices.
@@ -24,6 +26,29 @@ impl GitHubPort for FakeGitHubPort {
     async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
         Ok(sample_slices())
     }
+
+    async fn list_projects(&self) -> AppResult<Vec<Project>> {
+        Ok(sample_projects())
+    }
+}
+
+/// Canned recent projects for the fake, with varied `pushed_at` timestamps so
+/// callers can exercise the most-recently-pushed-first ordering.
+pub fn sample_projects() -> Vec<Project> {
+    vec![
+        Project::new(
+            RepoRef::new("funkode-io", "zfirot"),
+            "2024-05-01T12:00:00Z".to_string(),
+        ),
+        Project::new(
+            RepoRef::new("funkode-io", "replay"),
+            "2024-04-15T09:30:00Z".to_string(),
+        ),
+        Project::new(
+            RepoRef::new("carlos-verdes", "dotfiles"),
+            "2024-03-20T18:45:00Z".to_string(),
+        ),
+    ]
 }
 
 /// Canned board Slices spanning every state, derived from raw GitHub-shaped data
