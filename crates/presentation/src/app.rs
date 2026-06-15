@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use domain::{Slice, SliceState};
 
-use crate::components::{state_badge_class, state_label, BoardColumn};
+use crate::components::{state_badge_class, state_label, BoardColumn, ErrorBanner};
 use crate::state::Boot;
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -38,7 +38,7 @@ pub fn App() -> Element {
                     Board { slices: slices.clone() }
                 },
                 Some(Err(error)) => rsx! {
-                    div { class: "alert alert-error", "{error}" }
+                    ErrorBanner { message: error.to_string() }
                 },
                 None => rsx! {
                     span { class: "loading loading-spinner loading-lg" }

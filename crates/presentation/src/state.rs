@@ -31,10 +31,12 @@ impl AppState {
     pub fn from_env() -> AppResult<Self> {
         let token = std::env::var("GITHUB_TOKEN").map_err(|_| {
             AppError::unauthorized(
-                "No GITHUB_TOKEN found. Create a fine-grained Personal Access Token at \
-                 https://github.com/settings/personal-access-tokens/new (grant the repository \
-                 read access to Issues, Pull requests, and Contents), then set it as GITHUB_TOKEN \
-                 in your .env file (copy .env.example) and restart the app.",
+                "No GITHUB_TOKEN found.\n\n\
+                 1. Create a fine-grained Personal Access Token at\n   \
+                 https://github.com/settings/personal-access-tokens/new\n\
+                 2. Grant the repository read access to Issues, Pull requests, and Contents.\n\
+                 3. Set it as GITHUB_TOKEN in your .env file (copy .env.example).\n\
+                 4. Restart the app.",
             )
             .with_operation("AppState::from_env")
         })?;
