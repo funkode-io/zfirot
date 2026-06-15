@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use domain::{
-    classify_issue, parse_blockers_from_body, parse_parent_from_body, AppResult,
-    IssueClassification, Prd, RawIssue, RawSlice, RepoRef, Slice,
+    classify_issue, parse_blockers_from_body, parse_parent_from_body, AppAction, AppError,
+    AppResult, GitHubToken, IssueClassification, Prd, RawIssue, RawSlice, RepoRef, Slice,
 };
 
 /// The seam between the application and any GitHub backend (real or fake).
@@ -65,6 +65,38 @@ pub struct ClassifiedBoard {
     pub slices: Vec<Slice>,
     pub prds: Vec<Prd>,
     pub other: Vec<OtherIssue>,
+}
+
+/// The seam between the application and the OS secure store (real or fake).
+///
+/// `infrastructure` implements this against the operating system's credential
+/// store (keyring); use-cases run against a fake in tests, so no real keyring
+/// is touched.
+#[async_trait]
+pub trait SecureStorePort: Send + Sync {
+    /// Persist the Personal Access Token, replacing any existing one.
+    async fn save_token(&self, token: &GitHubToken) -> AppAction;
+    /// Read the stored token, or `None` when none has been saved yet.
+    async fn load_token(&self) -> AppResult<Option<GitHubToken>>;
+    /// Remove the stored token, if any (signing out).
+    async fn delete_token(&self) -> AppAction;
+}
+
+/// Shared stores are stores too, so the composition root can pick a store at
+/// runtime (`Arc<dyn SecureStorePort>`) and hand it to an [`AuthService`].
+#[async_trait]
+impl<S: SecureStorePort + ?Sized> SecureStorePort for Arc<S> {
+    async fn save_token(&self, token: &GitHubToken) -> AppAction {
+        (**self).save_token(token).await
+    }
+
+    async fn load_token(&self) -> AppResult<Option<GitHubToken>> {
+        (**self).load_token().await
+    }
+
+    async fn delete_token(&self) -> AppAction {
+        (**self).delete_token().await
+    }
 }
 
 /// Use-cases for the project board.
@@ -126,6 +158,7 @@ impl<P: GitHubPort> BoardService<P> {
                     let raw_slice = RawSlice {
                         number: raw.number,
                         title: raw.title,
+                        url: raw.url,
                         closed: false,
                         prd_title: None,
                         assignee: raw.assignee,
@@ -155,5 +188,61 @@ impl<P: GitHubPort> BoardService<P> {
             prds,
             other,
         })
+    }
+}
+
+/// Use-cases for Personal Access Token authentication, backed by a
+/// [`SecureStorePort`].
+pub struct AuthService<S: SecureStorePort> {
+    store: S,
+}
+
+impl<S: SecureStorePort> AuthService<S> {
+    pub fn new(store: S) -> Self {
+        Self { store }
+    }
+
+    /// Validate a pasted PAT and persist it to the OS secure store, so it is
+    /// reused across launches. Rejects anything that is not a fine-grained PAT
+    /// before it ever reaches the store.
+    pub async fn save_token(&self, raw: &str) -> AppAction {
+        let token = GitHubToken::parse(raw)?;
+        self.store
+            .save_token(&token)
+            .await
+            .map_err(|err| err.with_operation("AuthService::save_token"))
+    }
+
+    /// The stored token, or an `Unauthorized` error when none is saved yet.
+    ///
+    /// Callers use the `Unauthorized` case to route the user to the paste-token
+    /// screen.
+    pub async fn require_token(&self) -> AppResult<GitHubToken> {
+        self.store
+            .load_token()
+            .await
+            .map_err(|err| err.with_operation("AuthService::require_token"))?
+            .ok_or_else(|| {
+                AppError::unauthorized("Add a Personal Access Token to load your board.")
+                    .with_operation("AuthService::require_token")
+            })
+    }
+
+    /// Whether a token is already stored, to decide the launch screen.
+    pub async fn has_token(&self) -> AppResult<bool> {
+        Ok(self
+            .store
+            .load_token()
+            .await
+            .map_err(|err| err.with_operation("AuthService::has_token"))?
+            .is_some())
+    }
+
+    /// Remove the stored token (sign out).
+    pub async fn clear_token(&self) -> AppAction {
+        self.store
+            .delete_token()
+            .await
+            .map_err(|err| err.with_operation("AuthService::clear_token"))
     }
 }

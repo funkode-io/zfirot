@@ -2,15 +2,18 @@
 //!
 //! [`GitHubClient`] is the real GraphQL adapter. [`FakeGitHubPort`] returns
 //! canned data so the board can render end-to-end (and tests can run) without
-//! GitHub access.
+//! GitHub access. Authentication is backed by the OS secure store through
+//! [`KeyringSecureStore`] (see [`secure_store`]).
 
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{AppResult, RawIssue, RawSlice, RepoRef, Slice};
 
 mod github;
+mod secure_store;
 
-pub use github::{parse_response, GitHubClient};
+pub use github::{parse_response, resolve_board, GitHubClient};
+pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
 
 /// A fake [`GitHubPort`] that returns a fixed set of Slices and raw issues.
 #[derive(Debug, Default, Clone, Copy)]
@@ -51,6 +54,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
         RawIssue {
             number: 1,
             title: "Zfirot desktop dashboard".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/1".to_string(),
             body: Some(
                 "## Problem Statement\n\nAgents need a dashboard.\n\n\
                  ## User Stories\n\n- As an agent…"
@@ -68,6 +72,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
         RawIssue {
             number: 3,
             title: "Derive SliceState as a pure domain function".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/3".to_string(),
             body: Some(
                 "## What to build\n\nDerive state.\n\n\
                  ## Parent\n\nfunkode-io/zfirot#1\n\n\
@@ -86,6 +91,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
         RawIssue {
             number: 5,
             title: "Two-tier issue classification".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/5".to_string(),
             body: Some(
                 "## What to build\n\nClassify issues.\n\n\
                  ## Acceptance criteria\n\n- [ ] Labels work\n\n\
@@ -105,6 +111,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
         RawIssue {
             number: 8,
             title: "Multi-repo support".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/8".to_string(),
             body: Some(
                 "## Problem Statement\n\nUsers need to track multiple repos.\n\n\
                  ## User Stories\n\n- As a user, I want to add repos…"
@@ -122,6 +129,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
         RawIssue {
             number: 9,
             title: "Add dark-mode toggle".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/9".to_string(),
             body: Some(
                 "## What to build\n\nA dark-mode toggle button.\n\n\
                  ## Acceptance criteria\n\n- [ ] Toggle persists across restarts"
@@ -139,6 +147,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
         RawIssue {
             number: 10,
             title: "Investigate Tauri migration".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/10".to_string(),
             body: Some("Spike: evaluate Tauri vs Dioxus desktop.".to_string()),
             labels: vec![],
             closed: false,
@@ -152,6 +161,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
         RawIssue {
             number: 2,
             title: "Walking skeleton".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/2".to_string(),
             body: None,
             labels: vec!["slice".to_string()],
             closed: true,
@@ -173,6 +183,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 4,
             title: "Live GitHub read: real board for a hardcoded repo".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/4".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: None,
@@ -182,6 +193,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 5,
             title: "Two-tier issue classification".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/5".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: None,
@@ -192,6 +204,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 3,
             title: "Derive SliceState as a pure domain function".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/3".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: Some("carlos-verdes".to_string()),
@@ -202,6 +215,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 6,
             title: "PAT authentication via the OS secure store".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/6".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: None,
@@ -211,6 +225,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 7,
             title: "Home screen: recent projects, reopen last".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/7".to_string(),
             closed: false,
             prd_title: prd.clone(),
             assignee: None,
@@ -221,6 +236,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
         RawSlice {
             number: 2,
             title: "Walking skeleton".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/2".to_string(),
             closed: true,
             prd_title: prd,
             assignee: Some("carlos-verdes".to_string()),

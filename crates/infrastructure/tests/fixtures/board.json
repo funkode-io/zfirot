@@ -8,8 +8,26 @@
         },
         "nodes": [
           {
+            "number": 1,
+            "title": "PRD: Zfirot desktop dashboard",
+            "url": "https://github.com/funkode-io/zfirot/issues/1",
+            "body": "## Problem Statement\n\nVisualise agent work.\n",
+            "assignees": {
+              "nodes": []
+            },
+            "parent": null,
+            "blockedBy": {
+              "nodes": []
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          },
+          {
             "number": 4,
             "title": "Live GitHub read: real board for a hardcoded repo",
+            "url": "https://github.com/funkode-io/zfirot/issues/4",
+            "body": "## What to build\n\nRead the board live.\n",
             "assignees": {
               "nodes": []
             },
@@ -26,6 +44,8 @@
           {
             "number": 3,
             "title": "Derive SliceState as a pure domain function",
+            "url": "https://github.com/funkode-io/zfirot/issues/3",
+            "body": "",
             "assignees": {
               "nodes": [
                 {
@@ -50,6 +70,8 @@
           {
             "number": 6,
             "title": "PAT authentication via the OS secure store",
+            "url": "https://github.com/funkode-io/zfirot/issues/6",
+            "body": "",
             "assignees": {
               "nodes": []
             },
@@ -73,6 +95,8 @@
           {
             "number": 8,
             "title": "An issue with no parent and a merged-then-closed PR",
+            "url": "https://github.com/funkode-io/zfirot/issues/8",
+            "body": "",
             "assignees": {
               "nodes": []
             },
@@ -83,6 +107,22 @@
                   "state": "CLOSED"
                 }
               ]
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          },
+          {
+            "number": 9,
+            "title": "Prose-only Slice with no native links",
+            "url": "https://github.com/funkode-io/zfirot/issues/9",
+            "body": "## What to build\n\nSomething useful.\n\n## Parent\n\nfunkode-io/zfirot#1\n\n## Blocked by\n\n- funkode-io/zfirot#6\n- funkode-io/zfirot#99\n",
+            "assignees": {
+              "nodes": []
+            },
+            "parent": null,
+            "blockedBy": {
+              "nodes": []
             },
             "closedByPullRequestsReferences": {
               "nodes": []

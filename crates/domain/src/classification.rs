@@ -31,6 +31,8 @@ pub struct RawIssue {
     /// The GitHub issue number.
     pub number: u64,
     pub title: String,
+    /// The issue's URL on GitHub, for opening it in a browser.
+    pub url: String,
     /// Raw Markdown body of the issue.
     pub body: Option<String>,
     /// Labels applied to the issue (e.g. `"prd"`, `"slice"`, `"ready-for-agent"`).
@@ -178,6 +180,7 @@ mod tests {
         RawIssue {
             number,
             title: format!("Issue {number}"),
+            url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
             body: None,
             labels: Vec::new(),
             closed: false,

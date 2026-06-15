@@ -14,7 +14,11 @@ pub fn SliceCard(slice: Slice, on_assign: EventHandler<u64>) -> Element {
         div { class: "card card-compact bg-base-200 shadow-sm",
             div { class: "card-body",
                 div { class: "flex items-start justify-between gap-2",
-                    h3 { class: "card-title text-sm", "#{slice.number} {slice.title}" }
+                    h3 { class: "card-title text-sm",
+                        a { class: "link link-hover", href: "{slice.url}",
+                            "#{slice.number} {slice.title}"
+                        }
+                    }
                     span { class: "badge badge-sm {state_badge_class(slice.state)}",
                         "{state_label(slice.state)}"
                     }
