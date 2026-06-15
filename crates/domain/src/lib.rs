@@ -6,7 +6,9 @@
 mod error;
 mod repo;
 mod slice;
+mod token;
 
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
 pub use repo::RepoRef;
 pub use slice::{RawSlice, Slice, SliceState};
+pub use token::GitHubToken;

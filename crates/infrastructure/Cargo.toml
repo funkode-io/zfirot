@@ -9,5 +9,14 @@ domain.workspace = true
 application.workspace = true
 async-trait.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native"] }
+
 [dev-dependencies]
 tokio.workspace = true

@@ -2,7 +2,12 @@
 //!
 //! For the walking skeleton this provides a [`FakeGitHubPort`] returning canned
 //! data so the board can render end-to-end without GitHub access. The real
-//! GraphQL adapter arrives in a later slice.
+//! GraphQL adapter arrives in a later slice. Authentication is backed by the OS
+//! secure store through [`KeyringSecureStore`] (see [`secure_store`]).
+
+mod secure_store;
+
+pub use secure_store::{FakeSecureStore, KeyringSecureStore};
 
 use application::GitHubPort;
 use async_trait::async_trait;
