@@ -10,7 +10,7 @@ use domain::{AppResult, RawSlice, RepoRef, Slice};
 
 mod github;
 
-pub use github::{parse_response, resolve_board, GitHubClient};
+pub use github::{parse_response, resolve_board, GitHubClient, RawIssue};
 
 /// A fake [`GitHubPort`] that returns a fixed set of Slices.
 #[derive(Debug, Default, Clone, Copy)]
