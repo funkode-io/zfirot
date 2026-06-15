@@ -6,12 +6,13 @@
 //! discarded and the user is routed back to the paste-token screen to enter a
 //! new one, with the reason shown inline.
 
-use application::{AuthService, SecureStorePort};
+use application::{AuthService, ClassifiedBoard, OtherIssue, SecureStorePort};
 use dioxus::prelude::*;
 use domain::{AppErrorKind, GitHubToken, Project, RepoRef, Slice, SliceState};
 
 use crate::components::{
-    state_badge_class, state_label, BoardColumn, ErrorBanner, HomeScreen, TokenScreen,
+    state_badge_class, state_label, BoardColumn, ErrorBanner, HomeScreen, OtherIssueCard,
+    TokenScreen,
 };
 use crate::state::{last_opened, open_project, recent_projects, secure_store, AppState};
 
@@ -23,8 +24,12 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 enum View {
     /// A token is stored but no project is open yet: pick from recent projects.
     Home(Vec<Project>),
-    /// A token is stored and the board for `repo` loaded.
-    Board { repo: RepoRef, slices: Vec<Slice> },
+    /// A token is stored and the board for `repo` loaded and was classified into
+    /// confirmed Slices plus an "other open issues" bucket.
+    Board {
+        repo: RepoRef,
+        board: ClassifiedBoard,
+    },
     /// Show the paste-token screen. `reason` is `Some` when a stored token was
     /// rejected by GitHub (so the user knows why they are being asked again) and
     /// `None` on first launch when no token has ever been saved.
@@ -105,9 +110,12 @@ pub fn App() -> Element {
                 HomeScreen { projects: projects.clone(), on_open }
             },
             // Token present and the board loaded.
-            Some(View::Board { repo, slices }) => rsx! {
+            Some(View::Board { repo, board }) => rsx! {
                 BoardShell { repo: repo.to_string(), on_home,
-                    Board { slices: slices.clone() }
+                    Board { slices: board.slices.clone() }
+                    if !board.other.is_empty() {
+                        OtherIssues { issues: board.other.clone() }
+                    }
                 }
             },
             Some(View::Error(message)) => rsx! {
@@ -161,8 +169,8 @@ async fn resolve_view(nav: Nav) -> View {
         Err(error) => return View::Error(error.to_string()),
     };
 
-    match state.load_board().await {
-        Ok(slices) => View::Board { repo, slices },
+    match state.classify_board().await {
+        Ok(board) => View::Board { repo, board },
         Err(error) if is_auth_failure(error.kind()) => {
             // The stored token was rejected (revoked, expired, or missing
             // scopes). Discard it so we do not loop on a known-bad secret, then
@@ -265,6 +273,35 @@ fn Board(slices: Vec<Slice>) -> Element {
                     badge_class: state_badge_class(state).to_string(),
                     slices: slices.iter().filter(|s| s.state == state).cloned().collect::<Vec<_>>(),
                     on_assign: move |_number| {}, // Assign-self is wired in a later slice. No-op for now.,
+                }
+            }
+        }
+    }
+}
+
+/// The "other open issues" bucket — shows suggested and unclassified issues
+/// below the Kanban board.
+///
+/// Suggested issues (tier-2 classification) render with a
+/// "looks like a PRD/Slice — confirm?" badge. Unclassified issues render
+/// without any badge. No write action is performed here.
+#[component]
+fn OtherIssues(issues: Vec<OtherIssue>) -> Element {
+    let count = issues.len();
+    rsx! {
+        section { class: "mt-6",
+            div { class: "collapse collapse-arrow bg-base-100 border border-base-300",
+                input { r#type: "checkbox" }
+                div { class: "collapse-title text-lg font-semibold flex items-center gap-2",
+                    "Other open issues"
+                    span { class: "badge badge-neutral", "{count}" }
+                }
+                div { class: "collapse-content",
+                    div { class: "flex flex-col gap-2",
+                        for issue in issues {
+                            OtherIssueCard { key: "{issue.number}", issue: issue.clone() }
+                        }
+                    }
                 }
             }
         }

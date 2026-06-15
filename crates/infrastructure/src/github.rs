@@ -42,6 +42,33 @@ query Board($owner: String!, $name: String!, $cursor: String) {
 }
 "#;
 
+/// One page of issues for classification: **open and closed**, with the labels,
+/// native relationships, and linked-PR state the two-tier classifier needs.
+/// `classify_board` filters closed issues out, but they are still fetched so a
+/// Slice's native parent or blocker that happens to be closed is visible to the
+/// mapping (and a closed blocker is correctly dropped, not silently missing).
+const ISSUES_QUERY: &str = r#"
+query Issues($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 50, after: $cursor, states: [OPEN, CLOSED], orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        url
+        body
+        state
+        labels(first: 20) { nodes { name } }
+        assignees(first: 1) { nodes { login } }
+        parent { number labels(first: 20) { nodes { name } } }
+        blockedBy(first: 50) { nodes { number state } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
+      }
+    }
+  }
+}
+"#;
+
 /// The viewer's accessible repositories, most-recently-pushed first, for the
 /// home screen. One page of up to 50 is plenty for a recent-projects list;
 /// `ProjectsService` re-sorts by `pushedAt` regardless of the returned order.
@@ -144,6 +171,42 @@ impl GitHubClient {
         })
     }
 
+    /// Fetch a single page of issues for classification (open and closed) for
+    /// `repo`, starting after `cursor`.
+    async fn fetch_issues_page(&self, repo: &RepoRef, cursor: Option<&str>) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": ISSUES_QUERY,
+            "variables": { "owner": repo.owner, "name": repo.name, "cursor": cursor },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_issues_page")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_issues_page",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_issues_page")
+                .with_source(err)
+        })
+    }
+
     /// Fetch a single page of the viewer's repositories, starting after `cursor`.
     async fn fetch_projects_page(&self, cursor: Option<&str>) -> AppResult<String> {
         let body = serde_json::json!({
@@ -202,15 +265,21 @@ impl GitHubPort for GitHubClient {
             .collect())
     }
 
-    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
-        // No live issue-classification query exists yet: the `classify_board`
-        // use-case is exercised only through the fake adapter. Fail loudly
-        // rather than returning an empty list, so a caller that wires this into
-        // the live board surfaces an error instead of a silently empty board.
-        Err(
-            AppError::internal("Loading issues for classification is not implemented yet")
-                .with_operation("GitHubClient::load_issues"),
-        )
+    async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        let mut issues = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let body = self.fetch_issues_page(repo, cursor.as_deref()).await?;
+            let (page, next) = parse_issues_response(&body)?;
+            issues.extend(page);
+            match next {
+                Some(end) => cursor = Some(end),
+                None => break,
+            }
+        }
+
+        Ok(issues)
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -312,6 +381,62 @@ pub fn parse_response(body: &str) -> AppResult<(Vec<IssueData>, Option<String>)>
 
     let issues = repository.issues;
     let raw = issues.nodes.into_iter().map(map_issue).collect();
+    let next = if issues.page_info.has_next_page {
+        issues.page_info.end_cursor
+    } else {
+        None
+    };
+
+    Ok((raw, next))
+}
+
+/// Parse a GraphQL issues response into a page of [`RawIssue`]s and the cursor
+/// of the next page (if any), for the two-tier classifier. Pure and offline:
+/// the test seam for `load_issues`. Unlike [`parse_response`], every issue maps
+/// directly to a [`RawIssue`] (open/closed, labels, native links, linked-PR
+/// state); the cross-issue prose resolution stays in `classify_board`.
+pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<String>)> {
+    let response: IssuesResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_issues_response")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        let not_found = errors.iter().any(|error| {
+            error.error_type.as_deref() == Some("NOT_FOUND")
+                || error
+                    .message
+                    .to_lowercase()
+                    .contains("could not resolve to a repository")
+        });
+        let message = errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let error = if not_found {
+            AppError::not_found("Repository not found or not visible to the token")
+        } else if message.to_lowercase().contains("rate limit") {
+            AppError::rate_limited("GitHub rate limit exceeded")
+        } else {
+            AppError::internal("GitHub reported a query error")
+        };
+        return Err(error
+            .with_operation("parse_issues_response")
+            .with_context("errors", message));
+    }
+
+    let repository = response
+        .data
+        .and_then(|data| data.repository)
+        .ok_or_else(|| {
+            AppError::not_found("Repository not found or not visible to the token")
+                .with_operation("parse_issues_response")
+        })?;
+
+    let issues = repository.issues;
+    let raw = issues.nodes.into_iter().map(map_issue_raw).collect();
     let next = if issues.page_info.has_next_page {
         issues.page_info.end_cursor
     } else {
@@ -492,6 +617,64 @@ fn map_issue(node: IssueNode) -> IssueData {
     }
 }
 
+/// Project one GraphQL issue node into a [`RawIssue`] for the two-tier
+/// classifier: open/closed, labels, native parent number (and whether it is a
+/// `prd`-labelled parent), still-open native blockers, assignee, and linked-PR
+/// state. The cross-issue prose resolution is left to `classify_board`.
+fn map_issue_raw(node: RawIssueNode) -> RawIssue {
+    let has_open_linked_pr = node
+        .closed_by_pull_requests_references
+        .nodes
+        .iter()
+        .any(|pr| pr.state == "OPEN");
+
+    let native_parent = node.parent.as_ref().map(|parent| parent.number);
+    let is_native_child_of_prd = node
+        .parent
+        .as_ref()
+        .map(|parent| parent.labels.nodes.iter().any(|label| label.name == "prd"))
+        .unwrap_or(false);
+
+    // Only still-open blockers count toward Blocked; closed ones are dropped.
+    let native_blockers = node
+        .blocked_by
+        .nodes
+        .into_iter()
+        .filter(|blocker| blocker.state == "OPEN")
+        .map(|blocker| blocker.number)
+        .collect();
+
+    let body = if node.body.is_empty() {
+        None
+    } else {
+        Some(node.body)
+    };
+
+    RawIssue {
+        number: node.number,
+        title: node.title,
+        url: node.url,
+        body,
+        labels: node
+            .labels
+            .nodes
+            .into_iter()
+            .map(|label| label.name)
+            .collect(),
+        closed: node.state != "OPEN",
+        native_parent,
+        native_blockers,
+        assignee: node
+            .assignees
+            .nodes
+            .into_iter()
+            .next()
+            .map(|user| user.login),
+        has_open_linked_pr,
+        is_native_child_of_prd,
+    }
+}
+
 /// A single issue's native facts plus the prose relationships parsed from its
 /// body, before references are resolved against the rest of the board.
 #[derive(Debug)]
@@ -584,6 +767,75 @@ struct StateConnection {
 
 #[derive(Deserialize)]
 struct StateNode {
+    state: String,
+}
+
+// ── Issues-for-classification query (open and closed) ────────────────────────
+
+#[derive(Deserialize)]
+struct IssuesResponse {
+    data: Option<IssuesData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct IssuesData {
+    repository: Option<IssuesRepositoryData>,
+}
+
+#[derive(Deserialize)]
+struct IssuesRepositoryData {
+    issues: RawIssueConnection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawIssueConnection {
+    page_info: PageInfo,
+    nodes: Vec<RawIssueNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawIssueNode {
+    number: u64,
+    title: String,
+    url: String,
+    body: String,
+    state: String,
+    labels: NameConnection,
+    assignees: LoginConnection,
+    parent: Option<ParentIssueNode>,
+    blocked_by: BlockerConnection,
+    closed_by_pull_requests_references: StateConnection,
+}
+
+#[derive(Deserialize)]
+struct NameConnection {
+    nodes: Vec<NameNode>,
+}
+
+#[derive(Deserialize)]
+struct NameNode {
+    name: String,
+}
+
+/// The native sub-issue parent, with its number and labels so the classifier
+/// can tell whether it is a `prd`-labelled parent.
+#[derive(Deserialize)]
+struct ParentIssueNode {
+    number: u64,
+    labels: NameConnection,
+}
+
+#[derive(Deserialize)]
+struct BlockerConnection {
+    nodes: Vec<BlockerNode>,
+}
+
+#[derive(Deserialize)]
+struct BlockerNode {
+    number: u64,
     state: String,
 }
 

@@ -1,13 +1,13 @@
 //! Application layer: use-cases and the port traits that infrastructure
 //! implements (dependency inversion). Depends only on `domain`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use domain::{
-    classify_issue, parse_blockers_from_body, AppAction, AppError, AppResult, GitHubToken,
-    IssueClassification, Prd, Project, RawIssue, RawSlice, RepoRef, Slice,
+    classify_issue, parse_blockers_from_body, parse_parent_from_body, AppAction, AppError,
+    AppResult, GitHubToken, IssueClassification, Prd, Project, RawIssue, RawSlice, RepoRef, Slice,
 };
 
 /// The seam between the application and any GitHub backend (real or fake).
@@ -61,6 +61,8 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
 pub struct OtherIssue {
     pub number: u64,
     pub title: String,
+    /// The issue's URL on GitHub, for opening it in a browser.
+    pub url: String,
     /// [`IssueClassification::SuggestedPrd`], [`IssueClassification::SuggestedSlice`],
     /// or [`IssueClassification::Unclassified`].
     pub classification: IssueClassification,
@@ -178,6 +180,13 @@ impl<P: GitHubPort> BoardService<P> {
             .map(|raw| raw.number)
             .collect();
 
+        // Title of every issue in the board, so a Slice's parent reference
+        // (native or prose) resolves to its PRD title for the card tag.
+        let title_by_number: HashMap<u64, String> = raw_issues
+            .iter()
+            .map(|raw| (raw.number, raw.title.clone()))
+            .collect();
+
         let mut slices = Vec::new();
         let mut prds = Vec::new();
         let mut other = Vec::new();
@@ -201,14 +210,19 @@ impl<P: GitHubPort> BoardService<P> {
                             .filter(|number| open_numbers.contains(number))
                             .count() as u32
                     };
-                    // PRD title resolution against the PRD list is deferred;
-                    // `prd_title` is left `None` here and filled in a later slice.
+                    // Resolve the parent PRD title: prefer the native parent
+                    // link, fall back to the prose `## Parent` reference, then
+                    // look the number up among the issues in this board.
+                    let prd_title = raw
+                        .native_parent
+                        .or_else(|| parse_parent_from_body(body_str))
+                        .and_then(|number| title_by_number.get(&number).cloned());
                     let raw_slice = RawSlice {
                         number: raw.number,
                         title: raw.title,
                         url: raw.url,
                         closed: false,
-                        prd_title: None,
+                        prd_title,
                         assignee: raw.assignee,
                         has_open_linked_pr: raw.has_open_linked_pr,
                         open_blocker_count,
@@ -225,6 +239,7 @@ impl<P: GitHubPort> BoardService<P> {
                     other.push(OtherIssue {
                         number: raw.number,
                         title: raw.title,
+                        url: raw.url,
                         classification,
                     });
                 }

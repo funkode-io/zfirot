@@ -8,3 +8,11 @@
 
 /* Iconify icons as utility classes, e.g. `icon-[lucide--layout-dashboard]`. */
 @plugin "@iconify/tailwind4";
+
+/* Always reserve space for the vertical scrollbar so toggling content height
+   (e.g. expanding the "other open issues" accordion) does not reflow the page
+   and change the Kanban column widths. Unlayered + !important so it wins over
+   daisyUI's conditional `:root { scrollbar-gutter: if(...) }` rule. */
+html {
+  scrollbar-gutter: stable !important;
+}

@@ -115,3 +115,38 @@ async fn classify_board_derives_blocked_state_from_native_blockers() {
         "issue #3's only prose blocker (#2) is closed, so it must not be Blocked"
     );
 }
+
+#[tokio::test]
+async fn classify_board_resolves_prd_title_from_native_and_prose_parents() {
+    let service = BoardService::new(FakeGitHubPort);
+    let repo = RepoRef::new("funkode-io", "zfirot");
+
+    let ClassifiedBoard { slices, .. } = service
+        .classify_board(&repo)
+        .await
+        .expect("fake port should classify the board");
+
+    // Issue #3 links its parent natively to PRD #1, so its card is tagged with
+    // that PRD's title.
+    let slice3 = slices
+        .iter()
+        .find(|s| s.number == 3)
+        .expect("issue #3 should be a confirmed Slice");
+    assert_eq!(
+        slice3.prd_title.as_deref(),
+        Some("Zfirot desktop dashboard"),
+        "issue #3's native parent should resolve to PRD #1's title"
+    );
+
+    // Issue #5 has no native parent but a prose "## Parent" pointing at #1, so
+    // the prose fallback resolves the same PRD title.
+    let slice5 = slices
+        .iter()
+        .find(|s| s.number == 5)
+        .expect("issue #5 should be a confirmed Slice");
+    assert_eq!(
+        slice5.prd_title.as_deref(),
+        Some("Zfirot desktop dashboard"),
+        "issue #5's prose parent should resolve to PRD #1's title"
+    );
+}

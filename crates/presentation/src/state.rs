@@ -8,9 +8,10 @@
 use std::sync::Arc;
 
 use application::{
-    BoardService, GitHubPort, LastOpenedService, ProjectStorePort, ProjectsService, SecureStorePort,
+    BoardService, ClassifiedBoard, GitHubPort, LastOpenedService, ProjectStorePort,
+    ProjectsService, SecureStorePort,
 };
-use domain::{AppAction, AppResult, GitHubToken, Project, RepoRef, Slice};
+use domain::{AppAction, AppResult, GitHubToken, Project, RepoRef};
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
 use infrastructure::{FileProjectStore, GitHubClient, KeyringSecureStore};
@@ -70,10 +71,11 @@ impl AppState {
         Self { repo, port }
     }
 
-    /// Load the board for the wired project.
-    pub async fn load_board(&self) -> AppResult<Vec<Slice>> {
+    /// Load and classify the board for the wired project: confirmed Slices for
+    /// the Kanban columns plus the "other open issues" bucket.
+    pub async fn classify_board(&self) -> AppResult<ClassifiedBoard> {
         BoardService::new(self.port.clone())
-            .load_board(&self.repo)
+            .classify_board(&self.repo)
             .await
     }
 }

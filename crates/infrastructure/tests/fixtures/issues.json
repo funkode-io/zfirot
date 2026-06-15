@@ -1,0 +1,174 @@
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Y3Vyc29yOnYyOpHOAA"
+        },
+        "nodes": [
+          {
+            "number": 1,
+            "title": "Zfirot desktop dashboard",
+            "url": "https://github.com/funkode-io/zfirot/issues/1",
+            "body": "## Problem Statement\n\nAgents need a dashboard.\n\n## User Stories\n\n- As an agent…\n",
+            "state": "OPEN",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "prd"
+                }
+              ]
+            },
+            "assignees": {
+              "nodes": []
+            },
+            "parent": null,
+            "blockedBy": {
+              "nodes": []
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          },
+          {
+            "number": 3,
+            "title": "Derive SliceState as a pure domain function",
+            "url": "https://github.com/funkode-io/zfirot/issues/3",
+            "body": "",
+            "state": "OPEN",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "ready-for-agent"
+                }
+              ]
+            },
+            "assignees": {
+              "nodes": [
+                {
+                  "login": "carlos-verdes"
+                }
+              ]
+            },
+            "parent": {
+              "number": 1,
+              "labels": {
+                "nodes": [
+                  {
+                    "name": "prd"
+                  }
+                ]
+              }
+            },
+            "blockedBy": {
+              "nodes": [
+                {
+                  "number": 2,
+                  "state": "CLOSED"
+                }
+              ]
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": [
+                {
+                  "state": "OPEN"
+                }
+              ]
+            }
+          },
+          {
+            "number": 5,
+            "title": "Two-tier issue classification",
+            "url": "https://github.com/funkode-io/zfirot/issues/5",
+            "body": "## What to build\n\nClassify issues.\n\n## Parent\n\nfunkode-io/zfirot#1\n",
+            "state": "OPEN",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "slice"
+                }
+              ]
+            },
+            "assignees": {
+              "nodes": []
+            },
+            "parent": null,
+            "blockedBy": {
+              "nodes": [
+                {
+                  "number": 3,
+                  "state": "OPEN"
+                },
+                {
+                  "number": 2,
+                  "state": "CLOSED"
+                }
+              ]
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          },
+          {
+            "number": 9,
+            "title": "Add dark-mode toggle",
+            "url": "https://github.com/funkode-io/zfirot/issues/9",
+            "body": "## What to build\n\nA dark-mode toggle button.\n\n## Acceptance criteria\n\n- [ ] Toggle persists\n",
+            "state": "OPEN",
+            "labels": {
+              "nodes": []
+            },
+            "assignees": {
+              "nodes": []
+            },
+            "parent": null,
+            "blockedBy": {
+              "nodes": []
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          },
+          {
+            "number": 2,
+            "title": "Walking skeleton",
+            "url": "https://github.com/funkode-io/zfirot/issues/2",
+            "body": "",
+            "state": "CLOSED",
+            "labels": {
+              "nodes": [
+                {
+                  "name": "slice"
+                }
+              ]
+            },
+            "assignees": {
+              "nodes": [
+                {
+                  "login": "carlos-verdes"
+                }
+              ]
+            },
+            "parent": {
+              "number": 1,
+              "labels": {
+                "nodes": [
+                  {
+                    "name": "prd"
+                  }
+                ]
+              }
+            },
+            "blockedBy": {
+              "nodes": []
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          }
+        ]
+      }
+    }
+  }
+}

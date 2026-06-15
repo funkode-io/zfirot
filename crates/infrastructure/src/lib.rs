@@ -13,7 +13,9 @@ mod github;
 mod project_store;
 mod secure_store;
 
-pub use github::{parse_projects_response, parse_response, resolve_board, GitHubClient};
+pub use github::{
+    parse_issues_response, parse_projects_response, parse_response, resolve_board, GitHubClient,
+};
 pub use project_store::{FakeProjectStore, FileProjectStore};
 pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
 
