@@ -30,8 +30,13 @@ impl AppState {
     /// can tell the user how to configure it.
     pub fn from_env() -> AppResult<Self> {
         let token = std::env::var("GITHUB_TOKEN").map_err(|_| {
-            AppError::unauthorized("Set GITHUB_TOKEN (see .env.example) to load the board.")
-                .with_operation("AppState::from_env")
+            AppError::unauthorized(
+                "No GITHUB_TOKEN found. Create a fine-grained Personal Access Token at \
+                 https://github.com/settings/personal-access-tokens/new (grant the repository \
+                 read access to Issues, Pull requests, and Contents), then set it as GITHUB_TOKEN \
+                 in your .env file (copy .env.example) and restart the app.",
+            )
+            .with_operation("AppState::from_env")
         })?;
 
         let client = GitHubClient::new(token, reqwest::Client::new());
