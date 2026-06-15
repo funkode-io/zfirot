@@ -16,7 +16,21 @@ pub fn TokenScreen(on_submit: EventHandler<String>, error: Option<String>) -> El
                 div { class: "card-body",
                     h2 { class: "card-title", "Connect to GitHub" }
                     p { class: "text-sm opacity-70",
-                        "Paste a fine-grained Personal Access Token. It is saved to your operating system's secure store and reused on every launch."
+                        "Zfirot reads your project board from GitHub. Create a fine-grained Personal Access Token, grant it the permissions below, then paste it here. It is saved to your operating system's secure store and reused on every launch."
+                    }
+                    a {
+                        class: "link link-primary text-sm inline-flex items-center gap-1",
+                        href: "https://github.com/settings/personal-access-tokens/new",
+                        span { class: "icon-[lucide--external-link] size-4" }
+                        "Create a fine-grained token on GitHub"
+                    }
+                    div { class: "rounded-box bg-base-200 p-3 text-sm",
+                        p { class: "font-medium mb-1", "Required repository permissions:" }
+                        ul { class: "list-disc list-inside opacity-80",
+                            li { "Issues — Read and write" }
+                            li { "Pull requests — Read-only" }
+                            li { "Contents — Read-only" }
+                        }
                     }
                     label { class: "form-control w-full",
                         div { class: "label",
