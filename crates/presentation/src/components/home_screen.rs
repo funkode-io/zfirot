@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 use domain::{Project, RepoRef};
 
+use super::Card;
+
 /// How many recent projects to show before the user clicks "Show more".
 const INITIAL_VISIBLE: usize = 6;
 
@@ -63,14 +65,12 @@ fn ProjectCard(project: Project, on_open: EventHandler<RepoRef>) -> Element {
     let repo = project.repo.clone();
 
     rsx! {
-        button {
-            class: "card card-compact bg-base-100 shadow-sm hover:shadow-md transition-shadow text-left cursor-pointer",
-            onclick: move |_| on_open.call(repo.clone()),
-            div { class: "card-body",
-                div { class: "flex items-center gap-2",
-                    span { class: "icon-[lucide--book-marked] size-5 opacity-70" }
-                    h3 { class: "card-title text-sm", "{project.repo}" }
-                }
+        Card {
+            class: "hover:shadow-md transition-shadow text-left cursor-pointer",
+            on_click: move |_| on_open.call(repo.clone()),
+            div { class: "flex items-center gap-2",
+                span { class: "icon-[lucide--book-marked] size-5 opacity-70" }
+                h3 { class: "card-title text-sm", "{project.repo}" }
             }
         }
     }

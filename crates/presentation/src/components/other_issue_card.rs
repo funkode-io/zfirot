@@ -2,6 +2,8 @@ use application::OtherIssue;
 use dioxus::prelude::*;
 use domain::IssueClassification;
 
+use super::{Card, CardBackground};
+
 /// Card for a single issue in the "other open issues" bucket.
 ///
 /// Renders the issue number and title, plus a "looks like a PRD/Slice — confirm?"
@@ -17,18 +19,16 @@ pub fn OtherIssueCard(issue: OtherIssue) -> Element {
     };
 
     rsx! {
-        div { class: "card card-compact bg-base-200 shadow-sm",
-            div { class: "card-body",
-                div { class: "flex items-start justify-between gap-2",
-                    h3 { class: "card-title text-sm",
-                        a { class: "link link-hover", href: "{issue.url}",
-                            "#{issue.number} {issue.title}"
-                        }
+        Card { background: CardBackground::Base200,
+            div { class: "flex items-start justify-between gap-2",
+                h3 { class: "card-title text-sm",
+                    a { class: "link link-hover", href: "{issue.url}",
+                        "#{issue.number} {issue.title}"
                     }
-                    if let Some(badge_text) = suggestion_badge {
-                        span { class: "badge badge-sm badge-info whitespace-nowrap",
-                            "{badge_text}"
-                        }
+                }
+                if let Some(badge_text) = suggestion_badge {
+                    span { class: "badge badge-sm badge-info whitespace-nowrap",
+                        "{badge_text}"
                     }
                 }
             }
