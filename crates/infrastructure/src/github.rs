@@ -667,10 +667,19 @@ fn parse_assign_mutation(body: &str) -> AppAction {
 
 /// Map a GraphQL `errors` array from an assign round trip to an [`AppError`]
 /// the caller can act on, joining the messages for context.
+///
+/// A `FORBIDDEN` here almost always means the fine-grained token can *read*
+/// issues (the board loaded) but lacks *write* access to assign them, so the
+/// message names the exact permission to grant. GitHub's own text is appended
+/// so the underlying reason is visible without digging into the logs.
 fn assign_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError {
     let forbidden = errors.iter().any(|error| {
         matches!(error.error_type.as_deref(), Some("FORBIDDEN"))
             || error.message.to_lowercase().contains("must have")
+            || error
+                .message
+                .to_lowercase()
+                .contains("not accessible by personal access token")
     });
     let message = errors
         .into_iter()
@@ -679,7 +688,12 @@ fn assign_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError 
         .join("; ");
     let lowered = message.to_lowercase();
     let error = if forbidden {
-        AppError::forbidden("The token lacks permission to assign this issue")
+        AppError::forbidden(format!(
+            "GitHub denied the assignment. Your fine-grained token needs the \
+             repository \"Issues\" permission set to \"Read and write\" (or \
+             \"Pull requests: Read and write\" if the Slice is a pull request). \
+             GitHub said: {message}"
+        ))
     } else if lowered.contains("rate limit") {
         AppError::rate_limited("GitHub rate limit exceeded")
     } else if lowered.contains("could not resolve") || lowered.contains("not_found") {
