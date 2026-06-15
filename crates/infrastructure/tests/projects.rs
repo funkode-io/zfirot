@@ -9,6 +9,54 @@ use application::{
 use async_trait::async_trait;
 use domain::{AppAction, AppResult, Project, RawIssue, RepoRef, Slice};
 use infrastructure::FakeProjectStore;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// A spy [`ProjectStorePort`] that counts `cache_projects` calls so a test can
+/// assert *how many* writes a refresh performed. A plain fake cannot catch a
+/// redundant write on the `Unchanged` path because the stored value looks the
+/// same either way.
+#[derive(Default)]
+struct CountingProjectStore {
+    cached: Mutex<Option<Vec<Project>>>,
+    writes: AtomicUsize,
+}
+
+impl CountingProjectStore {
+    /// A store pre-seeded with a cached list and a zeroed write count.
+    fn seeded(projects: Vec<Project>) -> Self {
+        Self {
+            cached: Mutex::new(Some(projects)),
+            writes: AtomicUsize::new(0),
+        }
+    }
+
+    /// How many times `cache_projects` has been called.
+    fn writes(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ProjectStorePort for CountingProjectStore {
+    async fn last_opened(&self) -> AppResult<Option<RepoRef>> {
+        Ok(None)
+    }
+
+    async fn remember_last_opened(&self, _repo: &RepoRef) -> AppAction {
+        Ok(())
+    }
+
+    async fn cached_projects(&self) -> AppResult<Option<Vec<Project>>> {
+        Ok(self.cached.lock().expect("lock poisoned").clone())
+    }
+
+    async fn cache_projects(&self, projects: &[Project]) -> AppAction {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        *self.cached.lock().expect("lock poisoned") = Some(projects.to_vec());
+        Ok(())
+    }
+}
 
 /// A GitHub port that returns projects in a deliberately *unsorted* order, so
 /// the test fails if `ProjectsService` ever stops owning the recency sort
@@ -138,32 +186,32 @@ async fn refresh_seeds_a_cold_cache_and_reports_changed() {
 
 #[tokio::test]
 async fn refresh_reports_unchanged_when_the_cache_already_matches() {
-    let store = FakeProjectStore::empty();
-    store
-        .cache_projects(&sorted_live())
-        .await
-        .expect("seeding the cache should persist");
-    let service = RecentProjectsService::new(UnsortedGitHubPort, store);
+    // Keep a handle on the spy after moving a clone into the service, so we can
+    // read its write count once the refresh has run.
+    let store = Arc::new(CountingProjectStore::seeded(sorted_live()));
+    let service = RecentProjectsService::new(UnsortedGitHubPort, store.clone());
 
     assert_eq!(
         service.refresh().await.expect("refresh should fetch"),
         ProjectsRefresh::Unchanged,
         "a live list equal to the cache is a no-op, so the UI does not flicker"
     );
+
+    assert_eq!(
+        store.writes(),
+        0,
+        "an unchanged refresh must not rewrite the cache"
+    );
 }
 
 #[tokio::test]
 async fn refresh_rewrites_a_stale_cache_and_reports_changed() {
-    let store = FakeProjectStore::empty();
     let stale = vec![Project::new(
         RepoRef::new("acme", "gone"),
         "2020-01-01T00:00:00Z",
     )];
-    store
-        .cache_projects(&stale)
-        .await
-        .expect("seeding the cache should persist");
-    let service = RecentProjectsService::new(UnsortedGitHubPort, store);
+    let store = Arc::new(CountingProjectStore::seeded(stale));
+    let service = RecentProjectsService::new(UnsortedGitHubPort, store.clone());
 
     assert_eq!(
         service.refresh().await.expect("refresh should fetch"),
@@ -172,8 +220,14 @@ async fn refresh_rewrites_a_stale_cache_and_reports_changed() {
     );
 
     assert_eq!(
-        service.cached().await.expect("cache should read"),
+        store.cached_projects().await.expect("cache should read"),
         Some(sorted_live()),
         "the stale cache was overwritten with the fresh list"
+    );
+
+    assert_eq!(
+        store.writes(),
+        1,
+        "a changed refresh rewrites the cache exactly once"
     );
 }
