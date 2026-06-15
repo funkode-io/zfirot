@@ -27,6 +27,43 @@ impl SliceState {
     pub const BOARD: [SliceState; 3] = [SliceState::Ready, SliceState::Wip, SliceState::Blocked];
 }
 
+/// At-a-glance counts of the active board's Slices by state, for the summary
+/// strip above the columns.
+///
+/// Only the three board states are counted; `Done` (closed) Slices are hidden
+/// from the active board, so they are excluded from every count — `total` is
+/// therefore `ready + wip + blocked`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BoardSummary {
+    pub ready: usize,
+    pub wip: usize,
+    pub blocked: usize,
+}
+
+impl BoardSummary {
+    /// Count the Slices in each board state, ignoring `Done` Slices.
+    ///
+    /// A pure derivation over the Slices' already-derived [`SliceState`], so it
+    /// stays consistent with what the columns show.
+    pub fn from_slices<'a>(slices: impl IntoIterator<Item = &'a Slice>) -> Self {
+        let mut summary = BoardSummary::default();
+        for slice in slices {
+            match slice.state {
+                SliceState::Ready => summary.ready += 1,
+                SliceState::Wip => summary.wip += 1,
+                SliceState::Blocked => summary.blocked += 1,
+                SliceState::Done => {}
+            }
+        }
+        summary
+    }
+
+    /// The number of Slices shown on the active board (Ready + WIP + Blocked).
+    pub fn total(&self) -> usize {
+        self.ready + self.wip + self.blocked
+    }
+}
+
 /// A reference to a related issue, for rendering a clickable dependency badge on
 /// a card: either a **blocker** (an issue this Slice is blocked by) or an issue
 /// this Slice **unblocks** (the reverse edge). Carries the issue number (shown
@@ -422,5 +459,53 @@ mod tests {
             four.unblocks.is_empty(),
             "a Slice that no longer blocks anything has no stale reverse edge"
         );
+    }
+
+    /// A Slice in a given state, for exercising the summary counts.
+    fn slice_in(number: u64, state: SliceState) -> Slice {
+        Slice {
+            number,
+            title: format!("Slice {number}"),
+            url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+            prd: None,
+            assignee: None,
+            state,
+            blockers: vec![],
+            unblocks: vec![],
+        }
+    }
+
+    #[test]
+    fn board_summary_counts_each_state_and_ignores_done() {
+        let slices = vec![
+            slice_in(1, SliceState::Ready),
+            slice_in(2, SliceState::Ready),
+            slice_in(3, SliceState::Wip),
+            slice_in(4, SliceState::Blocked),
+            slice_in(5, SliceState::Blocked),
+            slice_in(6, SliceState::Blocked),
+            // Done Slices are hidden from the board, so they count for nothing.
+            slice_in(7, SliceState::Done),
+            slice_in(8, SliceState::Done),
+        ];
+
+        let summary = BoardSummary::from_slices(&slices);
+
+        assert_eq!(summary.ready, 2, "two Ready Slices");
+        assert_eq!(summary.wip, 1, "one WIP Slice");
+        assert_eq!(summary.blocked, 3, "three Blocked Slices");
+        assert_eq!(
+            summary.total(),
+            6,
+            "the total is the visible board only (Done excluded)"
+        );
+    }
+
+    #[test]
+    fn board_summary_of_an_empty_board_is_all_zero() {
+        let summary = BoardSummary::from_slices(&[]);
+
+        assert_eq!(summary, BoardSummary::default());
+        assert_eq!(summary.total(), 0);
     }
 }
