@@ -9,10 +9,9 @@
 use application::AuthService;
 use dioxus::prelude::*;
 use domain::{AppErrorKind, Slice, SliceState};
-use infrastructure::KeyringSecureStore;
 
 use crate::components::{state_badge_class, state_label, BoardColumn, ErrorBanner, TokenScreen};
-use crate::state::AppState;
+use crate::state::{secure_store, AppState};
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
 /// Build it with `make css` (runs `npm run build:css` in crates/presentation).
@@ -46,7 +45,7 @@ pub fn App() -> Element {
 
     let on_submit = move |raw: String| {
         spawn(async move {
-            let auth = AuthService::new(KeyringSecureStore::new());
+            let auth = AuthService::new(secure_store());
             match auth.save_token(&raw).await {
                 Ok(()) => {
                     token_error.set(None);
@@ -71,7 +70,7 @@ pub fn App() -> Element {
             // Token present and the board loaded.
             Some(View::Board(slices)) => rsx! {
                 BoardShell {
-                    Board { slices: slices.clone() } // Token present but loading failed.
+                    Board { slices: slices.clone() } // Token present but loading failed. // Token present but loading failed.
                 }
             },
             Some(View::Error(message)) => rsx! {
@@ -95,7 +94,7 @@ pub fn App() -> Element {
 /// (`Unauthorized`/`Forbidden`) is discarded and also routes back to the screen,
 /// carrying the reason. Any other failure is shown as a transient error.
 async fn resolve_view() -> View {
-    let auth = AuthService::new(KeyringSecureStore::new());
+    let auth = AuthService::new(secure_store());
     let token = match auth.require_token().await {
         Ok(token) => token,
         Err(error) if error.kind() == AppErrorKind::Unauthorized => {

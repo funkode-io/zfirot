@@ -13,7 +13,7 @@ mod github;
 mod secure_store;
 
 pub use github::{parse_response, resolve_board, GitHubClient, RawIssue};
-pub use secure_store::{FakeSecureStore, KeyringSecureStore};
+pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
 
 /// A fake [`GitHubPort`] that returns a fixed set of Slices.
 #[derive(Debug, Default, Clone, Copy)]
