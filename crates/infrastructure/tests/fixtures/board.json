@@ -1,0 +1,95 @@
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Y3Vyc29yOnYyOpHOAA"
+        },
+        "nodes": [
+          {
+            "number": 4,
+            "title": "Live GitHub read: real board for a hardcoded repo",
+            "assignees": {
+              "nodes": []
+            },
+            "parent": {
+              "title": "Zfirot desktop dashboard"
+            },
+            "blockedBy": {
+              "nodes": []
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          },
+          {
+            "number": 3,
+            "title": "Derive SliceState as a pure domain function",
+            "assignees": {
+              "nodes": [
+                {
+                  "login": "carlos-verdes"
+                }
+              ]
+            },
+            "parent": {
+              "title": "Zfirot desktop dashboard"
+            },
+            "blockedBy": {
+              "nodes": []
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": [
+                {
+                  "state": "OPEN"
+                }
+              ]
+            }
+          },
+          {
+            "number": 6,
+            "title": "PAT authentication via the OS secure store",
+            "assignees": {
+              "nodes": []
+            },
+            "parent": {
+              "title": "Zfirot desktop dashboard"
+            },
+            "blockedBy": {
+              "nodes": [
+                {
+                  "state": "OPEN"
+                },
+                {
+                  "state": "CLOSED"
+                }
+              ]
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          },
+          {
+            "number": 8,
+            "title": "An issue with no parent and a merged-then-closed PR",
+            "assignees": {
+              "nodes": []
+            },
+            "parent": null,
+            "blockedBy": {
+              "nodes": [
+                {
+                  "state": "CLOSED"
+                }
+              ]
+            },
+            "closedByPullRequestsReferences": {
+              "nodes": []
+            }
+          }
+        ]
+      }
+    }
+  }
+}
