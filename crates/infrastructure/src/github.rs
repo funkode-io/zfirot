@@ -132,7 +132,7 @@ impl GitHubClient {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(status_error(status, &response));
+            return Err(status_error(status, &response, "GitHubClient::fetch_page"));
         }
 
         response.text().await.map_err(|err| {
@@ -163,7 +163,11 @@ impl GitHubClient {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(status_error(status, &response));
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_projects_page",
+            ));
         }
 
         response.text().await.map_err(|err| {
@@ -215,7 +219,13 @@ impl GitHubPort for GitHubClient {
 }
 
 /// Map a GitHub `4xx/5xx` response to an [`AppError`] the caller can act on.
-fn status_error(status: reqwest::StatusCode, response: &reqwest::Response) -> AppError {
+/// `operation` names the calling fetch so diagnostics point at the right one
+/// (board vs. project listing).
+fn status_error(
+    status: reqwest::StatusCode,
+    response: &reqwest::Response,
+    operation: &'static str,
+) -> AppError {
     let rate_limited = response
         .headers()
         .get("x-ratelimit-remaining")
@@ -224,19 +234,19 @@ fn status_error(status: reqwest::StatusCode, response: &reqwest::Response) -> Ap
         .unwrap_or(false);
 
     match status.as_u16() {
-        401 => AppError::unauthorized("GitHub rejected the token")
-            .with_operation("GitHubClient::fetch_page"),
-        403 if rate_limited => AppError::rate_limited("GitHub rate limit exceeded")
-            .with_operation("GitHubClient::fetch_page"),
+        401 => AppError::unauthorized("GitHub rejected the token").with_operation(operation),
+        403 if rate_limited => {
+            AppError::rate_limited("GitHub rate limit exceeded").with_operation(operation)
+        }
         403 => AppError::forbidden("The token lacks access to this repository")
-            .with_operation("GitHubClient::fetch_page"),
+            .with_operation(operation),
         // GitHub-side failures the caller can only retry later.
         500..=599 => AppError::unavailable("GitHub is temporarily unavailable")
-            .with_operation("GitHubClient::fetch_page")
+            .with_operation(operation)
             .with_context("status", status),
         // Any other status means our request was wrong: a bug, not a transient.
         _ => AppError::internal("GitHub returned an unexpected status")
-            .with_operation("GitHubClient::fetch_page")
+            .with_operation(operation)
             .with_context("status", status),
     }
 }

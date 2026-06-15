@@ -166,16 +166,15 @@ impl<S: SecureStorePort> AuthService<S> {
     }
 }
 
-/// Use-cases for the home screen: listing recent projects and remembering which
-/// one was last opened, backed by a [`GitHubPort`] and a [`ProjectStorePort`].
-pub struct ProjectsService<G: GitHubPort, S: ProjectStorePort> {
+/// Use-case for the home screen: listing the accessible projects,
+/// most-recently-pushed first, backed by a [`GitHubPort`].
+pub struct ProjectsService<G: GitHubPort> {
     github: G,
-    store: S,
 }
 
-impl<G: GitHubPort, S: ProjectStorePort> ProjectsService<G, S> {
-    pub fn new(github: G, store: S) -> Self {
-        Self { github, store }
+impl<G: GitHubPort> ProjectsService<G> {
+    pub fn new(github: G) -> Self {
+        Self { github }
     }
 
     /// The accessible projects, most-recently-pushed first.
@@ -192,6 +191,19 @@ impl<G: GitHubPort, S: ProjectStorePort> ProjectsService<G, S> {
         projects.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
         Ok(projects)
     }
+}
+
+/// Use-cases for remembering and reopening the last-opened project, backed by a
+/// [`ProjectStorePort`]. A purely local concern: unlike [`ProjectsService`] it
+/// needs neither a token nor the network, so it never fails for auth reasons.
+pub struct LastOpenedService<S: ProjectStorePort> {
+    store: S,
+}
+
+impl<S: ProjectStorePort> LastOpenedService<S> {
+    pub fn new(store: S) -> Self {
+        Self { store }
+    }
 
     /// Remember `repo` as the most recently opened project, so the next launch
     /// reopens it.
@@ -199,7 +211,7 @@ impl<G: GitHubPort, S: ProjectStorePort> ProjectsService<G, S> {
         self.store
             .remember_last_opened(repo)
             .await
-            .map_err(|err| err.with_operation("ProjectsService::open_project"))
+            .map_err(|err| err.with_operation("LastOpenedService::open_project"))
     }
 
     /// The project to reopen on launch, or `None` to show the home screen.
@@ -207,6 +219,6 @@ impl<G: GitHubPort, S: ProjectStorePort> ProjectsService<G, S> {
         self.store
             .last_opened()
             .await
-            .map_err(|err| err.with_operation("ProjectsService::last_opened"))
+            .map_err(|err| err.with_operation("LastOpenedService::last_opened"))
     }
 }

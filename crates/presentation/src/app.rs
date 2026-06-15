@@ -6,9 +6,9 @@
 //! discarded and the user is routed back to the paste-token screen to enter a
 //! new one, with the reason shown inline.
 
-use application::AuthService;
+use application::{AuthService, SecureStorePort};
 use dioxus::prelude::*;
-use domain::{AppErrorKind, Project, RepoRef, Slice, SliceState};
+use domain::{AppErrorKind, GitHubToken, Project, RepoRef, Slice, SliceState};
 
 use crate::components::{
     state_badge_class, state_label, BoardColumn, ErrorBanner, HomeScreen, TokenScreen,
@@ -147,11 +147,11 @@ async fn resolve_view(nav: Nav) -> View {
     // shows the picker; `Auto` reopens the last-opened project or, failing that,
     // shows the picker too.
     let repo = match nav {
-        Nav::Home => return home_view(&token).await,
+        Nav::Home => return home_view(&auth, &token).await,
         Nav::Project(repo) => repo,
-        Nav::Auto => match last_opened(&token).await {
+        Nav::Auto => match last_opened().await {
             Ok(Some(repo)) => repo,
-            Ok(None) => return home_view(&token).await,
+            Ok(None) => return home_view(&auth, &token).await,
             Err(error) => return View::Error(error.to_string()),
         },
     };
@@ -177,10 +177,20 @@ async fn resolve_view(nav: Nav) -> View {
     }
 }
 
-/// The home screen's recent-projects view, or a transient error if listing fails.
-async fn home_view(token: &domain::GitHubToken) -> View {
+/// The home screen's recent-projects view. A token GitHub rejects while listing
+/// (`Unauthorized`/`Forbidden`) is discarded and routes back to the paste-token
+/// screen, just like the board path; any other failure is a transient error.
+async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToken) -> View {
     match recent_projects(token).await {
         Ok(projects) => View::Home(projects),
+        Err(error) if is_auth_failure(error.kind()) => {
+            // A rejected token must not strand the user on an error screen.
+            // Discard it (best-effort) and route back to paste a new one.
+            let _ = auth.clear_token().await;
+            View::NeedToken {
+                reason: Some(error.to_string()),
+            }
+        }
         Err(error) => View::Error(error.to_string()),
     }
 }

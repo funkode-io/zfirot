@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use application::{
-    AuthService, BoardService, GitHubPort, ProjectStorePort, ProjectsService, SecureStorePort,
+    BoardService, GitHubPort, LastOpenedService, ProjectStorePort, ProjectsService, SecureStorePort,
 };
 use domain::{AppAction, AppResult, GitHubToken, Project, RepoRef, Slice};
 #[cfg(debug_assertions)]
@@ -34,13 +34,17 @@ pub fn project_store() -> AppResult<Arc<dyn ProjectStorePort>> {
     Ok(Arc::new(FileProjectStore::new()?))
 }
 
-/// The projects use-cases (recent projects, reopen last), wired from a stored
-/// Personal Access Token and the on-device project store.
-pub fn projects_from_token(
-    token: &GitHubToken,
-) -> AppResult<ProjectsService<Arc<dyn GitHubPort>, Arc<dyn ProjectStorePort>>> {
+/// The projects use-case (recent projects) wired from a stored Personal Access
+/// Token. Listing repositories needs GitHub, so it needs a token.
+pub fn projects_from_token(token: &GitHubToken) -> AppResult<ProjectsService<Arc<dyn GitHubPort>>> {
     let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
-    Ok(ProjectsService::new(port, project_store()?))
+    Ok(ProjectsService::new(port))
+}
+
+/// The last-opened use-cases, wired from the on-device project store. Purely
+/// local persistence: no token or network involved.
+fn last_opened_service() -> AppResult<LastOpenedService<Arc<dyn ProjectStorePort>>> {
+    Ok(LastOpenedService::new(project_store()?))
 }
 
 /// The app's wired dependencies: a project and the GitHub port behind it.
@@ -79,14 +83,14 @@ pub async fn recent_projects(token: &GitHubToken) -> AppResult<Vec<Project>> {
     projects_from_token(token)?.recent_projects().await
 }
 
-/// The project to reopen on launch, or `None` to show the home screen.
-pub async fn last_opened(token: &GitHubToken) -> AppResult<Option<RepoRef>> {
-    projects_from_token(token)?.last_opened().await
+/// The project to reopen on launch, or `None` to show the home screen. A local
+/// store read: no token needed.
+pub async fn last_opened() -> AppResult<Option<RepoRef>> {
+    last_opened_service()?.last_opened().await
 }
 
 /// Remember `repo` as the last-opened project, so the next launch reopens it.
-/// Reads the stored token itself, so callers need not hold one.
+/// A local store write only: no token or network involved.
 pub async fn open_project(repo: &RepoRef) -> AppAction {
-    let token = AuthService::new(secure_store()).require_token().await?;
-    projects_from_token(&token)?.open_project(repo).await
+    last_opened_service()?.open_project(repo).await
 }
