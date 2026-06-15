@@ -334,7 +334,7 @@ mod tests {
         }
     }
 
-    fn slice_number<'a>(slices: &'a [Slice], number: u64) -> &'a Slice {
+    fn slice_number(slices: &[Slice], number: u64) -> &Slice {
         slices
             .iter()
             .find(|s| s.number == number)
@@ -362,8 +362,7 @@ mod tests {
             vec![7, 6]
         );
         assert_eq!(
-            four.unblocks[0].url,
-            "https://github.com/funkode-io/zfirot/issues/7",
+            four.unblocks[0].url, "https://github.com/funkode-io/zfirot/issues/7",
             "the reverse edge carries the blocked issue's url for a clickable badge"
         );
 

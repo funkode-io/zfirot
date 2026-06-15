@@ -74,6 +74,12 @@ fn ZfirotLogo() -> Element {
 
 #[component]
 fn Board(slices: Vec<Slice>) -> Element {
+    // The board owns the shared cross-column highlight: the issue number of the
+    // dependency badge currently being hovered, or `None`. Each column receives
+    // it and reports hover intents back here, so hovering a badge in one column
+    // can light up the referenced card in another.
+    let mut highlighted = use_signal(|| None::<u64>);
+
     rsx! {
         div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
             for state in SliceState::BOARD {
@@ -82,7 +88,9 @@ fn Board(slices: Vec<Slice>) -> Element {
                     label: state_label(state).to_string(),
                     badge_class: state_badge_class(state).to_string(),
                     slices: slices.iter().filter(|s| s.state == state).cloned().collect::<Vec<_>>(),
+                    highlighted: highlighted(),
                     on_assign: move |_number| {}, // Assign-self is wired in a later slice. No-op for now.,
+                    on_hover: move |number| highlighted.set(number),
                 }
             }
         }

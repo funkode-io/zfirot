@@ -55,7 +55,11 @@ fn maps_native_relationships_into_raw_slices() {
     // blocker reference carries the open issue's number + url for the badge.
     let blocked = raw_by_number(&raws, 6);
     assert_eq!(
-        blocked.blockers.iter().map(|r| r.number).collect::<Vec<_>>(),
+        blocked
+            .blockers
+            .iter()
+            .map(|r| r.number)
+            .collect::<Vec<_>>(),
         vec![4]
     );
     assert_eq!(
