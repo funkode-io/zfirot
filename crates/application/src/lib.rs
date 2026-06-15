@@ -1,6 +1,8 @@
 //! Application layer: use-cases and the port traits that infrastructure
 //! implements (dependency inversion). Depends only on `domain`.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use domain::{AppAction, AppError, AppResult, GitHubToken, RepoRef, Slice};
 
@@ -12,6 +14,15 @@ use domain::{AppAction, AppError, AppResult, GitHubToken, RepoRef, Slice};
 pub trait GitHubPort: Send + Sync {
     /// Load the Slices that make up a project's board.
     async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>>;
+}
+
+/// Shared ports are ports too, so the composition root can hand the same
+/// `Arc<dyn GitHubPort>` to a [`BoardService`] (and clone it into contexts).
+#[async_trait]
+impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
+    async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>> {
+        (**self).load_board(repo).await
+    }
 }
 
 /// The seam between the application and the OS secure store (real or fake).

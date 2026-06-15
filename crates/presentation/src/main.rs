@@ -2,6 +2,7 @@
 
 mod app;
 mod components;
+mod state;
 
 use dioxus::desktop::{Config, WindowBuilder};
 use dioxus::prelude::*;
