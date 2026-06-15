@@ -4,7 +4,7 @@
 
 use application::{GitHubPort, LastOpenedService, ProjectsService};
 use async_trait::async_trait;
-use domain::{AppResult, Project, RawIssue, RepoRef, Slice};
+use domain::{AppAction, AppResult, Project, RawIssue, RepoRef, Slice};
 use infrastructure::FakeProjectStore;
 
 /// A GitHub port that returns projects in a deliberately *unsorted* order, so
@@ -29,6 +29,10 @@ impl GitHubPort for UnsortedGitHubPort {
             Project::new(RepoRef::new("acme", "new"), "2025-01-01T00:00:00Z"),
             Project::new(RepoRef::new("acme", "mid"), "2024-01-01T00:00:00Z"),
         ])
+    }
+
+    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
+        Ok(())
     }
 }
 

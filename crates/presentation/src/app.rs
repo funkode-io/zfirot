@@ -11,7 +11,9 @@ use dioxus::prelude::*;
 use domain::{group_into_lanes, AppErrorKind, GitHubToken, Project, RepoRef, Slice};
 
 use crate::components::{ErrorBanner, HomeScreen, OtherIssueCard, PrdLane, TokenScreen};
-use crate::state::{last_opened, open_project, recent_projects, secure_store, AppState};
+use crate::state::{
+    assign_self, last_opened, open_project, recent_projects, secure_store, AppState,
+};
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
 /// Build it with `make css` (runs `npm run build:css` in crates/presentation).
@@ -51,6 +53,9 @@ enum Nav {
 pub fn App() -> Element {
     // Cleared on success, set to a client-safe message when a token is rejected.
     let mut token_error = use_signal(|| Option::<String>::None);
+    // Set to a client-safe message when assigning self to a Slice fails, shown
+    // above the board; cleared on a successful assignment.
+    let mut assign_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
     // Where the user wants to be; starts at `Auto` so the last-opened project
@@ -107,14 +112,38 @@ pub fn App() -> Element {
                 HomeScreen { projects: projects.clone(), on_open }
             },
             // Token present and the board loaded.
-            Some(View::Board { repo, board }) => rsx! {
-                BoardShell { repo: repo.to_string(), on_home,
-                    Board { slices: board.slices.clone() }
-                    if !board.other.is_empty() {
-                        OtherIssues { issues: board.other.clone() }
+            Some(View::Board { repo, board }) => {
+                let assign_repo = repo.clone();
+                rsx! {
+                    BoardShell { repo: repo.to_string(), on_home,
+                        if let Some(message) = assign_error() {
+                            ErrorBanner { message }
+                        }
+                        Board {
+                            slices: board.slices.clone(),
+                            on_assign: move |number: u64| {
+                                // Claim the Slice on GitHub, then re-poll so the
+                                // now-assigned Slice derives Wip and leaves Ready.
+                                // On failure the board is left unchanged and the
+                                // error is surfaced above it.
+                                let repo = assign_repo.clone();
+                                spawn(async move {
+                                    match assign_self(&repo, number).await {
+                                        Ok(()) => {
+                                            assign_error.set(None);
+                                            reload += 1;
+                                        }
+                                        Err(error) => assign_error.set(Some(error.to_string())),
+                                    }
+                                });
+                            },
+                        }
+                        if !board.other.is_empty() {
+                            OtherIssues { issues: board.other.clone() }
+                        }
                     }
                 }
-            },
+            }
             Some(View::Error(message)) => rsx! {
                 BoardShell { on_home,
                     ErrorBanner { message: message.clone() }
@@ -260,7 +289,7 @@ fn ZfirotLogo() -> Element {
 }
 
 #[component]
-fn Board(slices: Vec<Slice>) -> Element {
+fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
     let lanes = group_into_lanes(slices);
     rsx! {
         div { class: "flex flex-col gap-6",
@@ -269,7 +298,7 @@ fn Board(slices: Vec<Slice>) -> Element {
                     key: "{lane.prd.as_ref().map(|prd| prd.number).unwrap_or(0)}",
                     prd: lane.prd,
                     slices: lane.slices,
-                    on_assign: move |_number| {}, // Assign-self is wired in a later slice. No-op for now.
+                    on_assign: move |number| on_assign.call(number),
                 }
             }
         }

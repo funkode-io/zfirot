@@ -33,6 +33,10 @@ pub trait GitHubPort: Send + Sync {
     /// List the repositories the token can access, for the home screen. Ordering
     /// is the adapter's best effort; [`ProjectsService`] re-sorts by recency.
     async fn list_projects(&self) -> AppResult<Vec<Project>>;
+
+    /// Assign the authenticated user to an issue (the Slice's underlying issue),
+    /// so picking up a Ready Slice from the board claims it on GitHub.
+    async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction;
 }
 
 /// Shared ports are ports too, so the composition root can hand the same
@@ -49,6 +53,10 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
         (**self).list_projects().await
+    }
+
+    async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
+        (**self).assign_self(repo, issue_number).await
     }
 }
 
@@ -155,6 +163,21 @@ impl<P: GitHubPort> BoardService<P> {
             .load_board(repo)
             .await
             .map_err(|err| err.with_context("repo", repo))
+    }
+
+    /// Assign the authenticated user to a Ready Slice, claiming it on GitHub.
+    ///
+    /// On success the caller re-polls the board: the now-assigned Slice derives
+    /// `Wip` and leaves the Ready column. On failure the error carries the repo
+    /// and issue for context and the board is left unchanged.
+    pub async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
+        self.port
+            .assign_self(repo, issue_number)
+            .await
+            .map_err(|err| {
+                err.with_context("repo", repo)
+                    .with_context("issue", issue_number)
+            })
     }
 
     /// Load and classify all open issues for a project, returning the board
