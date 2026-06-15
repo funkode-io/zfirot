@@ -1,10 +1,14 @@
 //! Application layer: use-cases and the port traits that infrastructure
 //! implements (dependency inversion). Depends only on `domain`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use domain::{AppAction, AppError, AppResult, GitHubToken, Project, RepoRef, Slice};
+use domain::{
+    classify_issue, parse_blockers_from_body, AppAction, AppError, AppResult, GitHubToken,
+    IssueClassification, Prd, Project, RawIssue, RawSlice, RepoRef, Slice,
+};
 
 /// The seam between the application and any GitHub backend (real or fake).
 ///
@@ -14,6 +18,16 @@ use domain::{AppAction, AppError, AppResult, GitHubToken, Project, RepoRef, Slic
 pub trait GitHubPort: Send + Sync {
     /// Load the Slices that make up a project's board.
     async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>>;
+
+    /// Load the project's issues as raw, GitHub-shaped data, including closed
+    /// ones.
+    ///
+    /// The application layer classifies these and builds the board from them.
+    /// The adapter provides both the native-link fields (`native_parent`,
+    /// `native_blockers`, `is_native_child_of_prd`) and the raw `body` for the
+    /// prose-fallback parsing. Closed issues are included (`RawIssue.closed`);
+    /// `classify_board` is responsible for omitting them.
+    async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>>;
 
     /// List the repositories the token can access, for the home screen. Ordering
     /// is the adapter's best effort; [`ProjectsService`] re-sorts by recency.
@@ -28,9 +42,40 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
         (**self).load_board(repo).await
     }
 
+    async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        (**self).load_issues(repo).await
+    }
+
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
         (**self).list_projects().await
     }
+}
+
+/// An issue that is not a confirmed Slice — shown in the "other open issues"
+/// section of the board.
+///
+/// The `classification` field drives the "looks like a PRD/Slice — confirm?"
+/// badge for [`IssueClassification::SuggestedPrd`] and
+/// [`IssueClassification::SuggestedSlice`] issues.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherIssue {
+    pub number: u64,
+    pub title: String,
+    /// [`IssueClassification::SuggestedPrd`], [`IssueClassification::SuggestedSlice`],
+    /// or [`IssueClassification::Unclassified`].
+    pub classification: IssueClassification,
+}
+
+/// The result of classifying all open issues in a project.
+///
+/// - `slices` — tier-1 confirmed Slices, ready for the Kanban columns.
+/// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
+/// - `other`  — suggested and unclassified issues for the "other open issues" bucket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifiedBoard {
+    pub slices: Vec<Slice>,
+    pub prds: Vec<Prd>,
+    pub other: Vec<OtherIssue>,
 }
 
 /// The seam between the application and the OS secure store (real or fake).
@@ -107,6 +152,90 @@ impl<P: GitHubPort> BoardService<P> {
             .load_board(repo)
             .await
             .map_err(|err| err.with_context("repo", repo))
+    }
+
+    /// Load and classify all open issues for a project, returning the board
+    /// split into confirmed Slices and an "other open issues" bucket.
+    ///
+    /// Closed issues are omitted. Confident-tier-1 Slices appear in
+    /// [`ClassifiedBoard::slices`]; confident PRDs appear in
+    /// [`ClassifiedBoard::prds`]; suggested and unclassified issues appear in
+    /// [`ClassifiedBoard::other`].
+    pub async fn classify_board(&self, repo: &RepoRef) -> AppResult<ClassifiedBoard> {
+        let raw_issues = self
+            .port
+            .load_issues(repo)
+            .await
+            .map_err(|err| err.with_context("repo", repo))?;
+
+        // The numbers of issues that are still open in this board, so prose
+        // blockers (which carry no open/closed state of their own) can be
+        // filtered to open ones only — mirroring the still-open guarantee that
+        // native blockers already have, and avoiding a false Blocked state.
+        let open_numbers: HashSet<u64> = raw_issues
+            .iter()
+            .filter(|raw| !raw.closed)
+            .map(|raw| raw.number)
+            .collect();
+
+        let mut slices = Vec::new();
+        let mut prds = Vec::new();
+        let mut other = Vec::new();
+
+        for raw in raw_issues {
+            if raw.closed {
+                continue;
+            }
+
+            match classify_issue(&raw) {
+                IssueClassification::Slice => {
+                    let body_str = raw.body.as_deref().unwrap_or("");
+                    // Use native blockers (already still-open) when present;
+                    // otherwise fall back to prose, keeping only blockers that
+                    // are still open in this board.
+                    let open_blocker_count = if !raw.native_blockers.is_empty() {
+                        raw.native_blockers.len() as u32
+                    } else {
+                        parse_blockers_from_body(body_str)
+                            .into_iter()
+                            .filter(|number| open_numbers.contains(number))
+                            .count() as u32
+                    };
+                    // PRD title resolution against the PRD list is deferred;
+                    // `prd_title` is left `None` here and filled in a later slice.
+                    let raw_slice = RawSlice {
+                        number: raw.number,
+                        title: raw.title,
+                        url: raw.url,
+                        closed: false,
+                        prd_title: None,
+                        assignee: raw.assignee,
+                        has_open_linked_pr: raw.has_open_linked_pr,
+                        open_blocker_count,
+                    };
+                    slices.push(raw_slice.into_slice());
+                }
+                IssueClassification::Prd => {
+                    prds.push(Prd {
+                        number: raw.number,
+                        title: raw.title,
+                    });
+                }
+                classification => {
+                    other.push(OtherIssue {
+                        number: raw.number,
+                        title: raw.title,
+                        classification,
+                    });
+                }
+            }
+        }
+
+        Ok(ClassifiedBoard {
+            slices,
+            prds,
+            other,
+        })
     }
 }
 

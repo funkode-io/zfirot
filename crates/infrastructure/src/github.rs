@@ -11,7 +11,9 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{parse_prose, AppError, AppResult, Project, ProseLinks, RawSlice, RepoRef, Slice};
+use domain::{
+    parse_prose, AppError, AppResult, Project, ProseLinks, RawIssue, RawSlice, RepoRef, Slice,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -200,6 +202,17 @@ impl GitHubPort for GitHubClient {
             .collect())
     }
 
+    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        // No live issue-classification query exists yet: the `classify_board`
+        // use-case is exercised only through the fake adapter. Fail loudly
+        // rather than returning an empty list, so a caller that wires this into
+        // the live board surfaces an error instead of a silently empty board.
+        Err(
+            AppError::internal("Loading issues for classification is not implemented yet")
+                .with_operation("GitHubClient::load_issues"),
+        )
+    }
+
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
         let mut projects = Vec::new();
         let mut cursor: Option<String> = None;
@@ -251,10 +264,10 @@ fn status_error(
     }
 }
 
-/// Parse a GraphQL response body into a page of [`RawIssue`]s and the cursor of
+/// Parse a GraphQL response body into a page of [`IssueData`]s and the cursor of
 /// the next page (if any). Pure and offline: the primary test seam. Prose
 /// references are resolved later by [`resolve_board`], once every page is in.
-pub fn parse_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<String>)> {
+pub fn parse_response(body: &str) -> AppResult<(Vec<IssueData>, Option<String>)> {
     let response: GraphQlResponse = serde_json::from_str(body).map_err(|err| {
         AppError::internal("GitHub returned a malformed response")
             .with_operation("parse_response")
@@ -390,7 +403,7 @@ fn node_into_project(node: RepositoryNode) -> Project {
 /// resolved against the issues fetched in the same load: a prose parent yields
 /// that issue's title for the PRD tag, and a prose blocker counts toward Blocked
 /// only if it is still open (open issues are the only ones in the fetched set).
-pub fn resolve_board(issues: Vec<RawIssue>) -> Vec<RawSlice> {
+pub fn resolve_board(issues: Vec<IssueData>) -> Vec<RawSlice> {
     let open_numbers: HashSet<u64> = issues.iter().map(|issue| issue.number).collect();
     let title_by_number: HashMap<u64, String> = issues
         .iter()
@@ -403,10 +416,10 @@ pub fn resolve_board(issues: Vec<RawIssue>) -> Vec<RawSlice> {
         .collect()
 }
 
-/// Project one [`RawIssue`] into a [`RawSlice`], preferring native links and
+/// Project one [`IssueData`] into a [`RawSlice`], preferring native links and
 /// falling back to its prose references resolved against the fetched board.
 fn resolve_issue(
-    issue: RawIssue,
+    issue: IssueData,
     open_numbers: &HashSet<u64>,
     title_by_number: &HashMap<u64, String>,
 ) -> RawSlice {
@@ -445,17 +458,17 @@ fn resolve_issue(
     }
 }
 
-/// Project one GraphQL issue node into a [`RawIssue`]: its native facts plus the
+/// Project one GraphQL issue node into a [`IssueData`]: its native facts plus the
 /// prose relationships parsed from its body, to be resolved by [`resolve_board`].
 /// Only open issues are queried, so a closed issue never reaches this mapping.
-fn map_issue(node: IssueNode) -> RawIssue {
+fn map_issue(node: IssueNode) -> IssueData {
     let has_open_linked_pr = node
         .closed_by_pull_requests_references
         .nodes
         .iter()
         .any(|pr| pr.state == "OPEN");
 
-    RawIssue {
+    IssueData {
         number: node.number,
         title: node.title,
         url: node.url,
@@ -482,7 +495,7 @@ fn map_issue(node: IssueNode) -> RawIssue {
 /// A single issue's native facts plus the prose relationships parsed from its
 /// body, before references are resolved against the rest of the board.
 #[derive(Debug)]
-pub struct RawIssue {
+pub struct IssueData {
     number: u64,
     title: String,
     url: String,

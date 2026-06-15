@@ -4,7 +4,7 @@
 
 use application::{GitHubPort, LastOpenedService, ProjectsService};
 use async_trait::async_trait;
-use domain::{AppResult, Project, RepoRef, Slice};
+use domain::{AppResult, Project, RawIssue, RepoRef, Slice};
 use infrastructure::FakeProjectStore;
 
 /// A GitHub port that returns projects in a deliberately *unsorted* order, so
@@ -15,6 +15,10 @@ struct UnsortedGitHubPort;
 #[async_trait]
 impl GitHubPort for UnsortedGitHubPort {
     async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
+        Ok(Vec::new())
+    }
+
+    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(Vec::new())
     }
 
