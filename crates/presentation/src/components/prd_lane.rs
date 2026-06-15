@@ -10,8 +10,17 @@ use super::{state_badge_class, state_label, BoardColumn};
 /// Collapsing the lane hides the columns and summarises them as coloured
 /// per-state count badges; the state name is shown on hover via each badge's
 /// `title`.
+///
+/// `highlighted` / `on_highlight` carry the board-wide "highlighted issue" so a
+/// dependency badge can highlight its referenced card even in another lane.
 #[component]
-pub fn PrdLane(prd: Option<PrdRef>, slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
+pub fn PrdLane(
+    prd: Option<PrdRef>,
+    slices: Vec<Slice>,
+    on_assign: EventHandler<u64>,
+    highlighted: Option<u64>,
+    on_highlight: EventHandler<Option<u64>>,
+) -> Element {
     let mut collapsed = use_signal(|| false);
 
     // Bucket each Slice into its board column exactly once, so a Slice is cloned
@@ -73,6 +82,8 @@ pub fn PrdLane(prd: Option<PrdRef>, slices: Vec<Slice>, on_assign: EventHandler<
                             badge_class: state_badge_class(state).to_string(),
                             slices: bucket,
                             on_assign: move |number| on_assign.call(number),
+                            highlighted,
+                            on_highlight: move |number| on_highlight.call(number),
                         }
                     }
                 }

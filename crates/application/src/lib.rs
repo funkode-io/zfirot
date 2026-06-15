@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use domain::{
-    classify_issue, parse_blockers_from_body, parse_parent_from_body, AppAction, AppError,
-    AppResult, GitHubToken, IssueClassification, Prd, PrdRef, Project, RawIssue, RawSlice, RepoRef,
-    Slice,
+    classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AppAction,
+    AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef, Project,
+    RawIssue, RawSlice, RepoRef, Slice,
 };
 
 /// The seam between the application and any GitHub backend (real or fake).
@@ -87,6 +87,17 @@ pub struct ClassifiedBoard {
     pub slices: Vec<Slice>,
     pub prds: Vec<Prd>,
     pub other: Vec<OtherIssue>,
+}
+
+/// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
+/// the board's identity map. Numbers absent from the board (e.g. closed or beyond
+/// the fetched page) yield `None`, so they are simply not shown as a badge.
+fn dependency_ref(number: u64, prd_by_number: &HashMap<u64, PrdRef>) -> Option<DependencyRef> {
+    prd_by_number.get(&number).map(|prd| DependencyRef {
+        number,
+        title: prd.title.clone(),
+        url: prd.url.clone(),
+    })
 }
 
 /// The seam between the application and the OS secure store (real or fake).
@@ -235,14 +246,19 @@ impl<P: GitHubPort> BoardService<P> {
                     let body_str = raw.body.as_deref().unwrap_or("");
                     // Use native blockers (already still-open) when present;
                     // otherwise fall back to prose, keeping only blockers that
-                    // are still open in this board.
-                    let open_blocker_count = if !raw.native_blockers.is_empty() {
-                        raw.native_blockers.len() as u32
+                    // are still open in this board. Each is resolved to its ref
+                    // (number + url) against the board for the blocker badges.
+                    let blockers: Vec<DependencyRef> = if !raw.native_blockers.is_empty() {
+                        raw.native_blockers
+                            .iter()
+                            .filter_map(|number| dependency_ref(*number, &prd_by_number))
+                            .collect()
                     } else {
                         parse_blockers_from_body(body_str)
                             .into_iter()
                             .filter(|number| open_numbers.contains(number))
-                            .count() as u32
+                            .filter_map(|number| dependency_ref(number, &prd_by_number))
+                            .collect()
                     };
                     // Resolve the parent PRD: prefer the native parent link,
                     // fall back to the prose `## Parent` reference, then look the
@@ -251,7 +267,7 @@ impl<P: GitHubPort> BoardService<P> {
                         .native_parent
                         .or_else(|| parse_parent_from_body(body_str))
                         .and_then(|number| prd_by_number.get(&number).cloned());
-                    let raw_slice = RawSlice {
+                    slices.push(RawSlice {
                         number: raw.number,
                         title: raw.title,
                         url: raw.url,
@@ -259,9 +275,10 @@ impl<P: GitHubPort> BoardService<P> {
                         prd,
                         assignee: raw.assignee,
                         has_open_linked_pr: raw.has_open_linked_pr,
-                        open_blocker_count,
-                    };
-                    slices.push(raw_slice.into_slice());
+                        blockers,
+                        // Filled by `resolve_unblocks` once the board is mapped.
+                        unblocks: Vec::new(),
+                    });
                 }
                 IssueClassification::Prd => {
                     prds.push(Prd {
@@ -279,6 +296,11 @@ impl<P: GitHubPort> BoardService<P> {
                 }
             }
         }
+
+        // Derive the reverse "unblocks" edge across the whole board, then project
+        // each raw Slice into its read model with the derived state.
+        resolve_unblocks(&mut slices);
+        let slices = slices.into_iter().map(RawSlice::into_slice).collect();
 
         Ok(ClassifiedBoard {
             slices,

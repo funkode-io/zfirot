@@ -288,6 +288,10 @@ fn ZfirotLogo() -> Element {
 #[component]
 fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
     let lanes = group_into_lanes(slices);
+    // The board-wide "highlighted issue", shared across lanes so a dependency
+    // badge can highlight its referenced card in any column. `None` when nothing
+    // is hovered.
+    let mut highlighted = use_signal(|| Option::<u64>::None);
     rsx! {
         div { class: "flex flex-col gap-6",
             for lane in lanes {
@@ -296,6 +300,8 @@ fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
                     prd: lane.prd,
                     slices: lane.slices,
                     on_assign: move |number| on_assign.call(number),
+                    highlighted: highlighted(),
+                    on_highlight: move |number| highlighted.set(number),
                 }
             }
         }
