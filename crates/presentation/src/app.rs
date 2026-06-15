@@ -1,5 +1,7 @@
 //! Root component: loads the board from the wired GitHub port and renders it.
 
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 use domain::{Slice, SliceState};
 
@@ -17,8 +19,11 @@ pub fn App() -> Element {
         let boot = boot.clone();
         async move {
             match boot {
-                Boot::Ready(state) => state.load_board().await,
-                Boot::Failed(message) => Err(domain::AppError::unauthorized(message)),
+                Boot::Ready(state) => state.load_board().await.map_err(Arc::new),
+                // Surface the original startup error verbatim: its kind is
+                // preserved (no re-wrap as Unauthorized) and `ErrorBanner`
+                // renders its `Display`.
+                Boot::Failed(error) => Err(error),
             }
         }
     });
