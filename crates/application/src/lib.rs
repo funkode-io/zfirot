@@ -1,6 +1,8 @@
 //! Application layer: use-cases and the port traits that infrastructure
 //! implements (dependency inversion). Depends only on `domain`.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use domain::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, AppResult,
@@ -23,6 +25,19 @@ pub trait GitHubPort: Send + Sync {
     /// fields (`native_parent`, `native_blockers`, `is_native_child_of_prd`) and
     /// the raw `body` for prose-fallback parsing.
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>>;
+}
+
+/// Shared ports are ports too, so the composition root can hand the same
+/// `Arc<dyn GitHubPort>` to a [`BoardService`] (and clone it into contexts).
+#[async_trait]
+impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
+    async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>> {
+        (**self).load_board(repo).await
+    }
+
+    async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        (**self).load_issues(repo).await
+    }
 }
 
 /// An issue that is not a confirmed Slice — shown in the "other open issues"
