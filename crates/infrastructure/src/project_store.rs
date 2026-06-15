@@ -10,11 +10,13 @@ use std::sync::Mutex;
 
 use application::ProjectStorePort;
 use async_trait::async_trait;
-use domain::{AppAction, AppError, AppResult, RepoRef};
+use domain::{AppAction, AppError, AppResult, Project, RepoRef};
 
-/// The config sub-directory and file Zfirot uses for the last-opened project.
+/// The config sub-directory and files Zfirot uses for locally-owned project
+/// state: the last-opened project and the cached recent-projects list.
 const CONFIG_DIR: &str = "zfirot";
 const LAST_OPENED_FILE: &str = "last_opened.json";
+const RECENT_PROJECTS_FILE: &str = "recent_projects.json";
 
 /// A [`ProjectStorePort`] backed by a JSON file in the OS config directory.
 #[derive(Debug, Clone)]
@@ -37,6 +39,12 @@ impl FileProjectStore {
     /// A store writing to an explicit path (used in tests).
     pub fn at(path: PathBuf) -> Self {
         Self { path }
+    }
+
+    /// The cached recent-projects file, alongside the last-opened file in the
+    /// same config directory.
+    fn recent_projects_path(&self) -> PathBuf {
+        self.path.with_file_name(RECENT_PROJECTS_FILE)
     }
 }
 
@@ -77,12 +85,49 @@ impl ProjectStorePort for FileProjectStore {
                 .with_source(err)
         })
     }
+
+    async fn cached_projects(&self) -> AppResult<Option<Vec<Project>>> {
+        let path = self.recent_projects_path();
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            // A missing or malformed file simply means "cache is cold".
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(AppError::internal("Could not read the cached projects.")
+                    .with_operation("FileProjectStore::cached_projects")
+                    .with_source(err))
+            }
+        };
+        Ok(serde_json::from_slice(&bytes).ok())
+    }
+
+    async fn cache_projects(&self, projects: &[Project]) -> AppAction {
+        let path = self.recent_projects_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                AppError::internal("Could not create the config directory.")
+                    .with_operation("FileProjectStore::cache_projects")
+                    .with_source(err)
+            })?;
+        }
+        let bytes = serde_json::to_vec_pretty(projects).map_err(|err| {
+            AppError::internal("Could not encode the cached projects.")
+                .with_operation("FileProjectStore::cache_projects")
+                .with_source(err)
+        })?;
+        std::fs::write(&path, bytes).map_err(|err| {
+            AppError::internal("Could not save the cached projects.")
+                .with_operation("FileProjectStore::cache_projects")
+                .with_source(err)
+        })
+    }
 }
 
 /// An in-memory [`ProjectStorePort`] for tests.
 #[derive(Debug, Default)]
 pub struct FakeProjectStore {
     last_opened: Mutex<Option<RepoRef>>,
+    cached_projects: Mutex<Option<Vec<Project>>>,
 }
 
 impl FakeProjectStore {
@@ -95,6 +140,7 @@ impl FakeProjectStore {
     pub fn with_last_opened(repo: RepoRef) -> Self {
         Self {
             last_opened: Mutex::new(Some(repo)),
+            cached_projects: Mutex::new(None),
         }
     }
 }
@@ -107,6 +153,15 @@ impl ProjectStorePort for FakeProjectStore {
 
     async fn remember_last_opened(&self, repo: &RepoRef) -> AppAction {
         *self.last_opened.lock().expect("lock poisoned") = Some(repo.clone());
+        Ok(())
+    }
+
+    async fn cached_projects(&self) -> AppResult<Option<Vec<Project>>> {
+        Ok(self.cached_projects.lock().expect("lock poisoned").clone())
+    }
+
+    async fn cache_projects(&self, projects: &[Project]) -> AppAction {
+        *self.cached_projects.lock().expect("lock poisoned") = Some(projects.to_vec());
         Ok(())
     }
 }

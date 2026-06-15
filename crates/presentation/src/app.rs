@@ -6,13 +6,14 @@
 //! discarded and the user is routed back to the paste-token screen to enter a
 //! new one, with the reason shown inline.
 
-use application::{AuthService, ClassifiedBoard, OtherIssue, SecureStorePort};
+use application::{AuthService, ClassifiedBoard, OtherIssue, ProjectsRefresh, SecureStorePort};
 use dioxus::prelude::*;
 use domain::{group_into_lanes, AppErrorKind, GitHubToken, Project, RepoRef, Slice};
 
 use crate::components::{ErrorBanner, HomeScreen, OtherIssueCard, PrdLane, TokenScreen};
 use crate::state::{
-    assign_self, last_opened, open_project, recent_projects, secure_store, AppState,
+    assign_self, cached_projects, last_opened, open_project, refresh_projects,
+    refresh_recent_projects, secure_store, AppState,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -22,7 +23,14 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 /// What the root renders once the stored token has been resolved.
 enum View {
     /// A token is stored but no project is open yet: pick from recent projects.
-    Home(Vec<Project>),
+    /// `from_cache` is `true` only when this list came from an instant cached
+    /// paint that still needs revalidating; a list produced by a live fetch
+    /// (cold-cache fallback or a completed refresh) sets it `false` so the
+    /// background effect does not fetch again.
+    Home {
+        projects: Vec<Project>,
+        from_cache: bool,
+    },
     /// A token is stored and the board for `repo` loaded and was classified into
     /// confirmed Slices plus an "other open issues" bucket.
     Board {
@@ -61,10 +69,41 @@ pub fn App() -> Element {
     // Where the user wants to be; starts at `Auto` so the last-opened project
     // reopens on launch, and switches to `Home`/`Project` as they navigate.
     let mut nav = use_signal(|| Nav::Auto);
+    // Guards the stale-while-revalidate refresh so it runs once per visit to the
+    // home screen, not on every `reload` bump. Reset when the user navigates
+    // back to Home so returning revalidates again.
+    let mut revalidated = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
         resolve_view(nav()).await
+    });
+
+    // Stale-while-revalidate: once the home screen has painted *from the cache*,
+    // refresh the recent-projects list from GitHub in the background and
+    // re-resolve the view only when it changed (an unchanged refresh is a no-op,
+    // so there is no flicker). A failed refresh leaves the cached list in place.
+    //
+    // The guard ensures exactly one refresh per home visit: a cold-cache paint
+    // is `from_cache: false` (it already fetched live, so we skip), and the
+    // `reload` bump that swaps in a `Changed` list re-paints `from_cache: true`
+    // but finds the guard set, so it does not fetch a second time.
+    use_effect(move || {
+        let from_cache = matches!(
+            view.read().as_ref(),
+            Some(View::Home {
+                from_cache: true,
+                ..
+            })
+        );
+        if from_cache && !revalidated() {
+            revalidated.set(true);
+            spawn(async move {
+                if let Ok(ProjectsRefresh::Changed(_)) = refresh_recent_projects().await {
+                    reload += 1;
+                }
+            });
+        }
     });
 
     let on_submit = move |raw: String| {
@@ -91,8 +130,10 @@ pub fn App() -> Element {
 
     // Back to the project picker. Persistence is untouched, so the next launch
     // still reopens the last project; this only changes the current session.
+    // Reset the revalidate guard so returning to Home refreshes the list again.
     let on_home = move |_| {
         nav.set(Nav::Home);
+        revalidated.set(false);
         reload += 1;
     };
 
@@ -108,7 +149,7 @@ pub fn App() -> Element {
                 TokenScreen { error: token_error().or_else(|| reason.clone()), on_submit }
             },
             // Token present but no project open: show recent projects.
-            Some(View::Home(projects)) => rsx! {
+            Some(View::Home { projects, .. }) => rsx! {
                 HomeScreen { projects: projects.clone(), on_open }
             },
             // Token present and the board loaded.
@@ -208,12 +249,40 @@ async fn resolve_view(nav: Nav) -> View {
     }
 }
 
-/// The home screen's recent-projects view. A token GitHub rejects while listing
-/// (`Unauthorized`/`Forbidden`) is discarded and routes back to the paste-token
-/// screen, just like the board path; any other failure is a transient error.
+/// The home screen's recent-projects view, with stale-while-revalidate caching:
+/// a warm cache paints instantly (the background refresh in `App` revalidates
+/// it), while a cold cache falls back to a blocking live fetch — shown with the
+/// loading state — that also seeds the cache. A token GitHub rejects while
+/// listing (`Unauthorized`/`Forbidden`) is discarded and routes back to the
+/// paste-token screen, just like the board path; any other failure is transient.
 async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToken) -> View {
-    match recent_projects(token).await {
-        Ok(projects) => View::Home(projects),
+    // Warm cache: render immediately without waiting on GitHub. `from_cache`
+    // tells the background effect this paint still needs revalidating.
+    if let Ok(Some(projects)) = cached_projects().await {
+        return View::Home {
+            projects,
+            from_cache: true,
+        };
+    }
+    // Cold (or unreadable) cache: block on a live fetch that seeds the cache.
+    // Either way the list is now live, so `from_cache` is false (no re-fetch).
+    match refresh_projects(token).await {
+        Ok(ProjectsRefresh::Changed(projects)) => View::Home {
+            projects,
+            from_cache: false,
+        },
+        // The cache was populated concurrently and already matches the live
+        // list, so read it back. The refresh just confirmed it exists, so a
+        // missing or unreadable cache here means something raced or failed:
+        // surface it rather than render a misleadingly empty home.
+        Ok(ProjectsRefresh::Unchanged) => match cached_projects().await {
+            Ok(Some(projects)) => View::Home {
+                projects,
+                from_cache: false,
+            },
+            Ok(None) => View::Error("The cached projects vanished during refresh.".into()),
+            Err(error) => View::Error(error.to_string()),
+        },
         Err(error) if is_auth_failure(error.kind()) => {
             // A rejected token must not strand the user on an error screen.
             // Discard it (best-effort) and route back to paste a new one.

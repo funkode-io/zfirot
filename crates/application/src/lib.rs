@@ -143,6 +143,11 @@ pub trait ProjectStorePort: Send + Sync {
     async fn last_opened(&self) -> AppResult<Option<RepoRef>>;
     /// Remember `repo` as the most recently opened project.
     async fn remember_last_opened(&self, repo: &RepoRef) -> AppAction;
+    /// The recent-projects list cached on the last successful fetch, or `None`
+    /// when the cache is cold (nothing cached yet, or it could not be read).
+    async fn cached_projects(&self) -> AppResult<Option<Vec<Project>>>;
+    /// Replace the cached recent-projects list with `projects`.
+    async fn cache_projects(&self, projects: &[Project]) -> AppAction;
 }
 
 /// Shared stores are stores too, so the composition root can hand the same
@@ -155,6 +160,14 @@ impl<S: ProjectStorePort + ?Sized> ProjectStorePort for Arc<S> {
 
     async fn remember_last_opened(&self, repo: &RepoRef) -> AppAction {
         (**self).remember_last_opened(repo).await
+    }
+
+    async fn cached_projects(&self) -> AppResult<Option<Vec<Project>>> {
+        (**self).cached_projects().await
+    }
+
+    async fn cache_projects(&self, projects: &[Project]) -> AppAction {
+        (**self).cache_projects(projects).await
     }
 }
 
@@ -390,6 +403,69 @@ impl<G: GitHubPort> ProjectsService<G> {
             .map_err(|err| err.with_operation("ProjectsService::recent_projects"))?;
         projects.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
         Ok(projects)
+    }
+}
+
+/// The outcome of a stale-while-revalidate refresh of the recent-projects list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectsRefresh {
+    /// The live list differs from the cache (including a cold cache): the cache
+    /// has been rewritten and the UI should swap to this list.
+    Changed(Vec<Project>),
+    /// The live list matches the cache: nothing was written and the UI should
+    /// stay put (no flicker).
+    Unchanged,
+}
+
+/// Use-case for the home screen's recent-projects list with
+/// **stale-while-revalidate** caching: the cached list renders instantly while a
+/// live fetch refreshes it — and the local cache — only when it actually
+/// changed.
+///
+/// It composes the recency-sorted live fetch ([`ProjectsService`]) with the
+/// on-device cache ([`ProjectStorePort`]), so the recency ordering stays owned in
+/// one place and the change decision is testable against fakes (no disk, no live
+/// GitHub).
+pub struct RecentProjectsService<G: GitHubPort, S: ProjectStorePort> {
+    projects: ProjectsService<G>,
+    cache: S,
+}
+
+impl<G: GitHubPort, S: ProjectStorePort> RecentProjectsService<G, S> {
+    pub fn new(github: G, cache: S) -> Self {
+        Self {
+            projects: ProjectsService::new(github),
+            cache,
+        }
+    }
+
+    /// The cached list for an instant first paint, or `None` on a cold cache.
+    /// A local read only: no token or network involved.
+    pub async fn cached(&self) -> AppResult<Option<Vec<Project>>> {
+        self.cache
+            .cached_projects()
+            .await
+            .map_err(|err| err.with_operation("RecentProjectsService::cached"))
+    }
+
+    /// Fetch the live list (recency-sorted), compare it with the cache, and
+    /// persist + report it only when it changed; an unchanged list leaves the
+    /// cache untouched and reports [`ProjectsRefresh::Unchanged`].
+    pub async fn refresh(&self) -> AppResult<ProjectsRefresh> {
+        let live = self.projects.recent_projects().await?;
+        let cached = self
+            .cache
+            .cached_projects()
+            .await
+            .map_err(|err| err.with_operation("RecentProjectsService::refresh"))?;
+        if cached.as_deref() == Some(live.as_slice()) {
+            return Ok(ProjectsRefresh::Unchanged);
+        }
+        self.cache
+            .cache_projects(&live)
+            .await
+            .map_err(|err| err.with_operation("RecentProjectsService::refresh"))?;
+        Ok(ProjectsRefresh::Changed(live))
     }
 }
 
