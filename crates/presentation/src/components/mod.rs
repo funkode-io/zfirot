@@ -6,9 +6,11 @@
 
 mod board_column;
 mod slice_card;
+mod token_screen;
 
 pub use board_column::BoardColumn;
 pub use slice_card::SliceCard;
+pub use token_screen::TokenScreen;
 
 use domain::SliceState;
 
