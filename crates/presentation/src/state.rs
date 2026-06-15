@@ -7,14 +7,30 @@
 
 use std::sync::Arc;
 
-use application::{BoardService, GitHubPort};
+use application::{BoardService, GitHubPort, SecureStorePort};
 use domain::{AppResult, GitHubToken, RepoRef, Slice};
-use infrastructure::GitHubClient;
+#[cfg(debug_assertions)]
+use infrastructure::EnvSecureStore;
+use infrastructure::{GitHubClient, KeyringSecureStore};
 
 /// The repository the v1 desktop app shows. Hardcoded until project selection
 /// lands in a later slice.
 const REPO_OWNER: &str = "funkode-io";
 const REPO_NAME: &str = "zfirot";
+
+/// The secure store the running app authenticates against.
+///
+/// In debug builds, when `ZFIROT_GITHUB_TOKEN` is set the token is read from
+/// the environment (see [`EnvSecureStore`]) so repeated `dx serve` rebuilds do
+/// not re-trigger the OS keychain prompt. Otherwise — and always in release
+/// builds — the OS secure store (keyring) is used.
+pub fn secure_store() -> Arc<dyn SecureStorePort> {
+    #[cfg(debug_assertions)]
+    if EnvSecureStore::is_configured() {
+        return Arc::new(EnvSecureStore::from_env());
+    }
+    Arc::new(KeyringSecureStore::new())
+}
 
 /// The app's wired dependencies: a project and the GitHub port behind it.
 #[derive(Clone)]

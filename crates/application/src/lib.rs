@@ -40,6 +40,23 @@ pub trait SecureStorePort: Send + Sync {
     async fn delete_token(&self) -> AppAction;
 }
 
+/// Shared stores are stores too, so the composition root can pick a store at
+/// runtime (`Arc<dyn SecureStorePort>`) and hand it to an [`AuthService`].
+#[async_trait]
+impl<S: SecureStorePort + ?Sized> SecureStorePort for Arc<S> {
+    async fn save_token(&self, token: &GitHubToken) -> AppAction {
+        (**self).save_token(token).await
+    }
+
+    async fn load_token(&self) -> AppResult<Option<GitHubToken>> {
+        (**self).load_token().await
+    }
+
+    async fn delete_token(&self) -> AppAction {
+        (**self).delete_token().await
+    }
+}
+
 /// Use-cases for the project board.
 pub struct BoardService<P: GitHubPort> {
     port: P,
