@@ -29,15 +29,21 @@ fn maps_native_relationships_into_raw_slices() {
 
     // Ready: no assignee, no open PR, no open blocker; PRD from the native parent.
     let ready = raw_by_number(&raws, 4);
-    assert_eq!(ready.prd_title.as_deref(), Some("Zfirot desktop dashboard"));
+    let prd = ready.prd.as_ref().expect("native parent yields a PRD ref");
+    assert_eq!(prd.number, 1, "the PRD ref carries the parent issue number");
+    assert_eq!(prd.title, "Zfirot desktop dashboard");
     assert_eq!(
-        ready.url, "https://github.com/funkode-io/zfirot/issues/4",
-        "the issue url is carried through for the clickable card"
+        prd.url, "https://github.com/funkode-io/zfirot/issues/1",
+        "the PRD ref carries the parent issue url for the lane header link"
     );
     assert_eq!(ready.assignee, None);
     assert!(!ready.has_open_linked_pr);
     assert_eq!(ready.open_blocker_count, 0);
     assert!(!ready.closed);
+    assert_eq!(
+        ready.url, "https://github.com/funkode-io/zfirot/issues/4",
+        "the issue url is carried through for the clickable card"
+    );
 
     // WIP: an open linked PR and an assignee.
     let wip = raw_by_number(&raws, 3);
@@ -50,7 +56,7 @@ fn maps_native_relationships_into_raw_slices() {
 
     // No native parent and only-closed native blockers, with no prose either.
     let orphan = raw_by_number(&raws, 8);
-    assert_eq!(orphan.prd_title, None);
+    assert_eq!(orphan.prd, None);
     assert_eq!(orphan.open_blocker_count, 0);
 }
 
@@ -62,11 +68,15 @@ fn falls_back_to_prose_when_native_links_are_absent() {
     // prose is resolved against the fetched board.
     let prose_only = raw_by_number(&raws, 9);
 
-    // The prose parent (#1) resolves to that issue's real title for the PRD tag.
-    assert_eq!(
-        prose_only.prd_title.as_deref(),
-        Some("PRD: Zfirot desktop dashboard")
-    );
+    // The prose parent (#1) resolves to that issue's identity for the PRD lane:
+    // its number, real title, and url.
+    let prd = prose_only
+        .prd
+        .as_ref()
+        .expect("prose parent resolves to a PRD");
+    assert_eq!(prd.number, 1);
+    assert_eq!(prd.title, "PRD: Zfirot desktop dashboard");
+    assert_eq!(prd.url, "https://github.com/funkode-io/zfirot/issues/1");
 
     // Two prose blockers: #6 is open (in the fetched set) so it counts; #99 is
     // not in the set (closed/absent) so it does not.

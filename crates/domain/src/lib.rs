@@ -11,4 +11,4 @@ mod slice;
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
 pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
-pub use slice::{RawSlice, Slice, SliceState};
+pub use slice::{group_into_lanes, PrdLane, PrdRef, RawSlice, Slice, SliceState};

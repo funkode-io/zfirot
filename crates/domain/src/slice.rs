@@ -1,4 +1,20 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// A reference to the parent PRD of a [`Slice`].
+///
+/// Carries the PRD's identity — issue number, title, and URL — not just its
+/// title, so the board can group Slices into stable lanes and link each lane
+/// header back to the PRD issue on GitHub. Derived from the native sub-issue
+/// parent or the resolved prose `## Parent` reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrdRef {
+    /// The PRD's GitHub issue number; the stable key the board groups lanes by.
+    pub number: u64,
+    pub title: String,
+    /// The PRD issue's URL on GitHub, for the lane header link.
+    pub url: String,
+}
 
 /// The derived state of a [`Slice`].
 ///
@@ -33,11 +49,66 @@ pub struct Slice {
     pub title: String,
     /// The issue's URL on GitHub, for opening it in a browser.
     pub url: String,
-    /// Title of the parent PRD, when known.
-    pub prd_title: Option<String>,
+    /// The parent PRD, when known, carrying its identity for lane grouping.
+    pub prd: Option<PrdRef>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
     pub state: SliceState,
+}
+
+/// A board swimlane: the [`Slice`]s that belong to one PRD, or the trailing lane
+/// of Slices with no PRD.
+///
+/// Lanes are produced by [`group_into_lanes`] in the order their PRD is first
+/// seen, so the board is stable across loads; the no-PRD lane is always last.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrdLane {
+    /// The PRD this lane groups, or `None` for the "No PRD" lane.
+    pub prd: Option<PrdRef>,
+    /// The lane's Slices, in their original order and excluding Done.
+    pub slices: Vec<Slice>,
+}
+
+/// Group Slices into one lane per PRD, plus a trailing lane for Slices with no
+/// PRD, for the board's swimlane layout.
+///
+/// Lanes appear in the order each PRD is first encountered (keyed by the PRD
+/// issue number, so a prose and a native parent for the same PRD share a lane);
+/// the no-PRD lane, when present, is always last. Done (closed) Slices are
+/// excluded because the board never shows them, and a lane that would be empty
+/// after that exclusion is dropped.
+pub fn group_into_lanes(slices: impl IntoIterator<Item = Slice>) -> Vec<PrdLane> {
+    let mut lanes: Vec<PrdLane> = Vec::new();
+    let mut lane_by_prd: HashMap<u64, usize> = HashMap::new();
+    let mut no_prd: Vec<Slice> = Vec::new();
+
+    for slice in slices {
+        if slice.state == SliceState::Done {
+            continue;
+        }
+        match slice.prd.clone() {
+            Some(prd) => {
+                let index = *lane_by_prd.entry(prd.number).or_insert_with(|| {
+                    lanes.push(PrdLane {
+                        prd: Some(prd),
+                        slices: Vec::new(),
+                    });
+                    lanes.len() - 1
+                });
+                lanes[index].slices.push(slice);
+            }
+            None => no_prd.push(slice),
+        }
+    }
+
+    if !no_prd.is_empty() {
+        lanes.push(PrdLane {
+            prd: None,
+            slices: no_prd,
+        });
+    }
+
+    lanes
 }
 
 /// Raw, GitHub-shaped facts about a single issue, before its [`SliceState`] is
@@ -52,8 +123,8 @@ pub struct RawSlice {
     pub url: String,
     /// `true` when the issue is closed; a closed Slice is Done and hidden.
     pub closed: bool,
-    /// Title of the parent PRD, when known.
-    pub prd_title: Option<String>,
+    /// The parent PRD, when known, carrying its identity for lane grouping.
+    pub prd: Option<PrdRef>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
     /// `true` when an open Pull Request is linked via its closing reference.
@@ -70,7 +141,7 @@ impl RawSlice {
             number: self.number,
             title: self.title,
             url: self.url,
-            prd_title: self.prd_title,
+            prd: self.prd,
             assignee: self.assignee,
             state,
         }
@@ -109,10 +180,19 @@ mod tests {
             title: "A Slice".to_string(),
             url: "https://github.com/funkode-io/zfirot/issues/1".to_string(),
             closed: false,
-            prd_title: Some("A PRD".to_string()),
+            prd: Some(a_prd()),
             assignee: None,
             has_open_linked_pr: false,
             open_blocker_count: 0,
+        }
+    }
+
+    /// A PRD reference used by the baseline raw Slice.
+    fn a_prd() -> PrdRef {
+        PrdRef {
+            number: 100,
+            title: "A PRD".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/100".to_string(),
         }
     }
 
@@ -230,7 +310,7 @@ mod tests {
         assert_eq!(slice.number, 42);
         assert_eq!(slice.title, "Wire the thing");
         assert_eq!(slice.url, "https://github.com/funkode-io/zfirot/issues/1");
-        assert_eq!(slice.prd_title.as_deref(), Some("A PRD"));
+        assert_eq!(slice.prd, Some(a_prd()));
         assert_eq!(slice.assignee.as_deref(), Some("octocat"));
         assert_eq!(slice.state, SliceState::Wip);
     }
@@ -243,5 +323,95 @@ mod tests {
         };
 
         assert_eq!(raw.into_slice().state, SliceState::Done);
+    }
+
+    /// A Ready Slice tagged with the given PRD (or none), for lane grouping.
+    fn slice_for(number: u64, prd: Option<PrdRef>) -> Slice {
+        Slice {
+            number,
+            title: format!("Slice #{number}"),
+            url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+            prd,
+            assignee: None,
+            state: SliceState::Ready,
+        }
+    }
+
+    fn prd(number: u64) -> PrdRef {
+        PrdRef {
+            number,
+            title: format!("PRD #{number}"),
+            url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+        }
+    }
+
+    #[test]
+    fn groups_slices_into_one_lane_per_prd_in_first_seen_order() {
+        let slices = vec![
+            slice_for(1, Some(prd(10))),
+            slice_for(2, Some(prd(20))),
+            slice_for(3, Some(prd(10))),
+        ];
+
+        let lanes = group_into_lanes(slices);
+
+        assert_eq!(lanes.len(), 2, "one lane per distinct PRD");
+        assert_eq!(
+            lanes[0].prd,
+            Some(prd(10)),
+            "PRD 10 first, it was seen first"
+        );
+        assert_eq!(
+            lanes[0].slices.iter().map(|s| s.number).collect::<Vec<_>>(),
+            vec![1, 3],
+            "both PRD-10 Slices share its lane, in order"
+        );
+        assert_eq!(lanes[1].prd, Some(prd(20)));
+        assert_eq!(
+            lanes[1].slices.iter().map(|s| s.number).collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn slices_with_no_prd_go_to_a_trailing_lane() {
+        let slices = vec![
+            slice_for(1, None),
+            slice_for(2, Some(prd(10))),
+            slice_for(3, None),
+        ];
+
+        let lanes = group_into_lanes(slices);
+
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0].prd, Some(prd(10)), "PRD lanes come before No PRD");
+        assert_eq!(lanes[1].prd, None, "the No PRD lane is always last");
+        assert_eq!(
+            lanes[1].slices.iter().map(|s| s.number).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn done_slices_are_excluded_and_empty_lanes_dropped() {
+        let done = Slice {
+            state: SliceState::Done,
+            ..slice_for(1, Some(prd(10)))
+        };
+        let slices = vec![done, slice_for(2, Some(prd(20)))];
+
+        let lanes = group_into_lanes(slices);
+
+        assert_eq!(
+            lanes.len(),
+            1,
+            "the all-Done PRD-10 lane is dropped, only PRD 20 remains"
+        );
+        assert_eq!(lanes[0].prd, Some(prd(20)));
+    }
+
+    #[test]
+    fn no_slices_yields_no_lanes() {
+        assert!(group_into_lanes(Vec::new()).is_empty());
     }
 }

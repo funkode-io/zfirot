@@ -23,9 +23,6 @@ pub fn SliceCard(slice: Slice, on_assign: EventHandler<u64>) -> Element {
                         "{state_label(slice.state)}"
                     }
                 }
-                if let Some(prd) = slice.prd_title.clone() {
-                    div { class: "text-xs opacity-70", "PRD: {prd}" }
-                }
                 div { class: "card-actions justify-between items-center mt-2",
                     if let Some(assignee) = slice.assignee.clone() {
                         span { class: "text-xs opacity-80", "@{assignee}" }

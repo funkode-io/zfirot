@@ -1,9 +1,9 @@
 //! Root component: loads the board from the wired GitHub port and renders it.
 
 use dioxus::prelude::*;
-use domain::{Slice, SliceState};
+use domain::Slice;
 
-use crate::components::{state_badge_class, state_label, BoardColumn, ErrorBanner};
+use crate::components::{ErrorBanner, PrdLane};
 use crate::state::Boot;
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -74,14 +74,14 @@ fn ZfirotLogo() -> Element {
 
 #[component]
 fn Board(slices: Vec<Slice>) -> Element {
+    let lanes = domain::group_into_lanes(slices);
     rsx! {
-        div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
-            for state in SliceState::BOARD {
-                BoardColumn {
-                    state,
-                    label: state_label(state).to_string(),
-                    badge_class: state_badge_class(state).to_string(),
-                    slices: slices.iter().filter(|s| s.state == state).cloned().collect::<Vec<_>>(),
+        div { class: "flex flex-col gap-6",
+            for lane in lanes {
+                PrdLane {
+                    key: "{lane.prd.as_ref().map(|prd| prd.number).unwrap_or(0)}",
+                    prd: lane.prd,
+                    slices: lane.slices,
                     on_assign: move |_number| {}, // Assign-self is wired in a later slice. No-op for now.,
                 }
             }
