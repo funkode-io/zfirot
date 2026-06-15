@@ -12,7 +12,8 @@
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{
-    parse_prose, AppError, AppResult, Project, ProseLinks, RawIssue, RawSlice, RepoRef, Slice,
+    parse_prose, AppError, AppResult, PrdRef, Project, ProseLinks, RawIssue, RawSlice, RepoRef,
+    Slice,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -33,7 +34,7 @@ query Board($owner: String!, $name: String!, $cursor: String) {
         url
         body
         assignees(first: 1) { nodes { login } }
-        parent { title }
+        parent { number title url }
         blockedBy(first: 50) { nodes { state } }
         closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
       }
@@ -526,18 +527,28 @@ fn node_into_project(node: RepositoryNode) -> Project {
 ///
 /// Native links win; when an issue has none, its parsed prose references are
 /// resolved against the issues fetched in the same load: a prose parent yields
-/// that issue's title for the PRD tag, and a prose blocker counts toward Blocked
-/// only if it is still open (open issues are the only ones in the fetched set).
+/// that issue's identity (number, title, url) for the PRD lane, and a prose
+/// blocker counts toward Blocked only if it is still open (open issues are the
+/// only ones in the fetched set).
 pub fn resolve_board(issues: Vec<IssueData>) -> Vec<RawSlice> {
     let open_numbers: HashSet<u64> = issues.iter().map(|issue| issue.number).collect();
-    let title_by_number: HashMap<u64, String> = issues
+    let prd_by_number: HashMap<u64, PrdRef> = issues
         .iter()
-        .map(|issue| (issue.number, issue.title.clone()))
+        .map(|issue| {
+            (
+                issue.number,
+                PrdRef {
+                    number: issue.number,
+                    title: issue.title.clone(),
+                    url: issue.url.clone(),
+                },
+            )
+        })
         .collect();
 
     issues
         .into_iter()
-        .map(|issue| resolve_issue(issue, &open_numbers, &title_by_number))
+        .map(|issue| resolve_issue(issue, &open_numbers, &prd_by_number))
         .collect()
 }
 
@@ -546,14 +557,14 @@ pub fn resolve_board(issues: Vec<IssueData>) -> Vec<RawSlice> {
 fn resolve_issue(
     issue: IssueData,
     open_numbers: &HashSet<u64>,
-    title_by_number: &HashMap<u64, String>,
+    prd_by_number: &HashMap<u64, PrdRef>,
 ) -> RawSlice {
-    let prd_title = match issue.native_parent {
-        Some(parent) => Some(parent.title),
+    let prd = match issue.native_parent {
+        Some(parent) => Some(parent),
         None => issue
             .prose
             .parent
-            .and_then(|number| title_by_number.get(&number).cloned()),
+            .and_then(|number| prd_by_number.get(&number).cloned()),
     };
 
     let open_blocker_count = if issue.native_blocker_states.is_empty() {
@@ -576,7 +587,7 @@ fn resolve_issue(
         title: issue.title,
         url: issue.url,
         closed: false,
-        prd_title,
+        prd,
         assignee: issue.assignee,
         has_open_linked_pr: issue.has_open_linked_pr,
         open_blocker_count,
@@ -604,8 +615,10 @@ fn map_issue(node: IssueNode) -> IssueData {
             .next()
             .map(|user| user.login),
         has_open_linked_pr,
-        native_parent: node.parent.map(|parent| NativeParent {
+        native_parent: node.parent.map(|parent| PrdRef {
+            number: parent.number,
             title: parent.title,
+            url: parent.url,
         }),
         native_blocker_states: node
             .blocked_by
@@ -684,15 +697,9 @@ pub struct IssueData {
     url: String,
     assignee: Option<String>,
     has_open_linked_pr: bool,
-    native_parent: Option<NativeParent>,
+    native_parent: Option<PrdRef>,
     native_blocker_states: Vec<String>,
     prose: ProseLinks,
-}
-
-/// The native sub-issue parent of an issue, carrying the PRD title to tag with.
-#[derive(Debug)]
-struct NativeParent {
-    title: String,
 }
 
 #[derive(Deserialize)]
@@ -757,7 +764,9 @@ struct Login {
 
 #[derive(Deserialize)]
 struct ParentIssue {
+    number: u64,
     title: String,
+    url: String,
 }
 
 #[derive(Deserialize)]

@@ -5,6 +5,7 @@
 
 mod classification;
 mod error;
+mod lane;
 mod prd;
 mod project;
 mod prose;
@@ -16,7 +17,8 @@ pub use classification::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
 };
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
-pub use prd::Prd;
+pub use lane::{group_into_lanes, PrdLane};
+pub use prd::{Prd, PrdRef};
 pub use project::Project;
 pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;

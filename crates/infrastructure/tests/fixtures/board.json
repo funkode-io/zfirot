@@ -32,7 +32,9 @@
               "nodes": []
             },
             "parent": {
-              "title": "Zfirot desktop dashboard"
+              "number": 1,
+              "title": "Zfirot desktop dashboard",
+              "url": "https://github.com/funkode-io/zfirot/issues/1"
             },
             "blockedBy": {
               "nodes": []
@@ -54,7 +56,9 @@
               ]
             },
             "parent": {
-              "title": "Zfirot desktop dashboard"
+              "number": 1,
+              "title": "Zfirot desktop dashboard",
+              "url": "https://github.com/funkode-io/zfirot/issues/1"
             },
             "blockedBy": {
               "nodes": []
@@ -76,7 +80,9 @@
               "nodes": []
             },
             "parent": {
-              "title": "Zfirot desktop dashboard"
+              "number": 1,
+              "title": "Zfirot desktop dashboard",
+              "url": "https://github.com/funkode-io/zfirot/issues/1"
             },
             "blockedBy": {
               "nodes": [

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::PrdRef;
+
 /// The derived state of a [`Slice`].
 ///
 /// Precedence among active states is Blocked > WIP > Ready. `Done` (a closed
@@ -33,8 +35,8 @@ pub struct Slice {
     pub title: String,
     /// The issue's URL on GitHub, for opening it in a browser.
     pub url: String,
-    /// Title of the parent PRD, when known.
-    pub prd_title: Option<String>,
+    /// The PRD this Slice belongs to, when known.
+    pub prd: Option<PrdRef>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
     pub state: SliceState,
@@ -52,8 +54,8 @@ pub struct RawSlice {
     pub url: String,
     /// `true` when the issue is closed; a closed Slice is Done and hidden.
     pub closed: bool,
-    /// Title of the parent PRD, when known.
-    pub prd_title: Option<String>,
+    /// The PRD this Slice belongs to, when known.
+    pub prd: Option<PrdRef>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
     /// `true` when an open Pull Request is linked via its closing reference.
@@ -70,7 +72,7 @@ impl RawSlice {
             number: self.number,
             title: self.title,
             url: self.url,
-            prd_title: self.prd_title,
+            prd: self.prd,
             assignee: self.assignee,
             state,
         }
@@ -109,7 +111,11 @@ mod tests {
             title: "A Slice".to_string(),
             url: "https://github.com/funkode-io/zfirot/issues/1".to_string(),
             closed: false,
-            prd_title: Some("A PRD".to_string()),
+            prd: Some(PrdRef {
+                number: 7,
+                title: "A PRD".to_string(),
+                url: "https://github.com/funkode-io/zfirot/issues/7".to_string(),
+            }),
             assignee: None,
             has_open_linked_pr: false,
             open_blocker_count: 0,
@@ -230,7 +236,10 @@ mod tests {
         assert_eq!(slice.number, 42);
         assert_eq!(slice.title, "Wire the thing");
         assert_eq!(slice.url, "https://github.com/funkode-io/zfirot/issues/1");
-        assert_eq!(slice.prd_title.as_deref(), Some("A PRD"));
+        assert_eq!(
+            slice.prd.as_ref().map(|prd| prd.title.as_str()),
+            Some("A PRD")
+        );
         assert_eq!(slice.assignee.as_deref(), Some("octocat"));
         assert_eq!(slice.state, SliceState::Wip);
     }

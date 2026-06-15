@@ -7,7 +7,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use domain::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, AppAction, AppError,
-    AppResult, GitHubToken, IssueClassification, Prd, Project, RawIssue, RawSlice, RepoRef, Slice,
+    AppResult, GitHubToken, IssueClassification, Prd, PrdRef, Project, RawIssue, RawSlice, RepoRef,
+    Slice,
 };
 
 /// The seam between the application and any GitHub backend (real or fake).
@@ -180,11 +181,21 @@ impl<P: GitHubPort> BoardService<P> {
             .map(|raw| raw.number)
             .collect();
 
-        // Title of every issue in the board, so a Slice's parent reference
-        // (native or prose) resolves to its PRD title for the card tag.
-        let title_by_number: HashMap<u64, String> = raw_issues
+        // Identity of every issue in the board, so a Slice's parent reference
+        // (native or prose) resolves to its PRD ref (number + title + url) for
+        // the swimlane header and link.
+        let prd_by_number: HashMap<u64, PrdRef> = raw_issues
             .iter()
-            .map(|raw| (raw.number, raw.title.clone()))
+            .map(|raw| {
+                (
+                    raw.number,
+                    PrdRef {
+                        number: raw.number,
+                        title: raw.title.clone(),
+                        url: raw.url.clone(),
+                    },
+                )
+            })
             .collect();
 
         let mut slices = Vec::new();
@@ -210,19 +221,19 @@ impl<P: GitHubPort> BoardService<P> {
                             .filter(|number| open_numbers.contains(number))
                             .count() as u32
                     };
-                    // Resolve the parent PRD title: prefer the native parent
-                    // link, fall back to the prose `## Parent` reference, then
-                    // look the number up among the issues in this board.
-                    let prd_title = raw
+                    // Resolve the parent PRD: prefer the native parent link,
+                    // fall back to the prose `## Parent` reference, then look the
+                    // number up among the issues in this board.
+                    let prd = raw
                         .native_parent
                         .or_else(|| parse_parent_from_body(body_str))
-                        .and_then(|number| title_by_number.get(&number).cloned());
+                        .and_then(|number| prd_by_number.get(&number).cloned());
                     let raw_slice = RawSlice {
                         number: raw.number,
                         title: raw.title,
                         url: raw.url,
                         closed: false,
-                        prd_title,
+                        prd,
                         assignee: raw.assignee,
                         has_open_linked_pr: raw.has_open_linked_pr,
                         open_blocker_count,

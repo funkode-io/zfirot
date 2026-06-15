@@ -7,7 +7,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AppResult, Project, RawIssue, RawSlice, RepoRef, Slice};
+use domain::{AppResult, PrdRef, Project, RawIssue, RawSlice, RepoRef, Slice};
 
 mod github;
 mod project_store;
@@ -202,9 +202,20 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
 }
 
 /// Raw, GitHub-shaped issues for the fake, covering every derived state plus a
-/// Done (closed) issue that must be hidden from the board.
+/// Done (closed) issue that must be hidden from the board. Slices span two PRDs
+/// and one no-PRD issue, so the swimlane grouping is demonstrable in a
+/// token-less preview.
 fn sample_raw_slices() -> Vec<RawSlice> {
-    let prd = Some("Zfirot desktop dashboard".to_string());
+    let dashboard = Some(PrdRef {
+        number: 1,
+        title: "Zfirot desktop dashboard".to_string(),
+        url: "https://github.com/funkode-io/zfirot/issues/1".to_string(),
+    });
+    let freshness = Some(PrdRef {
+        number: 8,
+        title: "Board freshness and live updates".to_string(),
+        url: "https://github.com/funkode-io/zfirot/issues/8".to_string(),
+    });
     vec![
         // Ready: no blockers, no PR, no assignee.
         RawSlice {
@@ -212,7 +223,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             title: "Live GitHub read: real board for a hardcoded repo".to_string(),
             url: "https://github.com/funkode-io/zfirot/issues/4".to_string(),
             closed: false,
-            prd_title: prd.clone(),
+            prd: dashboard.clone(),
             assignee: None,
             has_open_linked_pr: false,
             open_blocker_count: 0,
@@ -222,7 +233,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             title: "Two-tier issue classification".to_string(),
             url: "https://github.com/funkode-io/zfirot/issues/5".to_string(),
             closed: false,
-            prd_title: prd.clone(),
+            prd: dashboard.clone(),
             assignee: None,
             has_open_linked_pr: false,
             open_blocker_count: 0,
@@ -233,18 +244,19 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             title: "Derive SliceState as a pure domain function".to_string(),
             url: "https://github.com/funkode-io/zfirot/issues/3".to_string(),
             closed: false,
-            prd_title: prd.clone(),
+            prd: dashboard.clone(),
             assignee: Some("carlos-verdes".to_string()),
             has_open_linked_pr: true,
             open_blocker_count: 0,
         },
-        // Blocked: at least one open "blocked by" dependency.
+        // Blocked: at least one open "blocked by" dependency. Belongs to the
+        // second PRD, so it appears in its own swimlane.
         RawSlice {
             number: 6,
             title: "PAT authentication via the OS secure store".to_string(),
             url: "https://github.com/funkode-io/zfirot/issues/6".to_string(),
             closed: false,
-            prd_title: prd.clone(),
+            prd: freshness.clone(),
             assignee: None,
             has_open_linked_pr: false,
             open_blocker_count: 1,
@@ -254,10 +266,21 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             title: "Home screen: recent projects, reopen last".to_string(),
             url: "https://github.com/funkode-io/zfirot/issues/7".to_string(),
             closed: false,
-            prd_title: prd.clone(),
+            prd: freshness.clone(),
             assignee: None,
             has_open_linked_pr: false,
             open_blocker_count: 2,
+        },
+        // No PRD: lands in the trailing "No PRD" lane.
+        RawSlice {
+            number: 11,
+            title: "Spike: evaluate Dioxus signals for live refresh".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/11".to_string(),
+            closed: false,
+            prd: None,
+            assignee: None,
+            has_open_linked_pr: false,
+            open_blocker_count: 0,
         },
         // Done: closed, so hidden from the board.
         RawSlice {
@@ -265,7 +288,7 @@ fn sample_raw_slices() -> Vec<RawSlice> {
             title: "Walking skeleton".to_string(),
             url: "https://github.com/funkode-io/zfirot/issues/2".to_string(),
             closed: true,
-            prd_title: prd,
+            prd: dashboard,
             assignee: Some("carlos-verdes".to_string()),
             has_open_linked_pr: false,
             open_blocker_count: 0,

@@ -51,6 +51,13 @@ An open GitHub Issue the app cannot confidently map to a PRD or Slice. Surfaced
 on the dashboard as "other open issues" with no further action.
 _Avoid_: misc, unknown, orphan
 
+**Lane**:
+A horizontal swimlane on the board grouping every Slice that belongs to one PRD.
+Each lane has a header linking to its PRD Issue and contains the Ready / WIP /
+Blocked columns for that PRD's Slices. Slices with no parent PRD collect in a
+trailing "No PRD" lane.
+_Avoid_: row, group, section
+
 **Tracked repo**:
 An `owner/repo` the user has chosen to watch. The set of tracked repos is the
 one piece of state the app owns locally.

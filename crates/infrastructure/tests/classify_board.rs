@@ -133,7 +133,7 @@ async fn classify_board_resolves_prd_title_from_native_and_prose_parents() {
         .find(|s| s.number == 3)
         .expect("issue #3 should be a confirmed Slice");
     assert_eq!(
-        slice3.prd_title.as_deref(),
+        slice3.prd.as_ref().map(|prd| prd.title.as_str()),
         Some("Zfirot desktop dashboard"),
         "issue #3's native parent should resolve to PRD #1's title"
     );
@@ -145,7 +145,7 @@ async fn classify_board_resolves_prd_title_from_native_and_prose_parents() {
         .find(|s| s.number == 5)
         .expect("issue #5 should be a confirmed Slice");
     assert_eq!(
-        slice5.prd_title.as_deref(),
+        slice5.prd.as_ref().map(|prd| prd.title.as_str()),
         Some("Zfirot desktop dashboard"),
         "issue #5's prose parent should resolve to PRD #1's title"
     );
