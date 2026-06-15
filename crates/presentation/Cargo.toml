@@ -13,3 +13,5 @@ domain.workspace = true
 application.workspace = true
 infrastructure.workspace = true
 dioxus = { version = "0.7", features = ["desktop"] }
+tokio = { workspace = true, features = ["time"] }
+chrono = "0.4"

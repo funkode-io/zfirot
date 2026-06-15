@@ -5,6 +5,7 @@
 
 mod classification;
 mod error;
+mod freshness;
 mod lane;
 mod prd;
 mod project;
@@ -17,10 +18,11 @@ pub use classification::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
 };
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
+pub use freshness::PollInterval;
 pub use lane::{group_into_lanes, PrdLane};
 pub use prd::{Prd, PrdRef};
 pub use project::Project;
 pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
-pub use slice::{resolve_unblocks, DependencyRef, RawSlice, Slice, SliceState};
+pub use slice::{resolve_unblocks, BoardSummary, DependencyRef, RawSlice, Slice, SliceState};
 pub use token::GitHubToken;
