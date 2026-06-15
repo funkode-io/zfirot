@@ -8,10 +8,10 @@ use super::{state_badge_class, state_label};
 ///
 /// Dependency badges live at the bottom: a **Blocked** card lists its blockers,
 /// any other card lists the issues it **unblocks**. Each badge links to its
-/// GitHub issue, shows that issue's title as a tooltip, and, on hover, emits
-/// `on_highlight` with that issue number so the board can highlight the
-/// referenced card in another column. The card highlights itself when
-/// `highlighted` matches its own number.
+/// GitHub issue, shows that issue's title as a tooltip, and, on hover or
+/// keyboard focus, emits `on_highlight` with that issue number so the board can
+/// highlight the referenced card in another column. The card highlights itself
+/// when `highlighted` matches its own number.
 #[component]
 pub fn SliceCard(
     slice: Slice,
@@ -78,6 +78,11 @@ pub fn SliceCard(
                                     move |_| on_highlight.call(Some(n))
                                 },
                                 onmouseleave: move |_| on_highlight.call(None),
+                                onfocusin: {
+                                    let n = dep.number;
+                                    move |_| on_highlight.call(Some(n))
+                                },
+                                onfocusout: move |_| on_highlight.call(None),
                                 "#{dep.number}"
                             }
                         }

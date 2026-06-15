@@ -152,9 +152,10 @@ pub fn resolve_unblocks(slices: &mut [RawSlice]) {
         }
     }
     for slice in slices.iter_mut() {
-        if let Some(unblocks) = unblocks_by_number.remove(&slice.number) {
-            slice.unblocks = unblocks;
-        }
+        // Always reset from the current blocker edges (defaulting to empty) so
+        // the derivation is pure: re-running it never leaves stale reverse-edge
+        // data on a Slice that no longer unblocks anything.
+        slice.unblocks = unblocks_by_number.remove(&slice.number).unwrap_or_default();
     }
 }
 
@@ -394,6 +395,32 @@ mod tests {
             one.unblocks,
             vec![dep(5), dep(3)],
             "dependents follow board input order with their refs"
+        );
+    }
+
+    /// `resolve_unblocks` is pure: re-running it after the blocker edges change
+    /// resets each Slice's reverse edge rather than leaving stale data behind.
+    #[test]
+    fn resolve_unblocks_clears_stale_reverse_edges_on_rerun() {
+        // First pass: #6 lists #4 as a blocker, so #4 unblocks #6.
+        let mut board = vec![raw_with(4, vec![]), raw_with(6, vec![dep(4)])];
+        resolve_unblocks(&mut board);
+        let four = board.iter().find(|s| s.number == 4).unwrap();
+        assert_eq!(four.unblocks, vec![dep(6)]);
+
+        // The blocker edge is removed; re-running must clear #4's reverse edge.
+        board
+            .iter_mut()
+            .find(|s| s.number == 6)
+            .unwrap()
+            .blockers
+            .clear();
+        resolve_unblocks(&mut board);
+
+        let four = board.iter().find(|s| s.number == 4).unwrap();
+        assert!(
+            four.unblocks.is_empty(),
+            "a Slice that no longer blocks anything has no stale reverse edge"
         );
     }
 }
