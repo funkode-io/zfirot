@@ -1,14 +1,14 @@
-//! Composition root: where the live adapter is wired and injected into the UI.
+//! Composition root: builds the live GitHub adapter from a stored token.
 //!
-//! This is the only place that reads the environment. [`AppState::from_env`]
-//! resolves the `GITHUB_TOKEN` and builds the real [`GitHubClient`]; the rest of
-//! the app talks to an `Arc<dyn GitHubPort>`, so previews and tests can hand in
-//! a fake instead.
+//! The token comes from the OS secure store (see
+//! [`infrastructure::KeyringSecureStore`]), not the environment. The rest of the
+//! app talks to an `Arc<dyn GitHubPort>`, so previews and tests can hand in a
+//! fake instead of the real client.
 
 use std::sync::Arc;
 
 use application::{BoardService, GitHubPort};
-use domain::{AppError, AppResult, RepoRef, Slice};
+use domain::{AppResult, GitHubToken, RepoRef, Slice};
 use infrastructure::GitHubClient;
 
 /// The repository the v1 desktop app shows. Hardcoded until project selection
@@ -24,24 +24,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Wire the live GitHub adapter from the environment.
+    /// Wire the live GitHub adapter from a stored Personal Access Token.
     ///
-    /// Returns an `Unauthorized` error when `GITHUB_TOKEN` is absent so the UI
-    /// can tell the user how to configure it.
-    pub fn from_env() -> AppResult<Self> {
-        let token = std::env::var("GITHUB_TOKEN").map_err(|_| {
-            AppError::unauthorized(
-                "No GITHUB_TOKEN found.\n\n\
-                 1. Create a fine-grained Personal Access Token at\n   \
-                 https://github.com/settings/personal-access-tokens/new\n\
-                 2. Grant the repository read access to Issues, Pull requests, and Contents.\n\
-                 3. Set it as GITHUB_TOKEN in your .env file (copy .env.example).\n\
-                 4. Restart the app.",
-            )
-            .with_operation("AppState::from_env")
-        })?;
-
-        let client = GitHubClient::new(token)?;
+    /// The token is read from the OS secure store by the caller; this only turns
+    /// it into an authenticated [`GitHubClient`].
+    pub fn from_token(token: &GitHubToken) -> AppResult<Self> {
+        let client = GitHubClient::new(token.expose())?;
         Ok(Self::with_port(
             RepoRef::new(REPO_OWNER, REPO_NAME),
             Arc::new(client),
@@ -58,25 +46,5 @@ impl AppState {
         BoardService::new(self.port.clone())
             .load_board(&self.repo)
             .await
-    }
-}
-
-/// The outcome of wiring at startup, injected as Dioxus context so the root can
-/// either load the board or explain why it cannot.
-#[derive(Clone)]
-pub enum Boot {
-    /// Dependencies are wired; the board can load.
-    Ready(AppState),
-    /// Startup failed (e.g. no token); show this user-safe message.
-    Failed(String),
-}
-
-impl Boot {
-    /// Wire from the environment, capturing any failure as a displayable message.
-    pub fn from_env() -> Self {
-        match AppState::from_env() {
-            Ok(state) => Boot::Ready(state),
-            Err(error) => Boot::Failed(error.to_string()),
-        }
     }
 }
