@@ -18,4 +18,13 @@ async fn load_board_returns_slices_across_states() {
     assert!(slices.iter().any(|s| s.state == SliceState::Ready));
     assert!(slices.iter().any(|s| s.state == SliceState::Wip));
     assert!(slices.iter().any(|s| s.state == SliceState::Blocked));
+
+    // The closed issue is retained as a Done Slice but never shown as a board
+    // column, so it stays available for a future "show Done" view.
+    let done = slices
+        .iter()
+        .find(|s| s.number == 2)
+        .expect("Done Slice kept");
+    assert_eq!(done.state, SliceState::Done);
+    assert!(!SliceState::BOARD.contains(&SliceState::Done));
 }

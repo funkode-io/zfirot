@@ -16,6 +16,8 @@
     --text-2xl--line-height: calc(2 / 1.5);
     --font-weight-semibold: 600;
     --font-weight-bold: 700;
+    --default-transition-duration: 150ms;
+    --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
     --default-font-family: var(--font-sans);
     --default-mono-font-family: var(--font-mono);
   }
@@ -437,19 +439,6 @@
       padding-inline: calc(var(--size) / 2 - var(--border));
     }
   }
-  .icon-\[lucide--layout-dashboard\] {
-    display: inline-block;
-    width: 1em;
-    height: 1em;
-    background-color: currentColor;
-    -webkit-mask-image: var(--svg);
-    mask-image: var(--svg);
-    -webkit-mask-repeat: no-repeat;
-    mask-repeat: no-repeat;
-    -webkit-mask-size: 100% 100%;
-    mask-size: 100% 100%;
-    --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Crect width='7' height='9' x='3' y='3' rx='1'/%3E%3Crect width='7' height='5' x='14' y='3' rx='1'/%3E%3Crect width='7' height='9' x='14' y='12' rx='1'/%3E%3Crect width='7' height='5' x='3' y='16' rx='1'/%3E%3C/g%3E%3C/svg%3E");
-  }
   .card-body {
     @layer daisyui.l1.l2.l3 {
       display: flex;
@@ -634,6 +623,12 @@
     @layer daisyui.l1.l2 {
       --badge-color: var(--color-error);
       --badge-fg: var(--color-error-content);
+    }
+  }
+  .badge-neutral {
+    @layer daisyui.l1.l2 {
+      --badge-color: var(--color-neutral);
+      --badge-fg: var(--color-neutral-content);
     }
   }
   .badge-success {
