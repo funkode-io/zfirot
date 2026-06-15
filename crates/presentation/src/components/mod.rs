@@ -6,13 +6,13 @@
 
 mod board_column;
 mod error_banner;
-mod other_issue_card;
+mod home_screen;
 mod slice_card;
 mod token_screen;
 
 pub use board_column::BoardColumn;
 pub use error_banner::ErrorBanner;
-pub use other_issue_card::OtherIssueCard;
+pub use home_screen::HomeScreen;
 pub use slice_card::SliceCard;
 pub use token_screen::TokenScreen;
 

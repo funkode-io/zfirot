@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use domain::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, AppAction, AppError,
-    AppResult, GitHubToken, IssueClassification, Prd, RawIssue, RawSlice, RepoRef, Slice,
+    AppResult, GitHubToken, IssueClassification, Prd, Project, RawIssue, RawSlice, RepoRef, Slice,
 };
 
 /// The seam between the application and any GitHub backend (real or fake).
@@ -18,13 +18,18 @@ pub trait GitHubPort: Send + Sync {
     /// Load the Slices that make up a project's board.
     async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>>;
 
-    /// Load all open issues for a project as raw, unclassified GitHub data.
+    /// Load the project's open issues as raw, GitHub-shaped data, omitting none.
     ///
-    /// The application layer classifies the issues and builds the board from
-    /// this data. The adapter is responsible for providing both native-link
-    /// fields (`native_parent`, `native_blockers`, `is_native_child_of_prd`) and
-    /// the raw `body` for prose-fallback parsing.
+    /// The application layer classifies these and builds the board from them.
+    /// The adapter provides both the native-link fields (`native_parent`,
+    /// `native_blockers`, `is_native_child_of_prd`) and the raw `body` for the
+    /// prose-fallback parsing. Includes closed issues (`RawIssue.closed`);
+    /// `classify_board` is responsible for omitting them.
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>>;
+
+    /// List the repositories the token can access, for the home screen. Ordering
+    /// is the adapter's best effort; [`ProjectsService`] re-sorts by recency.
+    async fn list_projects(&self) -> AppResult<Vec<Project>>;
 }
 
 /// Shared ports are ports too, so the composition root can hand the same
@@ -37,6 +42,10 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
 
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         (**self).load_issues(repo).await
+    }
+
+    async fn list_projects(&self) -> AppResult<Vec<Project>> {
+        (**self).list_projects().await
     }
 }
 
@@ -96,6 +105,32 @@ impl<S: SecureStorePort + ?Sized> SecureStorePort for Arc<S> {
 
     async fn delete_token(&self) -> AppAction {
         (**self).delete_token().await
+    }
+}
+
+/// The seam between the application and on-device persistence of which project
+/// was last opened, so the app can reopen it on the next launch.
+///
+/// `infrastructure` implements this against a local file; use-cases run against
+/// a fake in tests, so no disk is touched.
+#[async_trait]
+pub trait ProjectStorePort: Send + Sync {
+    /// The project opened most recently, or `None` if none has been opened yet.
+    async fn last_opened(&self) -> AppResult<Option<RepoRef>>;
+    /// Remember `repo` as the most recently opened project.
+    async fn remember_last_opened(&self, repo: &RepoRef) -> AppAction;
+}
+
+/// Shared stores are stores too, so the composition root can hand the same
+/// `Arc<dyn ProjectStorePort>` to a [`ProjectsService`].
+#[async_trait]
+impl<S: ProjectStorePort + ?Sized> ProjectStorePort for Arc<S> {
+    async fn last_opened(&self) -> AppResult<Option<RepoRef>> {
+        (**self).last_opened().await
+    }
+
+    async fn remember_last_opened(&self, repo: &RepoRef) -> AppAction {
+        (**self).remember_last_opened(repo).await
     }
 }
 
@@ -244,5 +279,62 @@ impl<S: SecureStorePort> AuthService<S> {
             .delete_token()
             .await
             .map_err(|err| err.with_operation("AuthService::clear_token"))
+    }
+}
+
+/// Use-case for the home screen: listing the accessible projects,
+/// most-recently-pushed first, backed by a [`GitHubPort`].
+pub struct ProjectsService<G: GitHubPort> {
+    github: G,
+}
+
+impl<G: GitHubPort> ProjectsService<G> {
+    pub fn new(github: G) -> Self {
+        Self { github }
+    }
+
+    /// The accessible projects, most-recently-pushed first.
+    ///
+    /// Ordering is owned here rather than trusted from the adapter: `pushed_at`
+    /// is an RFC-3339 UTC timestamp, so a descending lexical sort puts the most
+    /// recently active project first.
+    pub async fn recent_projects(&self) -> AppResult<Vec<Project>> {
+        let mut projects = self
+            .github
+            .list_projects()
+            .await
+            .map_err(|err| err.with_operation("ProjectsService::recent_projects"))?;
+        projects.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
+        Ok(projects)
+    }
+}
+
+/// Use-cases for remembering and reopening the last-opened project, backed by a
+/// [`ProjectStorePort`]. A purely local concern: unlike [`ProjectsService`] it
+/// needs neither a token nor the network, so it never fails for auth reasons.
+pub struct LastOpenedService<S: ProjectStorePort> {
+    store: S,
+}
+
+impl<S: ProjectStorePort> LastOpenedService<S> {
+    pub fn new(store: S) -> Self {
+        Self { store }
+    }
+
+    /// Remember `repo` as the most recently opened project, so the next launch
+    /// reopens it.
+    pub async fn open_project(&self, repo: &RepoRef) -> AppAction {
+        self.store
+            .remember_last_opened(repo)
+            .await
+            .map_err(|err| err.with_operation("LastOpenedService::open_project"))
+    }
+
+    /// The project to reopen on launch, or `None` to show the home screen.
+    pub async fn last_opened(&self) -> AppResult<Option<RepoRef>> {
+        self.store
+            .last_opened()
+            .await
+            .map_err(|err| err.with_operation("LastOpenedService::last_opened"))
     }
 }

@@ -6,6 +6,7 @@
 mod classification;
 mod error;
 mod prd;
+mod project;
 mod prose;
 mod repo;
 mod slice;
@@ -16,6 +17,7 @@ pub use classification::{
 };
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
 pub use prd::Prd;
+pub use project::Project;
 pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
 pub use slice::{RawSlice, Slice, SliceState};

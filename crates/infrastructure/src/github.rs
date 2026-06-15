@@ -11,7 +11,9 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{parse_prose, AppError, AppResult, ProseLinks, RawIssue, RawSlice, RepoRef, Slice};
+use domain::{
+    parse_prose, AppError, AppResult, Project, ProseLinks, RawIssue, RawSlice, RepoRef, Slice,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +36,35 @@ query Board($owner: String!, $name: String!, $cursor: String) {
         parent { title }
         blockedBy(first: 50) { nodes { state } }
         closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
+      }
+    }
+  }
+}
+"#;
+
+/// The viewer's accessible repositories, most-recently-pushed first, for the
+/// home screen. One page of up to 50 is plenty for a recent-projects list;
+/// `ProjectsService` re-sorts by `pushedAt` regardless of the returned order.
+const PROJECTS_QUERY: &str = r#"
+query Projects($cursor: String) {
+  viewer {
+    repositories(
+      first: 50,
+      after: $cursor,
+      orderBy: {field: PUSHED_AT, direction: DESC},
+      affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        pushedAt
+        isFork
+        owner { login }
+        parent {
+          name
+          pushedAt
+          owner { login }
+        }
       }
     }
   }
@@ -103,12 +134,47 @@ impl GitHubClient {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(status_error(status, &response));
+            return Err(status_error(status, &response, "GitHubClient::fetch_page"));
         }
 
         response.text().await.map_err(|err| {
             AppError::unavailable("Could not read GitHub's response")
                 .with_operation("GitHubClient::fetch_page")
+                .with_source(err)
+        })
+    }
+
+    /// Fetch a single page of the viewer's repositories, starting after `cursor`.
+    async fn fetch_projects_page(&self, cursor: Option<&str>) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": PROJECTS_QUERY,
+            "variables": { "cursor": cursor },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_projects_page")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_projects_page",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_projects_page")
                 .with_source(err)
         })
     }
@@ -137,14 +203,42 @@ impl GitHubPort for GitHubClient {
     }
 
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
-        // TODO: implement a dedicated GraphQL query for raw issue classification.
-        // Returns an empty list until a proper `load_issues` query is added.
-        Ok(vec![])
+        // No live issue-classification query exists yet: the `classify_board`
+        // use-case is exercised only through the fake adapter. Fail loudly
+        // rather than returning an empty list, so a caller that wires this into
+        // the live board surfaces an error instead of a silently empty board.
+        Err(
+            AppError::internal("Loading issues for classification is not implemented yet")
+                .with_operation("GitHubClient::load_issues"),
+        )
+    }
+
+    async fn list_projects(&self) -> AppResult<Vec<Project>> {
+        let mut projects = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let body = self.fetch_projects_page(cursor.as_deref()).await?;
+            let (page, next) = parse_projects_response(&body)?;
+            projects.extend(page);
+            match next {
+                Some(end) => cursor = Some(end),
+                None => break,
+            }
+        }
+
+        Ok(projects)
     }
 }
 
 /// Map a GitHub `4xx/5xx` response to an [`AppError`] the caller can act on.
-fn status_error(status: reqwest::StatusCode, response: &reqwest::Response) -> AppError {
+/// `operation` names the calling fetch so diagnostics point at the right one
+/// (board vs. project listing).
+fn status_error(
+    status: reqwest::StatusCode,
+    response: &reqwest::Response,
+    operation: &'static str,
+) -> AppError {
     let rate_limited = response
         .headers()
         .get("x-ratelimit-remaining")
@@ -153,19 +247,19 @@ fn status_error(status: reqwest::StatusCode, response: &reqwest::Response) -> Ap
         .unwrap_or(false);
 
     match status.as_u16() {
-        401 => AppError::unauthorized("GitHub rejected the token")
-            .with_operation("GitHubClient::fetch_page"),
-        403 if rate_limited => AppError::rate_limited("GitHub rate limit exceeded")
-            .with_operation("GitHubClient::fetch_page"),
+        401 => AppError::unauthorized("GitHub rejected the token").with_operation(operation),
+        403 if rate_limited => {
+            AppError::rate_limited("GitHub rate limit exceeded").with_operation(operation)
+        }
         403 => AppError::forbidden("The token lacks access to this repository")
-            .with_operation("GitHubClient::fetch_page"),
+            .with_operation(operation),
         // GitHub-side failures the caller can only retry later.
         500..=599 => AppError::unavailable("GitHub is temporarily unavailable")
-            .with_operation("GitHubClient::fetch_page")
+            .with_operation(operation)
             .with_context("status", status),
         // Any other status means our request was wrong: a bug, not a transient.
         _ => AppError::internal("GitHub returned an unexpected status")
-            .with_operation("GitHubClient::fetch_page")
+            .with_operation(operation)
             .with_context("status", status),
     }
 }
@@ -225,6 +319,82 @@ pub fn parse_response(body: &str) -> AppResult<(Vec<IssueData>, Option<String>)>
     };
 
     Ok((raw, next))
+}
+
+/// Parse a GraphQL projects response into a page of [`Project`]s and the cursor
+/// of the next page (if any). Pure and offline, mirroring [`parse_response`].
+pub fn parse_projects_response(body: &str) -> AppResult<(Vec<Project>, Option<String>)> {
+    let response: ProjectsResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_projects_response")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        let message = errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let error = if message.to_lowercase().contains("rate limit") {
+            AppError::rate_limited("GitHub rate limit exceeded")
+        } else {
+            AppError::internal("GitHub reported a query error")
+        };
+        return Err(error
+            .with_operation("parse_projects_response")
+            .with_context("errors", message));
+    }
+
+    let repositories = response
+        .data
+        .map(|data| data.viewer.repositories)
+        .ok_or_else(|| {
+            AppError::internal("GitHub returned no viewer data")
+                .with_operation("parse_projects_response")
+        })?;
+
+    // Resolve each node to the project the app actually tracks: a fork stands in
+    // for its upstream parent (issues live upstream, not on the fork), so we map
+    // forks to their parent's identity and recency. Mapping can collapse two
+    // nodes onto the same upstream (e.g. an org repo plus a personal fork of it),
+    // so we de-duplicate by repository, keeping the most recent push.
+    let mut by_repo: Vec<Project> = Vec::with_capacity(repositories.nodes.len());
+    for node in repositories.nodes {
+        let project = node_into_project(node);
+        match by_repo.iter_mut().find(|seen| seen.repo == project.repo) {
+            Some(seen) if project.pushed_at > seen.pushed_at => seen.pushed_at = project.pushed_at,
+            Some(_) => {}
+            None => by_repo.push(project),
+        }
+    }
+    let projects = by_repo;
+
+    let next = if repositories.page_info.has_next_page {
+        repositories.page_info.end_cursor
+    } else {
+        None
+    };
+
+    Ok((projects, next))
+}
+
+/// Map a repository node to the project the app tracks. A fork stands in for its
+/// upstream parent: the board reads issues from upstream, so we adopt the
+/// parent's owner/name and its push time (the project's real activity). A
+/// non-fork (or a fork whose parent the token cannot see) keeps its own
+/// identity. A null `pushedAt` becomes an empty string, which sorts last.
+fn node_into_project(node: RepositoryNode) -> Project {
+    match node.parent {
+        Some(parent) if node.is_fork => Project::new(
+            RepoRef::new(parent.owner.login, parent.name),
+            parent.pushed_at.unwrap_or_default(),
+        ),
+        _ => Project::new(
+            RepoRef::new(node.owner.login, node.name),
+            node.pushed_at.unwrap_or_default(),
+        ),
+    }
 }
 
 /// Resolve native-or-prose relationships across a whole board into [`RawSlice`]s.
@@ -415,4 +585,52 @@ struct StateConnection {
 #[derive(Deserialize)]
 struct StateNode {
     state: String,
+}
+
+#[derive(Deserialize)]
+struct ProjectsResponse {
+    data: Option<ProjectsData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct ProjectsData {
+    viewer: Viewer,
+}
+
+#[derive(Deserialize)]
+struct Viewer {
+    repositories: RepositoryConnection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryConnection {
+    page_info: PageInfo,
+    nodes: Vec<RepositoryNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryNode {
+    name: String,
+    pushed_at: Option<String>,
+    #[serde(default)]
+    is_fork: bool,
+    owner: RepositoryOwner,
+    parent: Option<ParentRepositoryNode>,
+}
+
+/// A fork's upstream repository, the project the app actually tracks.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParentRepositoryNode {
+    name: String,
+    pushed_at: Option<String>,
+    owner: RepositoryOwner,
+}
+
+#[derive(Deserialize)]
+struct RepositoryOwner {
+    login: String,
 }
