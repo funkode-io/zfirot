@@ -2,11 +2,14 @@ use serde::{Deserialize, Serialize};
 
 /// How an open GitHub issue has been classified by the two-tier strategy.
 ///
-/// - **Tier 1 (confident, automatic):** `prd` label → [`Prd`]; native child of a
-///   PRD or `slice`/`ready-for-agent` label → [`Slice`].
+/// - **Tier 1 (confident, automatic):** `prd` label → [`IssueClassification::Prd`];
+///   native child of a PRD or `slice`/`ready-for-agent` label →
+///   [`IssueClassification::Slice`].
 /// - **Tier 2 (heuristic, suggested):** unlabeled issues scored against the
-///   planning-skill template headings → [`SuggestedPrd`] or [`SuggestedSlice`].
-/// - **Tier 3:** nothing matches → [`Unclassified`], shown in "other open issues".
+///   planning-skill template headings → [`IssueClassification::SuggestedPrd`] or
+///   [`IssueClassification::SuggestedSlice`].
+/// - **Tier 3:** nothing matches → [`IssueClassification::Unclassified`], shown
+///   in "other open issues".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueClassification {
     /// Confident — carries the `prd` label.
@@ -95,9 +98,9 @@ pub fn classify_issue(raw: &RawIssue) -> IssueClassification {
 
 /// Parse the parent issue number from the `## Parent` section of an issue body.
 ///
-/// Reads native links first; use this function as a prose fallback when the
-/// native parent link is absent. Returns `None` if no `#<number>` reference is
-/// found in the section.
+/// This reads prose only. Callers read the native parent link first and use
+/// this as a fallback when that link is absent. Returns `None` if no
+/// `#<number>` reference is found in the section.
 pub fn parse_parent_from_body(body: &str) -> Option<u64> {
     let section = extract_section_ci(body, "## parent")?;
     first_issue_ref(section)
@@ -106,9 +109,9 @@ pub fn parse_parent_from_body(body: &str) -> Option<u64> {
 /// Parse "blocked by" issue numbers from the `## Blocked by` section of an
 /// issue body.
 ///
-/// Reads native links first; use this function as a prose fallback when native
-/// dependency links are absent. Returns an empty `Vec` when the section is
-/// missing or contains no `#<number>` references.
+/// This reads prose only. Callers read the native dependency links first and
+/// use this as a fallback when those links are absent. Returns an empty `Vec`
+/// when the section is missing or contains no `#<number>` references.
 pub fn parse_blockers_from_body(body: &str) -> Vec<u64> {
     let Some(section) = extract_section_ci(body, "## blocked by") else {
         return Vec::new();

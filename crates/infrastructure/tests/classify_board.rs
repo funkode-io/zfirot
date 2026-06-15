@@ -79,16 +79,39 @@ async fn classify_board_splits_issues_into_slices_prds_and_other() {
 }
 
 #[tokio::test]
-async fn classify_board_blockers_from_native_links_take_precedence() {
-    use infrastructure::sample_raw_issues;
+async fn classify_board_derives_blocked_state_from_native_blockers() {
+    use domain::SliceState;
 
-    // Issue #5 has native_blockers=[3] and a prose "## Blocked by - #3" section.
-    // The native count should be used (not the prose-parsed additional count).
-    let issues = sample_raw_issues();
-    let issue5 = issues.iter().find(|i| i.number == 5).expect("issue #5");
+    let service = BoardService::new(FakeGitHubPort);
+    let repo = RepoRef::new("funkode-io", "zfirot");
+
+    let ClassifiedBoard { slices, .. } = service
+        .classify_board(&repo)
+        .await
+        .expect("fake port should classify the board");
+
+    // Issue #5 carries native_blockers=[3] (issue #3 is still open), so the
+    // derived Slice is Blocked regardless of any prose "## Blocked by" section.
+    let slice5 = slices
+        .iter()
+        .find(|s| s.number == 5)
+        .expect("issue #5 should be a confirmed Slice");
     assert_eq!(
-        issue5.native_blockers,
-        vec![3],
-        "issue #5 should have one native blocker"
+        slice5.state,
+        SliceState::Blocked,
+        "issue #5 should be Blocked from its native blocker on the still-open #3"
+    );
+
+    // Issue #3 has no native blockers and only a prose "## Blocked by - #2",
+    // but #2 is closed, so the prose blocker is filtered out and #3 is not
+    // falsely marked Blocked (it is WIP via its open linked PR / assignee).
+    let slice3 = slices
+        .iter()
+        .find(|s| s.number == 3)
+        .expect("issue #3 should be a confirmed Slice");
+    assert_ne!(
+        slice3.state,
+        SliceState::Blocked,
+        "issue #3's only prose blocker (#2) is closed, so it must not be Blocked"
     );
 }
