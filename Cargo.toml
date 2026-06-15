@@ -21,7 +21,6 @@ reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
 ] }
-dotenvy = "0.15"
 
 domain = { path = "crates/domain" }
 application = { path = "crates/application" }
