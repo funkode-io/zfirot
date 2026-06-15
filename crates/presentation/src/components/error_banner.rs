@@ -35,7 +35,7 @@ fn segments(message: &str) -> Vec<Segment> {
     let mut segments = Vec::new();
     let mut rest = message;
 
-    while let Some(start) = rest.find("http://").or_else(|| rest.find("https://")) {
+    while let Some(start) = next_url_start(rest) {
         if start > 0 {
             segments.push(Segment::Text(rest[..start].to_string()));
         }
@@ -55,6 +55,19 @@ fn segments(message: &str) -> Vec<Segment> {
     }
 
     segments
+}
+
+/// The byte index of the earliest `http://` or `https://` in `text`, if any.
+///
+/// Both schemes must be considered together: scanning for one first would skip
+/// past an earlier URL of the other scheme and leave it unlinked.
+fn next_url_start(text: &str) -> Option<usize> {
+    let http = text.find("http://");
+    let https = text.find("https://");
+    match (http, https) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 #[cfg(test)]
@@ -92,5 +105,25 @@ mod tests {
         let parts = rendered(&segments("No token configured."));
 
         assert_eq!(parts, vec![("text", "No token configured.".to_string())]);
+    }
+
+    #[test]
+    fn linkifies_each_url_when_both_schemes_appear() {
+        // The https URL comes first, so an http-first scan would wrongly leave
+        // it unlinked. Both must be linkified, in order.
+        let message = "See https://secure.example and http://plain.example now.";
+
+        let parts = rendered(&segments(message));
+
+        assert_eq!(
+            parts,
+            vec![
+                ("text", "See ".to_string()),
+                ("link", "https://secure.example".to_string()),
+                ("text", " and ".to_string()),
+                ("link", "http://plain.example".to_string()),
+                ("text", " now.".to_string()),
+            ]
+        );
     }
 }

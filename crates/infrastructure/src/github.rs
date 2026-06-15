@@ -10,6 +10,7 @@
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{AppError, AppResult, RawSlice, RepoRef, Slice};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
@@ -34,22 +35,46 @@ query Board($owner: String!, $name: String!, $cursor: String) {
 }
 "#;
 
-/// A GitHub GraphQL adapter. The token is injected by the composition root; the
-/// adapter never reads the environment itself.
+/// A GitHub GraphQL adapter. The token is injected by the composition root (the
+/// adapter never reads the environment itself) and held only inside the HTTP
+/// client's default `Authorization` header, marked sensitive so it is not logged.
 pub struct GitHubClient {
     http: reqwest::Client,
-    token: String,
     endpoint: String,
 }
 
 impl GitHubClient {
-    /// Build a client from an already-resolved token and an HTTP client.
-    pub fn new(token: impl Into<String>, http: reqwest::Client) -> Self {
-        Self {
+    /// Build a client from an already-resolved token.
+    ///
+    /// The token and user-agent are baked into the client's default headers, so
+    /// every request is authenticated without re-supplying them (and the token
+    /// lives only in the sensitive header, not in a plain field).
+    pub fn new(token: impl AsRef<str>) -> AppResult<Self> {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", token.as_ref()))
+            .map_err(|err| {
+                AppError::invalid_input("The GitHub token contains invalid characters.")
+                    .with_operation("GitHubClient::new")
+                    .with_source(err)
+            })?;
+        authorization.set_sensitive(true);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, authorization);
+        headers.insert(USER_AGENT, HeaderValue::from_static("zfirot"));
+
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .map_err(|err| {
+                AppError::internal("Could not build the GitHub HTTP client")
+                    .with_operation("GitHubClient::new")
+                    .with_source(err)
+            })?;
+
+        Ok(Self {
             http,
-            token: token.into(),
             endpoint: GITHUB_GRAPHQL_URL.to_string(),
-        }
+        })
     }
 
     /// Fetch a single page of issues for `repo`, starting after `cursor`.
@@ -62,8 +87,6 @@ impl GitHubClient {
         let response = self
             .http
             .post(&self.endpoint)
-            .bearer_auth(&self.token)
-            .header(reqwest::header::USER_AGENT, "zfirot")
             .json(&body)
             .send()
             .await
@@ -122,7 +145,12 @@ fn status_error(status: reqwest::StatusCode, response: &reqwest::Response) -> Ap
             .with_operation("GitHubClient::fetch_page"),
         403 => AppError::forbidden("The token lacks access to this repository")
             .with_operation("GitHubClient::fetch_page"),
-        _ => AppError::unavailable("GitHub returned an unexpected status")
+        // GitHub-side failures the caller can only retry later.
+        500..=599 => AppError::unavailable("GitHub is temporarily unavailable")
+            .with_operation("GitHubClient::fetch_page")
+            .with_context("status", status),
+        // Any other status means our request was wrong: a bug, not a transient.
+        _ => AppError::internal("GitHub returned an unexpected status")
             .with_operation("GitHubClient::fetch_page")
             .with_context("status", status),
     }
@@ -145,7 +173,7 @@ pub fn parse_response(body: &str) -> AppResult<(Vec<RawSlice>, Option<String>)> 
             .join("; ");
         let lowered = message.to_lowercase();
         let error = if lowered.contains("rate limit") {
-            AppError::rate_limited(message)
+            AppError::rate_limited("GitHub rate limit exceeded").with_context("errors", message)
         } else {
             AppError::internal("GitHub reported a query error").with_context("errors", message)
         };

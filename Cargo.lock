@@ -5992,7 +5992,6 @@ dependencies = [
  "domain",
  "dotenvy",
  "infrastructure",
- "reqwest",
 ]
 
 [[package]]

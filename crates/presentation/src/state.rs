@@ -41,7 +41,7 @@ impl AppState {
             .with_operation("AppState::from_env")
         })?;
 
-        let client = GitHubClient::new(token, reqwest::Client::new());
+        let client = GitHubClient::new(token)?;
         Ok(Self::with_port(
             RepoRef::new(REPO_OWNER, REPO_NAME),
             Arc::new(client),
