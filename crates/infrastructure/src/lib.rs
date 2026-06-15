@@ -36,6 +36,10 @@ impl GitHubPort for FakeGitHubPort {
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
         Ok(sample_projects())
     }
+
+    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> domain::AppAction {
+        Ok(())
+    }
 }
 
 /// Canned recent projects for the fake, with varied `pushed_at` timestamps so

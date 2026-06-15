@@ -12,8 +12,8 @@
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{
-    parse_prose, AppError, AppResult, PrdRef, Project, ProseLinks, RawIssue, RawSlice, RepoRef,
-    Slice,
+    parse_prose, AppAction, AppError, AppResult, PrdRef, Project, ProseLinks, RawIssue, RawSlice,
+    RepoRef, Slice,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -95,6 +95,28 @@ query Projects($cursor: String) {
         }
       }
     }
+  }
+}
+"#;
+
+/// Resolve the node IDs the assign-self mutation needs: the authenticated
+/// user (`viewer`) and the target issue (the assignable). Both are looked up in
+/// one round trip before the mutation runs.
+const ASSIGN_IDS_QUERY: &str = r#"
+query AssignIds($owner: String!, $name: String!, $number: Int!) {
+  viewer { id }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) { id }
+  }
+}
+"#;
+
+/// Assign the authenticated user to an issue, claiming a Ready Slice. The board
+/// re-polls after this succeeds, so the now-assigned Slice derives `Wip`.
+const ASSIGN_MUTATION: &str = r#"
+mutation Assign($assignableId: ID!, $assigneeId: ID!) {
+  addAssigneesToAssignable(input: {assignableId: $assignableId, assigneeIds: [$assigneeId]}) {
+    clientMutationId
   }
 }
 "#;
@@ -242,6 +264,80 @@ impl GitHubClient {
                 .with_source(err)
         })
     }
+
+    /// Resolve the viewer and issue node IDs the assign mutation needs.
+    async fn fetch_assign_ids(&self, repo: &RepoRef, issue_number: u64) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": ASSIGN_IDS_QUERY,
+            "variables": { "owner": repo.owner, "name": repo.name, "number": issue_number },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_assign_ids")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_assign_ids",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_assign_ids")
+                .with_source(err)
+        })
+    }
+
+    /// Run the `addAssigneesToAssignable` mutation for the resolved node IDs.
+    async fn run_assign_mutation(
+        &self,
+        assignable_id: &str,
+        assignee_id: &str,
+    ) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": ASSIGN_MUTATION,
+            "variables": { "assignableId": assignable_id, "assigneeId": assignee_id },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::run_assign_mutation")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::run_assign_mutation",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::run_assign_mutation")
+                .with_source(err)
+        })
+    }
 }
 
 #[async_trait]
@@ -298,6 +394,15 @@ impl GitHubPort for GitHubClient {
         }
 
         Ok(projects)
+    }
+
+    async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
+        let ids_body = self.fetch_assign_ids(repo, issue_number).await?;
+        let ids = parse_assign_ids(&ids_body, issue_number)?;
+        let mutation_body = self
+            .run_assign_mutation(&ids.assignable_id, &ids.assignee_id)
+            .await?;
+        parse_assign_mutation(&mutation_body)
     }
 }
 
@@ -503,6 +608,103 @@ pub fn parse_projects_response(body: &str) -> AppResult<(Vec<Project>, Option<St
     };
 
     Ok((projects, next))
+}
+
+/// The resolved node IDs the assign-self mutation needs.
+#[cfg_attr(test, derive(Debug))]
+struct AssignIds {
+    assignable_id: String,
+    assignee_id: String,
+}
+
+/// Parse the assign-ids query response into the viewer and issue node IDs.
+/// Pure and offline, so the HTTP boundary stays thin and testable. A missing
+/// issue (e.g. wrong number, or not visible to the token) maps to `NotFound`.
+fn parse_assign_ids(body: &str, issue_number: u64) -> AppResult<AssignIds> {
+    let response: AssignIdsResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_assign_ids")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        return Err(assign_error(errors, "parse_assign_ids"));
+    }
+
+    let data = response.data.ok_or_else(|| {
+        AppError::internal("GitHub returned no assign data").with_operation("parse_assign_ids")
+    })?;
+
+    let issue = data
+        .repository
+        .and_then(|repository| repository.issue)
+        .ok_or_else(|| {
+            AppError::not_found("Issue not found or not visible to the token")
+                .with_operation("parse_assign_ids")
+                .with_context("issue", issue_number)
+        })?;
+
+    Ok(AssignIds {
+        assignable_id: issue.id,
+        assignee_id: data.viewer.id,
+    })
+}
+
+/// Check the assign mutation response for GraphQL errors. The mutation has no
+/// payload the board needs, so success is simply the absence of errors.
+fn parse_assign_mutation(body: &str) -> AppAction {
+    let response: MutationResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_assign_mutation")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        return Err(assign_error(errors, "parse_assign_mutation"));
+    }
+
+    Ok(())
+}
+
+/// Map a GraphQL `errors` array from an assign round trip to an [`AppError`]
+/// the caller can act on, joining the messages for context.
+///
+/// A `FORBIDDEN` here almost always means the fine-grained token can *read*
+/// issues (the board loaded) but lacks *write* access to assign them, so the
+/// message names the exact permission to grant. GitHub's own text is kept out
+/// of the user-facing message (it can carry backend detail) and attached as
+/// diagnostic `errors` context instead.
+fn assign_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError {
+    let forbidden = errors.iter().any(|error| {
+        matches!(error.error_type.as_deref(), Some("FORBIDDEN"))
+            || error.message.to_lowercase().contains("must have")
+            || error
+                .message
+                .to_lowercase()
+                .contains("not accessible by personal access token")
+    });
+    let message = errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let lowered = message.to_lowercase();
+    let error = if forbidden {
+        AppError::forbidden(
+            "GitHub denied the assignment. Your fine-grained token needs the \
+             repository \"Issues\" permission set to \"Read and write\" (or \
+             \"Pull requests: Read and write\" if the Slice is a pull request).",
+        )
+    } else if lowered.contains("rate limit") {
+        AppError::rate_limited("GitHub rate limit exceeded")
+    } else if lowered.contains("could not resolve") || lowered.contains("not_found") {
+        AppError::not_found("Issue not found or not visible to the token")
+    } else {
+        AppError::internal("GitHub reported a query error")
+    };
+    error
+        .with_operation(operation)
+        .with_context("errors", message)
 }
 
 /// Map a repository node to the project the app tracks. A fork stands in for its
@@ -716,6 +918,33 @@ struct GraphQlError {
 }
 
 #[derive(Deserialize)]
+struct AssignIdsResponse {
+    data: Option<AssignIdsData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct AssignIdsData {
+    viewer: NodeId,
+    repository: Option<AssignRepository>,
+}
+
+#[derive(Deserialize)]
+struct AssignRepository {
+    issue: Option<NodeId>,
+}
+
+#[derive(Deserialize)]
+struct NodeId {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct MutationResponse {
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
 struct ResponseData {
     repository: Option<RepositoryData>,
 }
@@ -894,4 +1123,96 @@ struct ParentRepositoryNode {
 #[derive(Deserialize)]
 struct RepositoryOwner {
     login: String,
+}
+
+#[cfg(test)]
+mod tests {
+    //! Offline tests for the assign-self response/error parsers, pinned against
+    //! recorded GraphQL bodies so a GitHub schema or message change can't break
+    //! assign-self without a test catching it.
+    use super::*;
+    use domain::AppErrorKind;
+
+    #[test]
+    fn parse_assign_ids_extracts_viewer_and_issue_ids() {
+        let body = r#"{
+            "data": {
+                "viewer": { "id": "VIEWER_1" },
+                "repository": { "issue": { "id": "ISSUE_42" } }
+            }
+        }"#;
+
+        let ids = parse_assign_ids(body, 42).expect("ids should parse");
+
+        assert_eq!(ids.assignee_id, "VIEWER_1");
+        assert_eq!(ids.assignable_id, "ISSUE_42");
+    }
+
+    #[test]
+    fn parse_assign_ids_missing_issue_is_not_found_with_context() {
+        let body = r#"{
+            "data": { "viewer": { "id": "VIEWER_1" }, "repository": { "issue": null } }
+        }"#;
+
+        let error = parse_assign_ids(body, 7).expect_err("a missing issue should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+        assert!(
+            format!("{error:?}").contains("issue=7"),
+            "the issue number should be attached as context: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_assign_mutation_succeeds_when_no_errors() {
+        let body = r#"{ "data": { "addAssigneesToAssignable": { "clientMutationId": null } } }"#;
+
+        parse_assign_mutation(body).expect("a clean mutation response should be Ok");
+    }
+
+    #[test]
+    fn assign_error_forbidden_is_actionable_and_hides_github_text() {
+        let body = r#"{
+            "data": null,
+            "errors": [
+                { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token" }
+            ]
+        }"#;
+
+        let error = parse_assign_mutation(body).expect_err("a FORBIDDEN response should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::Forbidden);
+        // The user-facing message names the permission to grant...
+        let display = error.to_string();
+        assert!(
+            display.contains("Read and write"),
+            "the message should name the permission to grant: {display}"
+        );
+        // ...but never leaks GitHub's raw backend text into the UI message.
+        assert!(
+            !display.contains("personal access token"),
+            "GitHub's raw text must not reach the user-facing message: {display}"
+        );
+        // The raw text is kept for diagnostics in the error context instead.
+        assert!(
+            format!("{error:?}").contains("personal access token"),
+            "GitHub's raw text should be attached as diagnostic context: {error:?}"
+        );
+    }
+
+    #[test]
+    fn assign_error_maps_rate_limit_and_resolution_failures() {
+        let rate_limited = r#"{ "errors": [ { "message": "API rate limit exceeded" } ] }"#;
+        assert_eq!(
+            parse_assign_mutation(rate_limited).unwrap_err().kind(),
+            AppErrorKind::RateLimited
+        );
+
+        let unresolved =
+            r#"{ "errors": [ { "message": "Could not resolve to a node with the global id" } ] }"#;
+        assert_eq!(
+            parse_assign_mutation(unresolved).unwrap_err().kind(),
+            AppErrorKind::NotFound
+        );
+    }
 }

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use application::{
-    BoardService, ClassifiedBoard, GitHubPort, LastOpenedService, ProjectStorePort,
+    AuthService, BoardService, ClassifiedBoard, GitHubPort, LastOpenedService, ProjectStorePort,
     ProjectsService, SecureStorePort,
 };
 use domain::{AppAction, AppResult, GitHubToken, Project, RepoRef};
@@ -78,6 +78,14 @@ impl AppState {
             .classify_board(&self.repo)
             .await
     }
+
+    /// Assign the authenticated user to a Ready Slice's issue, claiming it on
+    /// GitHub. The caller re-polls the board on success.
+    pub async fn assign_self(&self, issue_number: u64) -> AppAction {
+        BoardService::new(self.port.clone())
+            .assign_self(&self.repo, issue_number)
+            .await
+    }
 }
 
 /// The accessible projects, most-recently-pushed first, for the home screen.
@@ -95,4 +103,15 @@ pub async fn last_opened() -> AppResult<Option<RepoRef>> {
 /// A local store write only: no token or network involved.
 pub async fn open_project(repo: &RepoRef) -> AppAction {
     last_opened_service()?.open_project(repo).await
+}
+
+/// Assign the authenticated user to a Ready Slice's issue, claiming it on
+/// GitHub. Reads the stored token, wires the live adapter scoped to `repo`, and
+/// runs the assign-self use-case; the board is re-polled by the caller on
+/// success and left unchanged on failure.
+pub async fn assign_self(repo: &RepoRef, issue_number: u64) -> AppAction {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    AppState::from_token(&token, repo.clone())?
+        .assign_self(issue_number)
+        .await
 }
