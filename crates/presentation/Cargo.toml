@@ -13,4 +13,3 @@ domain.workspace = true
 application.workspace = true
 infrastructure.workspace = true
 dioxus = { version = "0.7", features = ["desktop"] }
-dotenvy.workspace = true

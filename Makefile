@@ -11,13 +11,15 @@ css-watch:
 	cd $(PRESENTATION) && npm run watch:css
 
 # Start the desktop app in dev mode (hot-reload) via the Dioxus CLI.
-# Compiles the stylesheet first so styling is up to date.
+# Compiles the stylesheet first so styling is up to date. Loads .env (if present)
+# so ZFIROT_GITHUB_TOKEN reaches the dev-only env secure store, avoiding repeated
+# OS keychain prompts across rebuilds.
 dev: css
-	dx serve --package zfirot --platform desktop
+	set -a; [ -f .env ] && . ./.env; set +a; dx serve --package zfirot --platform desktop
 
 # Run the app once without the Dioxus CLI.
 run: css
-	cargo run --package zfirot
+	set -a; [ -f .env ] && . ./.env; set +a; cargo run --package zfirot
 
 # Build the whole workspace.
 build:
