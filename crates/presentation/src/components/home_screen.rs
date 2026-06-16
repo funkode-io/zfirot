@@ -21,15 +21,15 @@ pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Ele
 
     // Attempt to parse the current input and open the board, or surface an
     // inline error. Extracted as a named closure so both the button and the
-    // Enter-key handler share the same logic without duplicating it.
-    let try_open = move || {
-        match RepoRef::parse(repo_input.read().clone()) {
-            Ok(repo) => {
-                input_error.set(None);
-                on_open.call(repo);
-            }
-            Err(err) => input_error.set(Some(err.to_string())),
+    // Enter-key handler share the same logic without duplicating it. `mut`
+    // because it writes signals (`FnMut`); it captures only `Copy` handles, so
+    // each event closure gets its own copy.
+    let mut try_open = move || match RepoRef::parse(repo_input.read().clone()) {
+        Ok(repo) => {
+            input_error.set(None);
+            on_open.call(repo);
         }
+        Err(err) => input_error.set(Some(err.to_string())),
     };
 
     rsx! {
