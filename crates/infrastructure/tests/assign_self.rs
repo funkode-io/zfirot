@@ -66,7 +66,7 @@ impl GitHubPort for FailingPort {
 
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Err(AppError::forbidden(
-            "The token lacks permission to assign this issue",
+            "The token lacks permission to label this issue",
         ))
     }
 }
