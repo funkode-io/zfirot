@@ -1,4 +1,4 @@
-.PHONY: dev run build css css-watch fmt lint test check
+.PHONY: dev run build css css-watch fmt lint test check icon
 
 PRESENTATION := crates/presentation
 
@@ -9,6 +9,15 @@ css:
 # Recompile the stylesheet on change (run alongside `make dev`).
 css-watch:
 	cd $(PRESENTATION) && npm run watch:css
+
+# Rasterise the ZF monogram (assets/logo.svg) into the bundled window icon
+# (assets/icon.png) used by the desktop window. Uses macOS QuickLook + sips, so
+# it needs no extra tooling; rerun after editing logo.svg.
+icon:
+	cd $(PRESENTATION)/assets && \
+	qlmanage -t -s 512 -o . logo.svg >/dev/null && \
+	sips -s format png logo.svg.png --out icon.png >/dev/null && \
+	rm -f logo.svg.png
 
 # Start the desktop app in dev mode (hot-reload) via the Dioxus CLI.
 # Compiles the stylesheet first so styling is up to date. Loads .env (if present)
