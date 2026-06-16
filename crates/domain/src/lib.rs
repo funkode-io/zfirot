@@ -6,6 +6,7 @@
 mod classification;
 mod error;
 mod freshness;
+mod home_filter;
 mod lane;
 mod prd;
 mod project;
@@ -19,6 +20,7 @@ pub use classification::{
 };
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
 pub use freshness::PollInterval;
+pub use home_filter::{filter_home, HomeFilter};
 pub use lane::{group_into_lanes, PrdLane};
 pub use prd::{Prd, PrdRef};
 pub use project::Project;

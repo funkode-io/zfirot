@@ -1,103 +1,117 @@
 use dioxus::prelude::*;
-use domain::{Project, RepoRef};
+use domain::{filter_home, HomeFilter, Project, RepoRef};
 
 /// How many recent projects to show before the user clicks "Show more".
 const INITIAL_VISIBLE: usize = 6;
 
-/// The home screen: a grid of recent projects to open. Emits `on_open` with the
-/// chosen repository. Callback-only — it neither fetches nor persists anything.
+/// The home screen: a search box over the discovered projects with a gated
+/// direct-open action. Emits `on_open` with the chosen repository. Callback-only
+/// — it neither fetches nor persists anything.
+///
+/// Typing filters the visible projects by case-insensitive substring on
+/// `owner/name`. When nothing matches but the query is a valid `owner/repo`, a
+/// single "Go to" action appears (Enter also triggers it); when it is not a
+/// valid repo path, a quiet hint is shown instead. The pure decision lives in
+/// [`filter_home`].
 #[component]
 pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Element {
     let mut show_all = use_signal(|| false);
-    let mut repo_input = use_signal(String::new);
-    let mut input_error: Signal<Option<String>> = use_signal(|| None);
+    let mut query = use_signal(String::new);
 
-    let total = projects.len();
-    let visible = if show_all() {
-        total
-    } else {
-        total.min(INITIAL_VISIBLE)
-    };
+    let raw = query.read().clone();
+    let outcome = filter_home(&raw, &projects);
 
-    // Attempt to parse the current input and open the board, or surface an
-    // inline error. Extracted as a named closure so both the button and the
-    // Enter-key handler share the same logic without duplicating it. `mut`
-    // because it writes signals (`FnMut`); it captures only `Copy` handles, so
-    // each event closure gets its own copy.
-    let mut try_open = move || match RepoRef::parse(repo_input.read().clone()) {
-        Ok(repo) => {
-            input_error.set(None);
-            on_open.call(repo);
-        }
-        Err(err) => input_error.set(Some(err.to_string())),
+    // The repo to open if the user presses Enter — only set while the gated
+    // "Go to" action is showing. Cloned into the keydown closure (it owns a
+    // non-`Copy` `RepoRef`); `on_open` is a `Copy` handle.
+    let goto_on_enter = match &outcome {
+        HomeFilter::GoTo(repo) => Some(repo.clone()),
+        _ => None,
     };
 
     rsx! {
         div { class: "min-h-screen bg-base-200 p-6",
             header { class: "mb-6",
                 h1 { class: "text-2xl font-bold", "Recent projects" }
-                p { class: "text-sm opacity-70", "Pick a repository to open its board." }
+                p { class: "text-sm opacity-70",
+                    "Search your projects, or type a full owner/repo to open it directly."
+                }
             }
 
-            // Direct-open box: always visible so typing an owner/repo bypasses
-            // discovery even when the token surfaces no projects. Uses plain
-            // utilities for spacing rather than daisyUI's removed `form-control`
-            // / `label-text` classes (gone in daisyUI v5).
             div { class: "mb-6 w-full max-w-sm",
-                p { class: "text-sm font-medium mb-1", "Open a repository directly" }
-                div { class: "join w-full",
-                    input {
-                        r#type: "text",
-                        class: "input join-item flex-1",
-                        placeholder: "owner/repo",
-                        value: "{repo_input.read()}",
-                        oninput: move |evt| {
-                            repo_input.set(evt.value());
-                            input_error.set(None);
-                        },
-                        onkeydown: move |evt| {
-                            if evt.key() == Key::Enter {
-                                try_open();
+                p { class: "text-sm font-medium mb-1", "Search or open a repository" }
+                input {
+                    r#type: "text",
+                    class: "input w-full",
+                    placeholder: "owner/repo",
+                    value: "{raw}",
+                    oninput: move |evt| {
+                        query.set(evt.value());
+                        show_all.set(false);
+                    },
+                    onkeydown: move |evt| {
+                        if evt.key() == Key::Enter {
+                            if let Some(repo) = goto_on_enter.clone() {
+                                on_open.call(repo);
                             }
-                        },
-                    }
-                    button {
-                        class: "btn btn-primary join-item",
-                        disabled: repo_input.read().trim().is_empty(),
-                        onclick: move |_| try_open(),
-                        "Go"
-                    }
-                }
-                if let Some(err) = input_error.read().as_deref() {
-                    p { class: "text-sm text-error mt-1", "{err}" }
+                        }
+                    },
                 }
             }
 
-            if projects.is_empty() {
-                div { class: "hero bg-base-100 rounded-box py-16",
-                    div { class: "hero-content text-center",
-                        div {
-                            span { class: "icon-[lucide--folder-open] size-12 opacity-40" }
-                            h2 { class: "text-lg font-semibold mt-4", "No projects yet" }
-                            p { class: "text-sm opacity-70",
-                                "No repositories were found for this token."
+            match outcome {
+                HomeFilter::Filtered(matches) => {
+                    let total = matches.len();
+                    let visible = if show_all() { total } else { total.min(INITIAL_VISIBLE) };
+                    rsx! {
+                        div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
+                            for project in matches.iter().take(visible).cloned() {
+                                ProjectCard { project, on_open }
+                            }
+                        }
+                        if total > INITIAL_VISIBLE && !show_all() {
+                            div { class: "flex justify-center mt-6",
+                                button {
+                                    class: "btn btn-ghost btn-sm",
+                                    onclick: move |_| show_all.set(true),
+                                    "Show more"
+                                }
                             }
                         }
                     }
                 }
-            } else {
-                div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
-                    for project in projects.iter().take(visible).cloned() {
-                        ProjectCard { project, on_open }
+                HomeFilter::GoTo(repo) => {
+                    let label = format!("Go to {repo}");
+                    rsx! {
+                        div { class: "w-full max-w-sm",
+                            button {
+                                class: "btn btn-primary w-full",
+                                onclick: move |_| on_open.call(repo.clone()),
+                                "{label}"
+                            }
+                        }
                     }
                 }
-
-                if total > INITIAL_VISIBLE && !show_all() {
-                    div { class: "flex justify-center mt-6",
-                        button {
-                            class: "btn btn-ghost btn-sm",
-                            onclick: move |_| show_all.set(true),
-                            "Show more"
+                HomeFilter::Hint => {
+                    if projects.is_empty() && raw.trim().is_empty() {
+                        rsx! {
+                            div { class: "hero bg-base-100 rounded-box py-16",
+                                div { class: "hero-content text-center",
+                                    div {
+                                        span { class: "icon-[lucide--folder-open] size-12 opacity-40" }
+                                        h2 { class: "text-lg font-semibold mt-4", "No projects yet" }
+                                        p { class: "text-sm opacity-70",
+                                            "No repositories were found for this token. Type a full owner/repo above to open one directly."
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            p { class: "text-sm opacity-60 max-w-sm",
+                                "No matches — type a full owner/repo to open it directly."
+                            }
                         }
                     }
                 }
