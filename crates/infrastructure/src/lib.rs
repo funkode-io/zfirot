@@ -40,6 +40,15 @@ impl GitHubPort for FakeGitHubPort {
     async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> domain::AppAction {
         Ok(())
     }
+
+    async fn add_label(
+        &self,
+        _repo: &RepoRef,
+        _issue_number: u64,
+        _label: &str,
+    ) -> domain::AppAction {
+        Ok(())
+    }
 }
 
 /// Canned recent projects for the fake, with varied `pushed_at` timestamps so

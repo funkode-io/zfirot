@@ -8,14 +8,17 @@
 
 use application::{AuthService, ClassifiedBoard, OtherIssue, ProjectsRefresh, SecureStorePort};
 use dioxus::prelude::*;
-use domain::{group_into_lanes, AppErrorKind, GitHubToken, Project, RepoRef, Slice};
+use domain::{
+    group_into_lanes, AppErrorKind, BoardSummary, GitHubToken, IssueClassification, PollInterval,
+    Project, RepoRef, Slice,
+};
 
 use crate::components::{
     ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner, TokenScreen,
 };
 use crate::state::{
-    assign_self, cached_projects, last_opened, open_project, refresh_projects,
-    refresh_recent_projects, secure_store, AppState,
+    assign_self, cached_projects, confirm_classification, last_opened, open_project,
+    refresh_projects, refresh_recent_projects, secure_store, AppState,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -34,10 +37,12 @@ enum View {
         from_cache: bool,
     },
     /// A token is stored and the board for `repo` loaded and was classified into
-    /// confirmed Slices plus an "other open issues" bucket.
+    /// confirmed Slices plus an "other open issues" bucket. `loaded_at` is the
+    /// local wall-clock time this snapshot was fetched, shown as "last updated".
     Board {
         repo: RepoRef,
         board: ClassifiedBoard,
+        loaded_at: String,
     },
     /// Show the paste-token screen. `reason` is `Some` when a stored token was
     /// rejected by GitHub (so the user knows why they are being asked again) and
@@ -66,6 +71,9 @@ pub fn App() -> Element {
     // Set to a client-safe message when assigning self to a Slice fails, shown
     // above the board; cleared on a successful assignment.
     let mut assign_error = use_signal(|| Option::<String>::None);
+    // Set to a client-safe message when confirming a suggested classification
+    // fails, shown above the board; cleared on a successful confirm.
+    let mut confirm_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
     // Where the user wants to be; starts at `Auto` so the last-opened project
@@ -111,6 +119,34 @@ pub fn App() -> Element {
             });
         }
     });
+
+    // Background poll: while a board is open, re-resolve it on a fixed cadence so
+    // the columns, counts, and "last updated" timestamp stay fresh without the
+    // user clicking Refresh. The interval is the configurable `PollInterval`
+    // (default ~60s); it only bumps `reload` when a board is showing, so the
+    // home and paste-token screens are never disturbed.
+    use_future(move || async move {
+        let interval = PollInterval::default().as_duration();
+        loop {
+            // `tokio::time::sleep` is fine while v1 is a standalone desktop app
+            // running on Dioxus's tokio runtime. It depends on tokio's time
+            // driver, which is unavailable on `wasm32`, so if a web/server
+            // presentation is added later this timer should move behind a
+            // desktop-only `cfg` (or swap to a wasm-portable timer like
+            // `futures-timer`) when we gate server/web/desktop.
+            tokio::time::sleep(interval).await;
+            // `peek` reads the latest view without subscribing, so this loop is
+            // never restarted by its own re-resolves.
+            if matches!(&*view.peek(), Some(View::Board { .. })) {
+                reload += 1;
+            }
+        }
+    });
+
+    // Manual refresh: re-resolve the current view on demand (Refresh button).
+    let on_refresh = move |_| {
+        reload += 1;
+    };
 
     let on_submit = move |raw: String| {
         spawn(async move {
@@ -191,7 +227,7 @@ pub fn App() -> Element {
                 }
             },
             // Token present and the board loaded.
-            (Some(View::Board { repo, board }), ..) => {
+            (Some(View::Board { repo, board, loaded_at }), ..) => {
                 // Claim the Slice on GitHub, then re-poll so the now-assigned
                 // Slice derives Wip and leaves Ready. On failure the board is
                 // left unchanged and the error is surfaced above it.
@@ -208,20 +244,46 @@ pub fn App() -> Element {
                         }
                     });
                 };
+                // Confirm a suggested classification: add its prd/slice label,
+                // then re-poll so the now-labelled issue classifies tier-1 and
+                // leaves "other open issues". On failure the issue is left
+                // unchanged and the error is surfaced above the board.
+                let confirm_repo = repo.clone();
+                let on_confirm = move |(number, classification): (u64, IssueClassification)| {
+                    let repo = confirm_repo.clone();
+                    spawn(async move {
+                        match confirm_classification(&repo, number, &classification).await {
+                            Ok(()) => {
+                                confirm_error.set(None);
+                                reload += 1;
+                            }
+                            Err(error) => confirm_error.set(Some(error.to_string())),
+                        }
+                    });
+                };
+                let summary = BoardSummary::from_slices(&board.slices);
                 rsx! {
-                    BoardShell { repo: repo.to_string(), on_home,
+                    BoardShell {
+                        repo: repo.to_string(),
+                        on_home,
+                        on_refresh,
+                        last_updated: loaded_at.clone(),
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
                         }
+                        if let Some(message) = confirm_error() {
+                            ErrorBanner { message }
+                        }
+                        BoardSummaryBar { summary }
                         Board { slices: board.slices.clone(), on_assign }
                         if !board.other.is_empty() {
-                            OtherIssues { issues: board.other.clone() }
+                            OtherIssues { issues: board.other.clone(), on_confirm }
                         }
                     }
                 }
             }
             (Some(View::Error(message)), ..) => rsx! {
-                BoardShell { on_home,
+                BoardShell { on_home, on_refresh,
                     ErrorBanner { message: message.clone() }
                 }
             },
@@ -270,7 +332,11 @@ async fn resolve_view(nav: Nav) -> View {
     };
 
     match state.classify_board().await {
-        Ok(board) => View::Board { repo, board },
+        Ok(board) => View::Board {
+            repo,
+            board,
+            loaded_at: now_hms(),
+        },
         Err(error) if is_auth_failure(error.kind()) => {
             // The stored token was rejected (revoked, expired, or missing
             // scopes). Discard it so we do not loop on a known-bad secret, then
@@ -337,14 +403,24 @@ fn is_auth_failure(kind: AppErrorKind) -> bool {
     matches!(kind, AppErrorKind::Unauthorized | AppErrorKind::Forbidden)
 }
 
+/// The current local wall-clock time as `HH:MM:SS`, captured when a board
+/// snapshot is loaded so it can be shown as the "last updated" timestamp.
+fn now_hms() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
 /// The board chrome (header + logo) wrapping either the columns or an error.
 /// `repo` names the open project (shown beside the title) when there is one;
-/// `on_home` returns to the project picker.
+/// `on_home` returns to the project picker. When `on_refresh` is set a Refresh
+/// button re-polls the board on demand, and `last_updated` shows when the
+/// current snapshot was loaded.
 #[component]
 fn BoardShell(
     children: Element,
     on_home: EventHandler<()>,
     #[props(default)] repo: Option<String>,
+    #[props(default)] on_refresh: Option<EventHandler<()>>,
+    #[props(default)] last_updated: Option<String>,
 ) -> Element {
     rsx! {
         div { class: "min-h-screen bg-base-200 p-6",
@@ -353,15 +429,55 @@ fn BoardShell(
                 h1 { class: "text-2xl font-bold", "Zfirot" }
                 if let Some(repo) = repo {
                     span { class: "text-base opacity-60", "/ {repo}" }
-                    button {
-                        class: "btn btn-ghost btn-sm btn-square",
-                        title: "Back to projects",
-                        onclick: move |_| on_home.call(()),
-                        span { class: "icon-[lucide--undo-2] size-5" }
+                }
+                // Always available so an error view (which carries no `repo`)
+                // still has a navigation escape hatch back to the project picker.
+                button {
+                    class: "btn btn-ghost btn-sm btn-square",
+                    title: "Back to projects",
+                    aria_label: "Back to projects",
+                    onclick: move |_| on_home.call(()),
+                    span { class: "icon-[lucide--undo-2] size-5" }
+                }
+                // Freshness controls, pushed to the right.
+                div { class: "ml-auto flex items-center gap-3",
+                    if let Some(updated) = last_updated {
+                        span { class: "text-xs opacity-60", "Updated {updated}" }
+                    }
+                    if let Some(on_refresh) = on_refresh {
+                        button {
+                            class: "btn btn-ghost btn-sm btn-square",
+                            title: "Refresh now",
+                            aria_label: "Refresh now",
+                            onclick: move |_| on_refresh.call(()),
+                            span { class: "icon-[lucide--refresh-cw] size-5" }
+                        }
                     }
                 }
             }
             {children}
+        }
+    }
+}
+
+/// A summary strip of how many Slices sit in each board state, shown above the
+/// columns so the project's status is legible at a glance.
+#[component]
+fn BoardSummaryBar(summary: BoardSummary) -> Element {
+    rsx! {
+        div { class: "flex items-center gap-2 mb-4",
+            span { class: "badge badge-success badge-outline gap-1",
+                "Ready"
+                span { class: "font-semibold", "{summary.ready}" }
+            }
+            span { class: "badge badge-warning badge-outline gap-1",
+                "WIP"
+                span { class: "font-semibold", "{summary.wip}" }
+            }
+            span { class: "badge badge-error badge-outline gap-1",
+                "Blocked"
+                span { class: "font-semibold", "{summary.blocked}" }
+            }
         }
     }
 }
@@ -417,10 +533,15 @@ fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
 /// below the Kanban board.
 ///
 /// Suggested issues (tier-2 classification) render with a
-/// "looks like a PRD/Slice — confirm?" badge. Unclassified issues render
-/// without any badge. No write action is performed here.
+/// "looks like a PRD/Slice — confirm?" badge and a Confirm button that emits
+/// `on_confirm` with the issue number and its classification; the board then
+/// adds the `prd`/`slice` label and re-polls. Unclassified issues render
+/// without any badge or action.
 #[component]
-fn OtherIssues(issues: Vec<OtherIssue>) -> Element {
+fn OtherIssues(
+    issues: Vec<OtherIssue>,
+    on_confirm: EventHandler<(u64, IssueClassification)>,
+) -> Element {
     let count = issues.len();
     rsx! {
         section { class: "mt-6",
@@ -433,7 +554,11 @@ fn OtherIssues(issues: Vec<OtherIssue>) -> Element {
                 div { class: "collapse-content",
                     div { class: "flex flex-col gap-2",
                         for issue in issues {
-                            OtherIssueCard { key: "{issue.number}", issue: issue.clone() }
+                            OtherIssueCard {
+                                key: "{issue.number}",
+                                issue: issue.clone(),
+                                on_confirm: move |payload| on_confirm.call(payload),
+                            }
                         }
                     }
                 }

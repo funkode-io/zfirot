@@ -24,6 +24,24 @@ pub enum IssueClassification {
     Unclassified,
 }
 
+impl IssueClassification {
+    /// The label a confirm action should add to promote a *suggested* issue to a
+    /// confident tier-1 classification: `prd` for [`IssueClassification::SuggestedPrd`]
+    /// and `slice` for [`IssueClassification::SuggestedSlice`].
+    ///
+    /// Returns `None` for already-confident or unclassified issues, which have
+    /// no suggestion to confirm.
+    pub fn suggested_label(&self) -> Option<&'static str> {
+        match self {
+            IssueClassification::SuggestedPrd => Some("prd"),
+            IssueClassification::SuggestedSlice => Some("slice"),
+            IssueClassification::Prd
+            | IssueClassification::Slice
+            | IssueClassification::Unclassified => None,
+        }
+    }
+}
+
 /// Raw, GitHub-shaped facts about a single issue before classification.
 ///
 /// An adapter projects GitHub API data into this type. The pure
@@ -337,6 +355,27 @@ mod tests {
             ..blank_raw(100)
         };
         assert_eq!(classify_issue(&raw), IssueClassification::Unclassified);
+    }
+
+    // ── Confirming a suggestion: suggested_label ──────────────────────────────
+
+    #[test]
+    fn suggested_classifications_map_to_their_confirming_label() {
+        let cases = [
+            (IssueClassification::SuggestedPrd, Some("prd")),
+            (IssueClassification::SuggestedSlice, Some("slice")),
+            // Already-confident or unclassified issues have nothing to confirm.
+            (IssueClassification::Prd, None),
+            (IssueClassification::Slice, None),
+            (IssueClassification::Unclassified, None),
+        ];
+        for (classification, expected) in cases {
+            assert_eq!(
+                classification.suggested_label(),
+                expected,
+                "{classification:?} should map to {expected:?}"
+            );
+        }
     }
 
     // ── Prose-fallback: parse_parent_from_body ────────────────────────────────

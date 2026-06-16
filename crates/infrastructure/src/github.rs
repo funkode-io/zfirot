@@ -121,6 +121,30 @@ mutation Assign($assignableId: ID!, $assigneeId: ID!) {
 }
 "#;
 
+/// Resolve the node IDs the add-label mutation needs: the target issue (the
+/// labelable) and the repository label to add it. Both are looked up in one
+/// round trip before the mutation runs. A label the repository does not define
+/// comes back `null`, which the parser maps to a clear NotFound.
+const LABEL_IDS_QUERY: &str = r#"
+query LabelIds($owner: String!, $name: String!, $number: Int!, $label: String!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) { id }
+    label(name: $label) { id }
+  }
+}
+"#;
+
+/// Add a classifying label to an issue, confirming a suggested classification.
+/// The board re-polls after this succeeds, so the now-labelled issue is
+/// reclassified tier-1 (`prd` or `slice`) and leaves "other open issues".
+const ADD_LABEL_MUTATION: &str = r#"
+mutation AddLabel($labelableId: ID!, $labelId: ID!) {
+  addLabelsToLabelable(input: {labelableId: $labelableId, labelIds: [$labelId]}) {
+    clientMutationId
+  }
+}
+"#;
+
 /// A GitHub GraphQL adapter. The token is injected by the composition root (the
 /// adapter never reads the environment itself) and held only inside the HTTP
 /// client's default `Authorization` header, marked sensitive so it is not logged.
@@ -338,6 +362,87 @@ impl GitHubClient {
                 .with_source(err)
         })
     }
+
+    /// Resolve the issue and label node IDs the add-label mutation needs.
+    async fn fetch_label_ids(
+        &self,
+        repo: &RepoRef,
+        issue_number: u64,
+        label: &str,
+    ) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": LABEL_IDS_QUERY,
+            "variables": {
+                "owner": repo.owner, "name": repo.name, "number": issue_number, "label": label,
+            },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_label_ids")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_label_ids",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_label_ids")
+                .with_source(err)
+        })
+    }
+
+    /// Run the `addLabelsToLabelable` mutation for the resolved node IDs.
+    async fn run_add_label_mutation(
+        &self,
+        labelable_id: &str,
+        label_id: &str,
+    ) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": ADD_LABEL_MUTATION,
+            "variables": { "labelableId": labelable_id, "labelId": label_id },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::run_add_label_mutation")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::run_add_label_mutation",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::run_add_label_mutation")
+                .with_source(err)
+        })
+    }
 }
 
 #[async_trait]
@@ -403,6 +508,15 @@ impl GitHubPort for GitHubClient {
             .run_assign_mutation(&ids.assignable_id, &ids.assignee_id)
             .await?;
         parse_assign_mutation(&mutation_body)
+    }
+
+    async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
+        let ids_body = self.fetch_label_ids(repo, issue_number, label).await?;
+        let ids = parse_label_ids(&ids_body, issue_number, label)?;
+        let mutation_body = self
+            .run_add_label_mutation(&ids.labelable_id, &ids.label_id)
+            .await?;
+        parse_add_label_mutation(&mutation_body)
     }
 }
 
@@ -707,6 +821,113 @@ fn assign_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError 
         .with_context("errors", message)
 }
 
+/// The resolved node IDs the add-label mutation needs.
+#[cfg_attr(test, derive(Debug))]
+struct LabelIds {
+    labelable_id: String,
+    label_id: String,
+}
+
+/// Parse the label-ids query response into the issue and label node IDs. Pure
+/// and offline, so the HTTP boundary stays thin and testable. A missing issue
+/// maps to `NotFound`; a label the repository does not define (`label: null`)
+/// maps to `NotFound` naming the label, so the user can create it (the planning
+/// skills do not emit `prd`/`slice` labels yet).
+fn parse_label_ids(body: &str, issue_number: u64, label: &str) -> AppResult<LabelIds> {
+    let response: LabelIdsResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_label_ids")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        return Err(label_error(errors, "parse_label_ids"));
+    }
+
+    let repository = response
+        .data
+        .and_then(|data| data.repository)
+        .ok_or_else(|| {
+            AppError::not_found("Repository not found or not visible to the token")
+                .with_operation("parse_label_ids")
+        })?;
+
+    let labelable_id = repository.issue.map(|issue| issue.id).ok_or_else(|| {
+        AppError::not_found("Issue not found or not visible to the token")
+            .with_operation("parse_label_ids")
+            .with_context("issue", issue_number)
+    })?;
+
+    let label_id = repository.label.map(|node| node.id).ok_or_else(|| {
+        AppError::not_found(format!(
+            "The \"{label}\" label does not exist in this repository. Create it on \
+             GitHub, then confirm the classification again."
+        ))
+        .with_operation("parse_label_ids")
+        .with_context("label", label)
+    })?;
+
+    Ok(LabelIds {
+        labelable_id,
+        label_id,
+    })
+}
+
+/// Check the add-label mutation response for GraphQL errors. The mutation has no
+/// payload the board needs, so success is simply the absence of errors.
+fn parse_add_label_mutation(body: &str) -> AppAction {
+    let response: MutationResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_add_label_mutation")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        return Err(label_error(errors, "parse_add_label_mutation"));
+    }
+
+    Ok(())
+}
+
+/// Map a GraphQL `errors` array from an add-label round trip to an [`AppError`]
+/// the caller can act on, joining the messages for context.
+///
+/// A `FORBIDDEN` here almost always means the fine-grained token can *read*
+/// issues (the board loaded) but lacks *write* access to label them, so the
+/// message names the exact permission to grant. GitHub's own text is kept out
+/// of the user-facing message and attached as diagnostic `errors` context.
+fn label_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError {
+    let forbidden = errors.iter().any(|error| {
+        matches!(error.error_type.as_deref(), Some("FORBIDDEN"))
+            || error.message.to_lowercase().contains("must have")
+            || error
+                .message
+                .to_lowercase()
+                .contains("not accessible by personal access token")
+    });
+    let message = errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let lowered = message.to_lowercase();
+    let error = if forbidden {
+        AppError::forbidden(
+            "GitHub denied adding the label. Your fine-grained token needs the \
+             repository \"Issues\" permission set to \"Read and write\".",
+        )
+    } else if lowered.contains("rate limit") {
+        AppError::rate_limited("GitHub rate limit exceeded")
+    } else if lowered.contains("could not resolve") || lowered.contains("not_found") {
+        AppError::not_found("Issue or label not found, or not visible to the token")
+    } else {
+        AppError::internal("GitHub reported a query error")
+    };
+    error
+        .with_operation(operation)
+        .with_context("errors", message)
+}
+
 /// Map a repository node to the project the app tracks. A fork stands in for its
 /// upstream parent: the board reads issues from upstream, so we adopt the
 /// parent's owner/name and its push time (the project's real activity). A
@@ -948,6 +1169,23 @@ struct AssignIdsData {
 #[derive(Deserialize)]
 struct AssignRepository {
     issue: Option<NodeId>,
+}
+
+#[derive(Deserialize)]
+struct LabelIdsResponse {
+    data: Option<LabelIdsData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct LabelIdsData {
+    repository: Option<LabelRepository>,
+}
+
+#[derive(Deserialize)]
+struct LabelRepository {
+    issue: Option<NodeId>,
+    label: Option<NodeId>,
 }
 
 #[derive(Deserialize)]
@@ -1244,6 +1482,96 @@ mod tests {
         assert_eq!(
             parse_assign_mutation(unresolved).unwrap_err().kind(),
             AppErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn parse_label_ids_extracts_issue_and_label_ids() {
+        let body = r#"{
+            "data": {
+                "repository": {
+                    "issue": { "id": "ISSUE_42" },
+                    "label": { "id": "LABEL_SLICE" }
+                }
+            }
+        }"#;
+
+        let ids = parse_label_ids(body, 42, "slice").expect("ids should parse");
+
+        assert_eq!(ids.labelable_id, "ISSUE_42");
+        assert_eq!(ids.label_id, "LABEL_SLICE");
+    }
+
+    #[test]
+    fn parse_label_ids_missing_issue_is_not_found_with_context() {
+        let body = r#"{
+            "data": { "repository": { "issue": null, "label": { "id": "LABEL_PRD" } } }
+        }"#;
+
+        let error = parse_label_ids(body, 7, "prd").expect_err("a missing issue should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+        assert!(
+            format!("{error:?}").contains("issue=7"),
+            "the issue number should be attached as context: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_label_ids_missing_label_names_the_label_to_create() {
+        let body = r#"{
+            "data": { "repository": { "issue": { "id": "ISSUE_5" }, "label": null } }
+        }"#;
+
+        let error = parse_label_ids(body, 5, "prd").expect_err("a missing label should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+        // The message names the missing label so the user knows what to create.
+        let display = error.to_string();
+        assert!(
+            display.contains("\"prd\" label does not exist"),
+            "the message should name the missing label: {display}"
+        );
+        assert!(
+            format!("{error:?}").contains("label=prd"),
+            "the label should be attached as context: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_add_label_mutation_succeeds_when_no_errors() {
+        let body = r#"{ "data": { "addLabelsToLabelable": { "clientMutationId": null } } }"#;
+
+        parse_add_label_mutation(body).expect("a clean mutation response should be Ok");
+    }
+
+    #[test]
+    fn label_error_forbidden_is_actionable_and_hides_github_text() {
+        let body = r#"{
+            "data": null,
+            "errors": [
+                { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token" }
+            ]
+        }"#;
+
+        let error = parse_add_label_mutation(body).expect_err("a FORBIDDEN response should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::Forbidden);
+        // The user-facing message names the permission to grant...
+        let display = error.to_string();
+        assert!(
+            display.contains("Read and write"),
+            "the message should name the permission to grant: {display}"
+        );
+        // ...but never leaks GitHub's raw backend text into the UI message.
+        assert!(
+            !display.contains("personal access token"),
+            "GitHub's raw text must not reach the user-facing message: {display}"
+        );
+        // The raw text is kept for diagnostics in the error context instead.
+        assert!(
+            format!("{error:?}").contains("personal access token"),
+            "GitHub's raw text should be attached as diagnostic context: {error:?}"
         );
     }
 }
