@@ -9,6 +9,8 @@ const INITIAL_VISIBLE: usize = 6;
 #[component]
 pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Element {
     let mut show_all = use_signal(|| false);
+    let mut repo_input = use_signal(String::new);
+    let mut input_error: Signal<Option<String>> = use_signal(|| None);
 
     let total = projects.len();
     let visible = if show_all() {
@@ -17,11 +19,62 @@ pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Ele
         total.min(INITIAL_VISIBLE)
     };
 
+    // Attempt to parse the current input and open the board, or surface an
+    // inline error. Extracted as a named closure so both the button and the
+    // Enter-key handler share the same logic without duplicating it.
+    let try_open = move || {
+        match RepoRef::parse(repo_input.read().clone()) {
+            Ok(repo) => {
+                input_error.set(None);
+                on_open.call(repo);
+            }
+            Err(err) => input_error.set(Some(err.to_string())),
+        }
+    };
+
     rsx! {
         div { class: "min-h-screen bg-base-200 p-6",
             header { class: "mb-6",
                 h1 { class: "text-2xl font-bold", "Recent projects" }
                 p { class: "text-sm opacity-70", "Pick a repository to open its board." }
+            }
+
+            // Direct-open box: always visible so typing an owner/repo bypasses
+            // discovery even when the token surfaces no projects.
+            div { class: "mb-6",
+                label { class: "form-control w-full max-w-sm",
+                    div { class: "label",
+                        span { class: "label-text", "Open a repository directly" }
+                    }
+                    div { class: "join",
+                        input {
+                            r#type: "text",
+                            class: "input join-item flex-1",
+                            placeholder: "owner/repo",
+                            value: "{repo_input.read()}",
+                            oninput: move |evt| {
+                                repo_input.set(evt.value());
+                                input_error.set(None);
+                            },
+                            onkeydown: move |evt| {
+                                if evt.key() == Key::Enter {
+                                    try_open();
+                                }
+                            },
+                        }
+                        button {
+                            class: "btn btn-primary join-item",
+                            disabled: repo_input.read().trim().is_empty(),
+                            onclick: move |_| try_open(),
+                            "Go"
+                        }
+                    }
+                    if let Some(err) = input_error.read().as_deref() {
+                        div { class: "label",
+                            span { class: "label-text-alt text-error", "{err}" }
+                        }
+                    }
+                }
             }
 
             if projects.is_empty() {
