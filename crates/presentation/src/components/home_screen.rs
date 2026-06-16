@@ -9,6 +9,8 @@ const INITIAL_VISIBLE: usize = 6;
 #[component]
 pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Element {
     let mut show_all = use_signal(|| false);
+    let mut repo_input = use_signal(String::new);
+    let mut input_error: Signal<Option<String>> = use_signal(|| None);
 
     let total = projects.len();
     let visible = if show_all() {
@@ -17,11 +19,58 @@ pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Ele
         total.min(INITIAL_VISIBLE)
     };
 
+    // Attempt to parse the current input and open the board, or surface an
+    // inline error. Extracted as a named closure so both the button and the
+    // Enter-key handler share the same logic without duplicating it. `mut`
+    // because it writes signals (`FnMut`); it captures only `Copy` handles, so
+    // each event closure gets its own copy.
+    let mut try_open = move || match RepoRef::parse(repo_input.read().clone()) {
+        Ok(repo) => {
+            input_error.set(None);
+            on_open.call(repo);
+        }
+        Err(err) => input_error.set(Some(err.to_string())),
+    };
+
     rsx! {
         div { class: "min-h-screen bg-base-200 p-6",
             header { class: "mb-6",
                 h1 { class: "text-2xl font-bold", "Recent projects" }
                 p { class: "text-sm opacity-70", "Pick a repository to open its board." }
+            }
+
+            // Direct-open box: always visible so typing an owner/repo bypasses
+            // discovery even when the token surfaces no projects. Uses plain
+            // utilities for spacing rather than daisyUI's removed `form-control`
+            // / `label-text` classes (gone in daisyUI v5).
+            div { class: "mb-6 w-full max-w-sm",
+                p { class: "text-sm font-medium mb-1", "Open a repository directly" }
+                div { class: "join w-full",
+                    input {
+                        r#type: "text",
+                        class: "input join-item flex-1",
+                        placeholder: "owner/repo",
+                        value: "{repo_input.read()}",
+                        oninput: move |evt| {
+                            repo_input.set(evt.value());
+                            input_error.set(None);
+                        },
+                        onkeydown: move |evt| {
+                            if evt.key() == Key::Enter {
+                                try_open();
+                            }
+                        },
+                    }
+                    button {
+                        class: "btn btn-primary join-item",
+                        disabled: repo_input.read().trim().is_empty(),
+                        onclick: move |_| try_open(),
+                        "Go"
+                    }
+                }
+                if let Some(err) = input_error.read().as_deref() {
+                    p { class: "text-sm text-error mt-1", "{err}" }
+                }
             }
 
             if projects.is_empty() {
