@@ -40,40 +40,36 @@ pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Ele
             }
 
             // Direct-open box: always visible so typing an owner/repo bypasses
-            // discovery even when the token surfaces no projects.
-            div { class: "mb-6",
-                label { class: "form-control w-full max-w-sm",
-                    div { class: "label",
-                        span { class: "label-text", "Open a repository directly" }
+            // discovery even when the token surfaces no projects. Uses plain
+            // utilities for spacing rather than daisyUI's removed `form-control`
+            // / `label-text` classes (gone in daisyUI v5).
+            div { class: "mb-6 w-full max-w-sm",
+                p { class: "text-sm font-medium mb-1", "Open a repository directly" }
+                div { class: "join w-full",
+                    input {
+                        r#type: "text",
+                        class: "input join-item flex-1",
+                        placeholder: "owner/repo",
+                        value: "{repo_input.read()}",
+                        oninput: move |evt| {
+                            repo_input.set(evt.value());
+                            input_error.set(None);
+                        },
+                        onkeydown: move |evt| {
+                            if evt.key() == Key::Enter {
+                                try_open();
+                            }
+                        },
                     }
-                    div { class: "join",
-                        input {
-                            r#type: "text",
-                            class: "input join-item flex-1",
-                            placeholder: "owner/repo",
-                            value: "{repo_input.read()}",
-                            oninput: move |evt| {
-                                repo_input.set(evt.value());
-                                input_error.set(None);
-                            },
-                            onkeydown: move |evt| {
-                                if evt.key() == Key::Enter {
-                                    try_open();
-                                }
-                            },
-                        }
-                        button {
-                            class: "btn btn-primary join-item",
-                            disabled: repo_input.read().trim().is_empty(),
-                            onclick: move |_| try_open(),
-                            "Go"
-                        }
+                    button {
+                        class: "btn btn-primary join-item",
+                        disabled: repo_input.read().trim().is_empty(),
+                        onclick: move |_| try_open(),
+                        "Go"
                     }
-                    if let Some(err) = input_error.read().as_deref() {
-                        div { class: "label",
-                            span { class: "label-text-alt text-error", "{err}" }
-                        }
-                    }
+                }
+                if let Some(err) = input_error.read().as_deref() {
+                    p { class: "text-sm text-error mt-1", "{err}" }
                 }
             }
 
