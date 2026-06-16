@@ -11,7 +11,7 @@ use application::{
     AuthService, BoardService, ClassifiedBoard, GitHubPort, LastOpenedService, ProjectStorePort,
     ProjectsRefresh, RecentProjectsService, SecureStorePort,
 };
-use domain::{AppAction, AppResult, GitHubToken, Project, RepoRef};
+use domain::{AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
 use infrastructure::{FileProjectStore, GitHubClient, KeyringSecureStore};
@@ -89,6 +89,19 @@ impl AppState {
             .assign_self(&self.repo, issue_number)
             .await
     }
+
+    /// Confirm a suggested classification by adding its `prd`/`slice` label on
+    /// GitHub. The caller re-polls the board on success so the issue is
+    /// reclassified; the board is left unchanged on failure.
+    pub async fn confirm_classification(
+        &self,
+        issue_number: u64,
+        classification: &IssueClassification,
+    ) -> AppAction {
+        BoardService::new(self.port.clone())
+            .confirm_classification(&self.repo, issue_number, classification)
+            .await
+    }
 }
 
 /// The recent-projects list cached on the last successful fetch, for an instant
@@ -134,5 +147,20 @@ pub async fn assign_self(repo: &RepoRef, issue_number: u64) -> AppAction {
     let token = AuthService::new(secure_store()).require_token().await?;
     AppState::from_token(&token, repo.clone())?
         .assign_self(issue_number)
+        .await
+}
+
+/// Confirm a suggested classification by adding the `prd`/`slice` label to the
+/// issue on GitHub. Reads the stored token, wires the live adapter scoped to
+/// `repo`, and runs the confirm use-case; the board is re-polled by the caller
+/// on success (the issue then classifies tier-1) and left unchanged on failure.
+pub async fn confirm_classification(
+    repo: &RepoRef,
+    issue_number: u64,
+    classification: &IssueClassification,
+) -> AppAction {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    AppState::from_token(&token, repo.clone())?
+        .confirm_classification(issue_number, classification)
         .await
 }

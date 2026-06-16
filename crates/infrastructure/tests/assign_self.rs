@@ -34,6 +34,10 @@ impl GitHubPort for RecordingPort {
         self.assigned.lock().unwrap().push(issue_number);
         Ok(())
     }
+
+    async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
+        Ok(())
+    }
 }
 
 /// A fake that always rejects the assignment, standing in for a token without
@@ -57,6 +61,12 @@ impl GitHubPort for FailingPort {
     async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
         Err(AppError::forbidden(
             "The token lacks permission to assign this issue",
+        ))
+    }
+
+    async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
+        Err(AppError::forbidden(
+            "The token lacks permission to label this issue",
         ))
     }
 }

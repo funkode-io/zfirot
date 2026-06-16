@@ -37,6 +37,10 @@ pub trait GitHubPort: Send + Sync {
     /// Assign the authenticated user to an issue (the Slice's underlying issue),
     /// so picking up a Ready Slice from the board claims it on GitHub.
     async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction;
+
+    /// Add a label to an issue, so confirming a suggested classification tags it
+    /// (`prd` or `slice`) and the next poll reclassifies it onto the board.
+    async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction;
 }
 
 /// Shared ports are ports too, so the composition root can hand the same
@@ -57,6 +61,10 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
 
     async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
         (**self).assign_self(repo, issue_number).await
+    }
+
+    async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
+        (**self).add_label(repo, issue_number, label).await
     }
 }
 
@@ -201,6 +209,38 @@ impl<P: GitHubPort> BoardService<P> {
             .map_err(|err| {
                 err.with_context("repo", repo)
                     .with_context("issue", issue_number)
+            })
+    }
+
+    /// Confirm a *suggested* classification by adding its tier-1 label (`prd` or
+    /// `slice`) to the issue on GitHub.
+    ///
+    /// The label is derived from the suggestion via
+    /// [`IssueClassification::suggested_label`]; a classification with nothing to
+    /// confirm (already confident, or unclassified) is rejected as invalid input
+    /// before any GitHub call. On success the caller re-polls the board: the
+    /// now-labelled issue classifies tier-1 and leaves the "other open issues"
+    /// bucket. On failure the error carries the repo and issue for context and
+    /// the issue is left unchanged.
+    pub async fn confirm_classification(
+        &self,
+        repo: &RepoRef,
+        issue_number: u64,
+        classification: &IssueClassification,
+    ) -> AppAction {
+        let label = classification.suggested_label().ok_or_else(|| {
+            AppError::invalid_input("This issue has no suggested classification to confirm.")
+                .with_context("repo", repo)
+                .with_context("issue", issue_number)
+        })?;
+
+        self.port
+            .add_label(repo, issue_number, label)
+            .await
+            .map_err(|err| {
+                err.with_context("repo", repo)
+                    .with_context("issue", issue_number)
+                    .with_context("label", label)
             })
     }
 
