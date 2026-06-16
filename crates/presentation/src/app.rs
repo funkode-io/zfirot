@@ -181,21 +181,29 @@ pub fn App() -> Element {
         reload += 1;
     };
 
-    // The view resource keeps its previous value while it re-resolves, so a bare
-    // `read()` would leave stale content (or a blank first paint) on screen with
-    // no sign that work is in flight. Reading its state lets every async board /
-    // home transition show a spinner instead.
-    let pending = matches!(*view.state().read(), UseResourceState::Pending);
+    // True only on a *cold* board load: the user navigated to a project whose
+    // board is not on screen yet (opening it from home, or reopening the last
+    // one on launch). A board *self-refresh* — the background poll, the Refresh
+    // button, or the re-poll after assigning/confirming — leaves the populated
+    // board as the current value, so this stays false and the board keeps
+    // showing instead of flashing a spinner over it.
+    let board_loading = matches!(*view.state().read(), UseResourceState::Pending)
+        && match (nav(), &*view.read_unchecked()) {
+            (Nav::Project(target), Some(View::Board { repo, .. })) => *repo != target,
+            (Nav::Project(_), _) => true,
+            _ => false,
+        };
 
     rsx! {
         document::Title { "Zfirot" }
         document::Stylesheet { href: TAILWIND_CSS }
 
-        match (&*view.read_unchecked(), pending, nav()) {
-            // A specific project's board is (re)loading: opening it from the home
-            // screen, reopening on launch, or re-polling after claiming a Slice.
-            // Show the board chrome with a spinner so the transition has feedback
-            // instead of leaving the previous screen frozen.
+        match (&*view.read_unchecked(), board_loading, nav()) {
+            // Navigating to a board we do not have yet: opening a project from
+            // the home screen or reopening one on launch. Show the board chrome
+            // with a spinner so the navigation has immediate feedback. A board
+            // that is merely self-refreshing keeps `board_loading` false and so
+            // falls through to the populated `View::Board` arm below.
             (_, true, Nav::Project(repo)) => rsx! {
                 BoardShell { repo: repo.to_string(), on_home,
                     div { class: "flex justify-center py-16",
@@ -208,12 +216,6 @@ pub fn App() -> Element {
             // so the background refresh does not flash a spinner.
             (Some(View::Home { projects, .. }), ..) => rsx! {
                 HomeScreen { projects: projects.clone(), on_open }
-            },
-            // Any other in-flight transition with no stale screen worth keeping —
-            // the first launch resolve, or re-resolving after a token was saved —
-            // shows a full-screen spinner rather than a frozen or blank screen.
-            (_, true, _) => rsx! {
-                LoadingScreen { label: "Loading…" }
             },
             // No token yet, or a stored token was rejected: show the paste-token
             // screen. A fresh submit error takes precedence over a stale reject
