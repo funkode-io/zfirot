@@ -194,6 +194,15 @@ pub fn App() -> Element {
             _ => false,
         };
 
+    // True while an *already-shown* board is silently re-resolving: the
+    // background poll, the Refresh button, or the re-poll after assigning or
+    // confirming. The board stays on screen (see `board_loading`), so this only
+    // drives a small in-flight indicator on the Refresh button rather than
+    // replacing any content.
+    let refreshing = matches!(*view.state().read(), UseResourceState::Pending)
+        && matches!(&*view.read_unchecked(), Some(View::Board { .. }))
+        && !board_loading;
+
     rsx! {
         document::Title { "Zfirot" }
         document::Stylesheet { href: TAILWIND_CSS }
@@ -269,6 +278,7 @@ pub fn App() -> Element {
                         repo: repo.to_string(),
                         on_home,
                         on_refresh,
+                        refreshing,
                         last_updated: loaded_at.clone(),
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
@@ -415,13 +425,16 @@ fn now_hms() -> String {
 /// `repo` names the open project (shown beside the title) when there is one;
 /// `on_home` returns to the project picker. When `on_refresh` is set a Refresh
 /// button re-polls the board on demand, and `last_updated` shows when the
-/// current snapshot was loaded.
+/// current snapshot was loaded. While `refreshing` is set that button shows an
+/// inline spinner and is disabled, so an in-flight refresh has feedback without
+/// disturbing the board content.
 #[component]
 fn BoardShell(
     children: Element,
     on_home: EventHandler<()>,
     #[props(default)] repo: Option<String>,
     #[props(default)] on_refresh: Option<EventHandler<()>>,
+    #[props(default)] refreshing: bool,
     #[props(default)] last_updated: Option<String>,
 ) -> Element {
     rsx! {
@@ -451,8 +464,13 @@ fn BoardShell(
                             class: "btn btn-ghost btn-sm btn-square",
                             title: "Refresh now",
                             aria_label: "Refresh now",
+                            disabled: refreshing,
                             onclick: move |_| on_refresh.call(()),
-                            span { class: "icon-[lucide--refresh-cw] size-5" }
+                            if refreshing {
+                                span { class: "loading loading-spinner size-5" }
+                            } else {
+                                span { class: "icon-[lucide--refresh-cw] size-5" }
+                            }
                         }
                     }
                 }
