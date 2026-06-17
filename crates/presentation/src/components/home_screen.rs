@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use domain::{filter_home, HomeFilter, Project, RepoRef};
+use domain::{filter_home, visible_tracked_repos, HomeFilter, Project, RepoRef};
 
 /// How many recent projects to show before the user clicks "Show more".
 const INITIAL_VISIBLE: usize = 6;
@@ -20,6 +20,7 @@ pub fn HomeScreen(
     tracked_repos: Vec<RepoRef>,
     on_open_discovered: EventHandler<RepoRef>,
     on_open_goto: EventHandler<RepoRef>,
+    on_untrack: EventHandler<RepoRef>,
 ) -> Element {
     let mut show_all = use_signal(|| false);
     let mut query = use_signal(String::new);
@@ -49,11 +50,7 @@ pub fn HomeScreen(
             // Tracked repos already discovered are dropped: a repo present in
             // both lists renders once, under the discovered grid.
             let discovered_repos: Vec<RepoRef> = projects.iter().map(|p| p.repo.clone()).collect();
-            let de_duped_tracked: Vec<RepoRef> = tracked_repos
-                .iter()
-                .filter(|repo| !discovered_repos.contains(repo))
-                .cloned()
-                .collect();
+            let de_duped_tracked = visible_tracked_repos(&tracked_repos, &discovered_repos);
             // The Tracked section only shows on an unfiltered home.
             let show_tracked = raw.trim().is_empty() && !de_duped_tracked.is_empty();
 
@@ -82,11 +79,23 @@ pub fn HomeScreen(
                         h2 { class: "text-lg font-semibold mb-4", "Tracked" }
                         div { class: "space-y-2",
                             for repo in de_duped_tracked {
-                                button {
-                                    class: "w-full text-left px-4 py-3 hover:bg-base-200 rounded transition",
-                                    onclick: move |_| on_open_discovered.call(repo.clone()),
-                                    span { class: "icon-[lucide--link] size-4 inline-block mr-2 opacity-60" }
-                                    "{repo}"
+                                div { class: "flex items-center gap-1",
+                                    button {
+                                        class: "flex-1 text-left px-4 py-3 hover:bg-base-200 rounded transition",
+                                        onclick: {
+                                            let repo = repo.clone();
+                                            move |_| on_open_discovered.call(repo.clone())
+                                        },
+                                        span { class: "icon-[lucide--link] size-4 inline-block mr-2 opacity-60" }
+                                        "{repo}"
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm btn-square",
+                                        "aria-label": "Remove {repo} from tracked",
+                                        title: "Remove from tracked",
+                                        onclick: move |_| on_untrack.call(repo.clone()),
+                                        span { class: "icon-[lucide--x] size-4 opacity-60" }
+                                    }
                                 }
                             }
                         }
