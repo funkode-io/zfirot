@@ -24,13 +24,22 @@ pub enum HomeFilter {
 /// Matching is a case-insensitive substring test on each project's `owner/name`
 /// display string. An empty or whitespace-only query matches every project, so
 /// the default view lists all discovered projects.
+///
+/// ASCII case-folding is sufficient: `RepoRef::parse` constrains owner/name to
+/// ASCII, so a project's display string is always ASCII. The empty-query path —
+/// the common default state — skips per-project case-folding entirely.
 pub fn filter_home(query: &str, projects: &[Project]) -> HomeFilter {
-    let needle = query.trim().to_lowercase();
-    let matches: Vec<Project> = projects
-        .iter()
-        .filter(|p| p.repo.to_string().to_lowercase().contains(&needle))
-        .cloned()
-        .collect();
+    let trimmed = query.trim();
+    let matches: Vec<Project> = if trimmed.is_empty() {
+        projects.to_vec()
+    } else {
+        let needle = trimmed.to_ascii_lowercase();
+        projects
+            .iter()
+            .filter(|p| p.repo.to_string().to_ascii_lowercase().contains(&needle))
+            .cloned()
+            .collect()
+    };
 
     if !matches.is_empty() {
         return HomeFilter::Filtered(matches);

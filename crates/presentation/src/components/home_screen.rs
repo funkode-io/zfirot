@@ -65,7 +65,7 @@ pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Ele
                     let visible = if show_all() { total } else { total.min(INITIAL_VISIBLE) };
                     rsx! {
                         div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
-                            for project in matches.iter().take(visible).cloned() {
+                            for project in matches.into_iter().take(visible) {
                                 ProjectCard { project, on_open }
                             }
                         }
