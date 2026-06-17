@@ -181,7 +181,7 @@ fn ProjectCard(project: Project, on_open: EventHandler<RepoRef>) -> Element {
 
     rsx! {
         button {
-            class: "card card-compact bg-base-100 shadow-sm hover:shadow-md transition-shadow text-left cursor-pointer",
+            class: "card card-sm bg-base-100 shadow-sm hover:shadow-md transition-shadow text-left cursor-pointer",
             onclick: move |_| on_open.call(repo.clone()),
             div { class: "card-body",
                 div { class: "flex items-center gap-2",
