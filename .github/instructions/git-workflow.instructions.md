@@ -19,6 +19,15 @@ Load this when creating branches, committing, or opening PRs.
 - NEVER force-push a branch with an open PR; address review with new commits.
 - Remotes: `upstream` = funkode-io/zfirot, `origin` = carlos-verdes/zfirot.
 
+## Before pushing
+
+- Run `make hooks` once after cloning to install the version-controlled git
+  hooks (`.githooks/`, wired via `core.hooksPath`).
+- The `pre-push` hook runs `make check` (`cargo fmt --all --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`) and
+  blocks the push if any step fails. Fix the failure rather than bypassing.
+- Bypass only in a genuine emergency with `git push --no-verify`.
+
 ## During code review
 
 - NEVER force-push. Push only NEW commits on top of the branch; never amend,
