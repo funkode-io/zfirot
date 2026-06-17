@@ -45,7 +45,7 @@ pub trait GitHubPort: Send + Sync {
     /// Discover which Agents can currently be assigned on `repo`.
     ///
     /// Queries GitHub's `suggestedActors(capabilities: [CAN_BE_ASSIGNED])` and
-    /// keeps only bot actors. Returns zero or more [`AgentRef`]s.  An empty
+    /// keeps only bot actors. Returns zero or more [`AgentRef`]s. An empty
     /// result (e.g. Copilot not enabled) is a valid success; the caller treats a
     /// failure the same as an empty result (best-effort discovery).
     async fn suggested_agents(&self, repo: &RepoRef) -> AppResult<Vec<AgentRef>>;

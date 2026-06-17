@@ -48,10 +48,12 @@ impl GitHubPort for AgentPort {
     }
 
     async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        // Clone or re-create the result for each call.
+        // `AppError` is not `Clone`, so the failing case returns a fresh
+        // deterministic `Unavailable` error rather than re-wrapping the stored
+        // one (which would stringify it and flatten its kind/context).
         match &self.agents {
             Ok(agents) => Ok(agents.clone()),
-            Err(err) => Err(AppError::unavailable(err.to_string())),
+            Err(_) => Err(AppError::unavailable("GitHub is down")),
         }
     }
 }
