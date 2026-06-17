@@ -7,14 +7,17 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AppResult, DependencyRef, PrdRef, Project, RawIssue, RawSlice, RepoRef, Slice};
+use domain::{
+    AgentRef, AppResult, DependencyRef, PrdRef, Project, RawIssue, RawSlice, RepoRef, Slice,
+};
 
 mod github;
 mod project_store;
 mod secure_store;
 
 pub use github::{
-    parse_issues_response, parse_projects_response, parse_response, resolve_board, GitHubClient,
+    parse_issues_response, parse_projects_response, parse_response,
+    parse_suggested_actors_response, resolve_board, GitHubClient,
 };
 pub use project_store::{FakeProjectStore, FileProjectStore};
 pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
@@ -48,6 +51,10 @@ impl GitHubPort for FakeGitHubPort {
         _label: &str,
     ) -> domain::AppAction {
         Ok(())
+    }
+
+    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
+        Ok(vec![])
     }
 }
 
