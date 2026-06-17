@@ -18,7 +18,8 @@ use crate::components::{
 };
 use crate::state::{
     assign_self, cached_projects, confirm_classification, last_opened, open_and_track_project,
-    open_project, refresh_projects, refresh_recent_projects, secure_store, tracked_repos, AppState,
+    open_project, refresh_projects, refresh_recent_projects, secure_store, tracked_repos,
+    untrack_repo, AppState,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -188,6 +189,16 @@ pub fn App() -> Element {
         reload += 1;
     });
 
+    let on_untrack = use_callback(move |repo: RepoRef| {
+        spawn(async move {
+            // Drop the repo from the tracked set, then re-resolve so the Tracked
+            // card disappears. Best-effort: a store write failure simply leaves
+            // the card in place rather than surfacing an error here.
+            let _ = untrack_repo(&repo).await;
+            reload += 1;
+        });
+    });
+
     // Back to the project picker. Persistence is untouched, so the next launch
     // still reopens the last project; this only changes the current session.
     // Reset the revalidate guard so returning to Home refreshes the list again.
@@ -247,6 +258,7 @@ pub fn App() -> Element {
                     tracked_repos: tracked_repos.clone(),
                     on_open_discovered,
                     on_open_goto,
+                    on_untrack,
                 }
             },
             (Some(View::NeedToken { reason }), ..) => rsx! {

@@ -51,6 +51,20 @@ pub fn filter_home(query: &str, projects: &[Project]) -> HomeFilter {
     }
 }
 
+/// The Tracked repos to show on the home screen: `tracked` minus any repo also
+/// present in `discovered`, preserving the tracked (newest-first) order.
+///
+/// A repo summoned by name and later discovered in the recent-projects list
+/// would otherwise appear twice; it renders once, under the discovered grid, so
+/// the Tracked section only carries repos not already shown there.
+pub fn visible_tracked_repos(tracked: &[RepoRef], discovered: &[RepoRef]) -> Vec<RepoRef> {
+    tracked
+        .iter()
+        .filter(|repo| !discovered.contains(repo))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +184,41 @@ mod tests {
     #[test]
     fn no_projects_and_empty_query_is_a_hint() {
         assert_eq!(filter_home("", &[]), HomeFilter::Hint);
+    }
+
+    /// The visible tracked repos as `owner/name` strings, for terse assertions.
+    fn visible(tracked: &[RepoRef], discovered: &[RepoRef]) -> Vec<String> {
+        visible_tracked_repos(tracked, discovered)
+            .iter()
+            .map(|r| r.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn tracked_repos_show_when_not_discovered() {
+        let tracked = vec![RepoRef::new("a", "x"), RepoRef::new("b", "y")];
+        assert_eq!(visible(&tracked, &[]), vec!["a/x", "b/y"]);
+    }
+
+    #[test]
+    fn a_discovered_tracked_repo_is_hidden_from_the_tracked_section() {
+        let tracked = vec![RepoRef::new("a", "x"), RepoRef::new("b", "y")];
+        let discovered = vec![RepoRef::new("b", "y")];
+        // "b/y" is already in the discovered grid, so it drops out of Tracked.
+        assert_eq!(visible(&tracked, &discovered), vec!["a/x"]);
+    }
+
+    #[test]
+    fn tracked_order_is_preserved_newest_first() {
+        let tracked = vec![RepoRef::new("c", "z"), RepoRef::new("a", "x")];
+        assert_eq!(visible(&tracked, &[]), vec!["c/z", "a/x"]);
+    }
+
+    #[test]
+    fn empty_tracked_yields_nothing() {
+        assert_eq!(
+            visible(&[], &[RepoRef::new("a", "x")]),
+            Vec::<String>::new()
+        );
     }
 }

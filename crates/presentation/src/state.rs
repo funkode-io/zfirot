@@ -117,6 +117,13 @@ pub async fn tracked_repos() -> AppResult<Vec<RepoRef>> {
     project_store()?.tracked_repos().await
 }
 
+/// Remove `repo` from the tracked list, so it no longer shows in the home
+/// screen's Tracked section. A local store write only: no token or network
+/// involved.
+pub async fn untrack_repo(repo: &RepoRef) -> AppAction {
+    project_store()?.untrack_repo(repo).await
+}
+
 /// Refresh the recent-projects list from GitHub, rewriting the local cache only
 /// when it changed, and report the outcome. The caller holds the resolved token
 /// (e.g. the cold-cache blocking fetch on the home screen).
