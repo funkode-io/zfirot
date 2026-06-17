@@ -27,7 +27,7 @@ pub fn OtherIssueCard(
     let classification = issue.classification.clone();
 
     rsx! {
-        div { class: "card card-compact bg-base-200 shadow-sm",
+        div { class: "card card-sm bg-base-200 shadow-sm",
             div { class: "card-body",
                 div { class: "flex items-start justify-between gap-2",
                     h3 { class: "card-title text-sm",

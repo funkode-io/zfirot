@@ -423,7 +423,13 @@ impl<P: GitHubPort> BoardService<P> {
 
         // Discover Assignable Agents best-effort: a failure yields an empty set
         // and the board still classifies its Slices normally.
-        let agents = self.port.suggested_agents(repo).await.unwrap_or_default();
+        let agents = match self.port.suggested_agents(repo).await {
+            Ok(agents) => agents,
+            Err(e) => {
+                tracing::warn!(repo = %repo, error = ?e, "agent discovery failed; degrading to empty agent set");
+                Vec::new()
+            }
+        };
 
         Ok(ClassifiedBoard {
             slices,

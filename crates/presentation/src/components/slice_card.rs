@@ -42,9 +42,9 @@ pub fn SliceCard(
     };
 
     let card_class = if is_highlighted {
-        "card card-compact bg-base-200 shadow-sm ring-2 ring-primary"
+        "card card-sm bg-base-200 shadow-sm ring-2 ring-primary"
     } else {
-        "card card-compact bg-base-200 shadow-sm"
+        "card card-sm bg-base-200 shadow-sm"
     };
 
     rsx! {

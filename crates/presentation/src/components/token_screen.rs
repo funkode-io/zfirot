@@ -37,10 +37,8 @@ pub fn TokenScreen(
                             li { "Contents — Read-only" }
                         }
                     }
-                    label { class: "form-control w-full",
-                        div { class: "label",
-                            span { class: "label-text", "Personal Access Token" }
-                        }
+                    div { class: "flex flex-col gap-1 w-full",
+                        label { class: "text-sm font-medium", "Personal Access Token" }
                         input {
                             r#type: "password",
                             class: "input w-full",
