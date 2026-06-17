@@ -75,8 +75,12 @@ trailing "No PRD" lane.
 _Avoid_: row, group, section
 
 **Tracked repo**:
-An `owner/repo` the user has chosen to watch. The set of tracked repos is the
-one piece of state the app owns locally.
+An `owner/repo` the user summoned by name on the home screen — rather than
+having it discovered — and that the token could open. The act of opening it
+successfully is what tracks it; a repo the token cannot reach is never tracked.
+Persisted locally and shown on home alongside discovered Projects, surviving
+restarts. The set of tracked repos is the one piece of domain state the app owns
+locally.
 _Avoid_: project, watch, source
 
 **Project**:
