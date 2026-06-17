@@ -18,3 +18,6 @@ dioxus = { version = "0.7", features = ["desktop"] }
 # poll loop in src/app.rs.
 tokio = { workspace = true, features = ["time"] }
 chrono = "0.4"
+# Decodes the bundled PNG window icon into RGBA at startup. Only the `png`
+# decoder is needed, so default features (every other format) are disabled.
+image = { version = "0.25", default-features = false, features = ["png"] }
