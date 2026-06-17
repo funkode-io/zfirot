@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use domain::{
-    classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AppAction,
-    AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef, Project,
-    RawIssue, RawSlice, RepoRef, Slice,
+    classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AgentRef,
+    AppAction, AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef,
+    Project, RawIssue, RawSlice, RepoRef, Slice,
 };
 
 /// The seam between the application and any GitHub backend (real or fake).
@@ -41,6 +41,14 @@ pub trait GitHubPort: Send + Sync {
     /// Add a label to an issue, so confirming a suggested classification tags it
     /// (`prd` or `slice`) and the next poll reclassifies it onto the board.
     async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction;
+
+    /// Discover which Agents can currently be assigned on `repo`.
+    ///
+    /// Queries GitHub's `suggestedActors(capabilities: [CAN_BE_ASSIGNED])` and
+    /// keeps only bot actors. Returns zero or more [`AgentRef`]s.  An empty
+    /// result (e.g. Copilot not enabled) is a valid success; the caller treats a
+    /// failure the same as an empty result (best-effort discovery).
+    async fn suggested_agents(&self, repo: &RepoRef) -> AppResult<Vec<AgentRef>>;
 }
 
 /// Shared ports are ports too, so the composition root can hand the same
@@ -66,6 +74,10 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
     async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
         (**self).add_label(repo, issue_number, label).await
     }
+
+    async fn suggested_agents(&self, repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
+        (**self).suggested_agents(repo).await
+    }
 }
 
 /// An issue that is not a confirmed Slice — shown in the "other open issues"
@@ -90,11 +102,14 @@ pub struct OtherIssue {
 /// - `slices` — tier-1 confirmed Slices, ready for the Kanban columns.
 /// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
 /// - `other`  — suggested and unclassified issues for the "other open issues" bucket.
+/// - `agents` — Agents that can currently be assigned on this repo (zero or more),
+///              discovered best-effort during classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedBoard {
     pub slices: Vec<Slice>,
     pub prds: Vec<Prd>,
     pub other: Vec<OtherIssue>,
+    pub agents: Vec<AgentRef>,
 }
 
 /// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
@@ -374,10 +389,15 @@ impl<P: GitHubPort> BoardService<P> {
         resolve_unblocks(&mut slices);
         let slices = slices.into_iter().map(RawSlice::into_slice).collect();
 
+        // Discover Assignable Agents best-effort: a failure yields an empty set
+        // and the board still classifies its Slices normally.
+        let agents = self.port.suggested_agents(repo).await.unwrap_or_default();
+
         Ok(ClassifiedBoard {
             slices,
             prds,
             other,
+            agents,
         })
     }
 }

@@ -12,8 +12,8 @@
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{
-    parse_prose, AppAction, AppError, AppResult, DependencyRef, PrdRef, Project, ProseLinks,
-    RawIssue, RawSlice, RepoRef, Slice,
+    parse_prose, AgentRef, AppAction, AppError, AppResult, DependencyRef, PrdRef, Project,
+    ProseLinks, RawIssue, RawSlice, RepoRef, Slice,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -141,6 +141,23 @@ const ADD_LABEL_MUTATION: &str = r#"
 mutation AddLabel($labelableId: ID!, $labelId: ID!) {
   addLabelsToLabelable(input: {labelableId: $labelableId, labelIds: [$labelId]}) {
     clientMutationId
+  }
+}
+"#;
+
+/// Actors that can be assigned on a repository, filtered to those with the
+/// `CAN_BE_ASSIGNED` capability. Only bot actors are kept; an empty result
+/// (e.g. Copilot not enabled) is a valid success.
+const SUGGESTED_ACTORS_QUERY: &str = r#"
+query SuggestedActors($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 10) {
+      nodes {
+        __typename
+        login
+        ... on Node { id }
+      }
+    }
   }
 }
 "#;
@@ -443,6 +460,41 @@ impl GitHubClient {
                 .with_source(err)
         })
     }
+
+    /// Fetch the actors that can be assigned on `repo`, for Agent discovery.
+    async fn fetch_suggested_actors(&self, repo: &RepoRef) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": SUGGESTED_ACTORS_QUERY,
+            "variables": { "owner": repo.owner, "name": repo.name },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_suggested_actors")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_suggested_actors",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_suggested_actors")
+                .with_source(err)
+        })
+    }
 }
 
 #[async_trait]
@@ -517,6 +569,11 @@ impl GitHubPort for GitHubClient {
             .run_add_label_mutation(&ids.labelable_id, &ids.label_id)
             .await?;
         parse_add_label_mutation(&mutation_body)
+    }
+
+    async fn suggested_agents(&self, repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
+        let body = self.fetch_suggested_actors(repo).await?;
+        parse_suggested_actors_response(&body)
     }
 }
 
@@ -1394,6 +1451,93 @@ struct RepositoryOwner {
     login: String,
 }
 
+// ── Suggested-actors query ────────────────────────────────────────────────────
+
+/// Parse a `suggestedActors` response into a list of [`AgentRef`]s.
+///
+/// Only bot actors (`__typename == "Bot"`) are kept; users and organizations are
+/// discarded. An empty node list (Copilot not enabled) maps to `Ok(vec![])`.
+/// Pure and offline: the primary test seam for Agent discovery.
+pub fn parse_suggested_actors_response(body: &str) -> AppResult<Vec<AgentRef>> {
+    let response: SuggestedActorsResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_suggested_actors_response")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        let message = errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let error = if message.to_lowercase().contains("rate limit") {
+            AppError::rate_limited("GitHub rate limit exceeded")
+        } else {
+            AppError::internal("GitHub reported a query error")
+        };
+        return Err(error
+            .with_operation("parse_suggested_actors_response")
+            .with_context("errors", message));
+    }
+
+    let agents = response
+        .data
+        .and_then(|data| data.repository)
+        .map(|repo| {
+            repo.suggested_actors
+                .nodes
+                .into_iter()
+                .filter(|node| node.typename == "Bot")
+                .filter_map(|node| {
+                    node.id.map(|id| AgentRef {
+                        name: node.login,
+                        node_id: id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(agents)
+}
+
+#[derive(Deserialize)]
+struct SuggestedActorsResponse {
+    data: Option<SuggestedActorsData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct SuggestedActorsData {
+    repository: Option<SuggestedActorsRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SuggestedActorsRepository {
+    suggested_actors: ActorConnection,
+}
+
+#[derive(Deserialize)]
+struct ActorConnection {
+    nodes: Vec<ActorNode>,
+}
+
+/// A single actor node from `suggestedActors`.
+///
+/// `__typename` is used to filter to bot actors only. `id` is `None` only when
+/// the inline fragment `... on Node { id }` did not match — which cannot happen
+/// in practice since every GitHub actor implements `Node`, but we treat it as
+/// optional for resilience.
+#[derive(Deserialize)]
+struct ActorNode {
+    #[serde(rename = "__typename")]
+    typename: String,
+    login: String,
+    id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     //! Offline tests for the assign-self response/error parsers, pinned against
@@ -1572,6 +1716,98 @@ mod tests {
         assert!(
             format!("{error:?}").contains("personal access token"),
             "GitHub's raw text should be attached as diagnostic context: {error:?}"
+        );
+    }
+
+    // ── parse_suggested_actors_response ──────────────────────────────────────
+
+    #[test]
+    fn parse_suggested_actors_empty_nodes_returns_empty_vec() {
+        let body = r#"{
+            "data": {
+                "repository": {
+                    "suggestedActors": { "nodes": [] }
+                }
+            }
+        }"#;
+
+        let agents =
+            parse_suggested_actors_response(body).expect("empty nodes should be Ok(vec![])");
+
+        assert!(agents.is_empty(), "no actors → empty agent set");
+    }
+
+    #[test]
+    fn parse_suggested_actors_keeps_only_bot_actors() {
+        let body = r#"{
+            "data": {
+                "repository": {
+                    "suggestedActors": {
+                        "nodes": [
+                            { "__typename": "Bot",  "login": "copilot",      "id": "BOT_NODE_1" },
+                            { "__typename": "User", "login": "carlos-verdes","id": "USER_NODE_2" }
+                        ]
+                    }
+                }
+            }
+        }"#;
+
+        let agents = parse_suggested_actors_response(body).expect("response should parse");
+
+        assert_eq!(agents.len(), 1, "only the Bot actor should be kept");
+        assert_eq!(agents[0].name, "copilot");
+        assert_eq!(agents[0].node_id, "BOT_NODE_1");
+    }
+
+    #[test]
+    fn parse_suggested_actors_maps_multiple_bots() {
+        let body = r#"{
+            "data": {
+                "repository": {
+                    "suggestedActors": {
+                        "nodes": [
+                            { "__typename": "Bot", "login": "copilot",   "id": "BOT_1" },
+                            { "__typename": "Bot", "login": "other-bot", "id": "BOT_2" }
+                        ]
+                    }
+                }
+            }
+        }"#;
+
+        let agents = parse_suggested_actors_response(body).expect("response should parse");
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].name, "copilot");
+        assert_eq!(agents[0].node_id, "BOT_1");
+        assert_eq!(agents[1].name, "other-bot");
+        assert_eq!(agents[1].node_id, "BOT_2");
+    }
+
+    #[test]
+    fn parse_suggested_actors_null_repository_returns_empty_vec() {
+        // `suggestedActors` not supported or repo not found — `repository` null.
+        let body = r#"{ "data": { "repository": null } }"#;
+
+        let agents =
+            parse_suggested_actors_response(body).expect("null repository should be Ok(vec![])");
+
+        assert!(agents.is_empty(), "null repository → empty agent set");
+    }
+
+    #[test]
+    fn parse_suggested_actors_graphql_error_returns_err() {
+        let body = r#"{
+            "data": null,
+            "errors": [{ "message": "Field 'suggestedActors' doesn't exist" }]
+        }"#;
+
+        let error = parse_suggested_actors_response(body)
+            .expect_err("a GraphQL error should propagate as Err");
+
+        assert_eq!(error.kind(), AppErrorKind::Internal);
+        assert!(
+            format!("{error:?}").contains("suggestedActors"),
+            "the error context should include the GraphQL message: {error:?}"
         );
     }
 }

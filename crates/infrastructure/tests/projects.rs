@@ -7,7 +7,7 @@ use application::{
     RecentProjectsService,
 };
 use async_trait::async_trait;
-use domain::{AppAction, AppResult, Project, RawIssue, RepoRef, Slice};
+use domain::{AgentRef, AppAction, AppResult, Project, RawIssue, RepoRef, Slice};
 use infrastructure::FakeProjectStore;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -100,6 +100,10 @@ impl GitHubPort for UnsortedGitHubPort {
 
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Ok(())
+    }
+
+    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
+        Ok(vec![])
     }
 }
 

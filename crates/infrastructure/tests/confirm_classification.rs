@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use application::{BoardService, GitHubPort};
 use async_trait::async_trait;
 use domain::{
-    AppAction, AppError, AppErrorKind, AppResult, IssueClassification, Project, RawIssue, RepoRef,
-    Slice,
+    AgentRef, AppAction, AppError, AppErrorKind, AppResult, IssueClassification, Project, RawIssue,
+    RepoRef, Slice,
 };
 
 /// A fake that records each `(issue_number, label)` it was asked to label, so
@@ -45,6 +45,10 @@ impl GitHubPort for RecordingPort {
             .push((issue_number, label.to_string()));
         Ok(())
     }
+
+    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
+        Ok(vec![])
+    }
 }
 
 /// A fake that always rejects the labelling, standing in for a token without
@@ -73,6 +77,10 @@ impl GitHubPort for FailingPort {
         Err(AppError::forbidden(
             "The token lacks permission to label this issue",
         ))
+    }
+
+    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
+        Ok(vec![])
     }
 }
 

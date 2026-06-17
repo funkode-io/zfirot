@@ -13,6 +13,7 @@ async fn classify_board_splits_issues_into_slices_prds_and_other() {
         slices,
         prds,
         other,
+        ..
     } = service
         .classify_board(&repo)
         .await
