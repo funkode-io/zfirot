@@ -1,4 +1,4 @@
-.PHONY: dev run build css css-watch fmt lint test check icon hooks
+.PHONY: dev run build bundle css css-watch fmt lint test check icon hooks
 
 PRESENTATION := crates/presentation
 
@@ -33,6 +33,13 @@ run: css
 # Build the whole workspace.
 build:
 	cargo build
+
+# Build a standalone, optimised macOS app you can run without the toolchain.
+# Compiles the stylesheet first, then produces a .app (and .dmg) under
+# target/dx/zfirot/bundle/macos/macos/. Open the .app or drag it to /Applications.
+bundle: css
+	dx bundle --release --package zfirot --platform desktop
+	@echo "App bundled under target/dx/zfirot/bundle/macos/macos/ — open Zfirot.app or drag it to /Applications."
 
 fmt:
 	cargo fmt --all

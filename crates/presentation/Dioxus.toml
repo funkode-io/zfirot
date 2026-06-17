@@ -1,3 +1,9 @@
 [application]
 name = "zfirot"
 default_platform = "desktop"
+
+# Metadata for `dx bundle` (the standalone macOS .app / installer).
+[bundle]
+identifier = "io.funkode.zfirot"
+publisher = "funkode"
+icon = ["assets/icon.png"]
