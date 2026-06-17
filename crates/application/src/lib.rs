@@ -103,7 +103,7 @@ pub struct OtherIssue {
 /// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
 /// - `other`  — suggested and unclassified issues for the "other open issues" bucket.
 /// - `agents` — Agents that can currently be assigned on this repo (zero or more),
-///              discovered best-effort during classification.
+///   discovered best-effort during classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedBoard {
     pub slices: Vec<Slice>,

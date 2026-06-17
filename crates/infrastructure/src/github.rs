@@ -1540,9 +1540,10 @@ struct ActorNode {
 
 #[cfg(test)]
 mod tests {
-    //! Offline tests for the assign-self response/error parsers, pinned against
-    //! recorded GraphQL bodies so a GitHub schema or message change can't break
-    //! assign-self without a test catching it.
+    //! Offline tests for the GraphQL response/error parsers (assign-self,
+    //! add-label, and suggested-actors), pinned against recorded GraphQL bodies
+    //! so a GitHub schema or message change can't break a parser without a test
+    //! catching it.
     use super::*;
     use domain::AppErrorKind;
 
