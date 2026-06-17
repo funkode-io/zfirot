@@ -17,6 +17,7 @@ const INITIAL_VISIBLE: usize = 6;
 #[component]
 pub fn HomeScreen(
     projects: Vec<Project>,
+    tracked_repos: Vec<RepoRef>,
     on_open_discovered: EventHandler<RepoRef>,
     on_open_goto: EventHandler<RepoRef>,
 ) -> Element {
@@ -68,18 +69,56 @@ pub fn HomeScreen(
                 HomeFilter::Filtered(matches) => {
                     let total = matches.len();
                     let visible = if show_all() { total } else { total.min(INITIAL_VISIBLE) };
+                    
+                    // Get the list of discovered repos for de-duplication
+                    let discovered_repos: Vec<_> = 
+                        projects.iter().map(|p| p.repo.clone()).collect();
+                    
+                    // Filter tracked repos to exclude those already in discovered
+                    let de_duped_tracked: Vec<_> = tracked_repos
+                        .iter()
+                        .filter(|repo| !discovered_repos.contains(repo))
+                        .cloned()
+                        .collect();
+                    
+                    // Only show tracked section when not filtering
+                    let show_tracked = raw.trim().is_empty() && !de_duped_tracked.is_empty();
+                    
                     rsx! {
-                        div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
-                            for project in matches.into_iter().take(visible) {
-                                ProjectCard { project, on_open: on_open_discovered }
+                        // Recent projects grid
+                        if !matches.is_empty() {
+                            div { class: "mb-8",
+                                h2 { class: "text-lg font-semibold mb-4", "Recent projects" }
+                                div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
+                                    for project in matches.into_iter().take(visible) {
+                                        ProjectCard { project, on_open: on_open_discovered }
+                                    }
+                                }
+                                if total > INITIAL_VISIBLE && !show_all() {
+                                    div { class: "flex justify-center mt-4",
+                                        button {
+                                            class: "btn btn-ghost btn-sm",
+                                            onclick: move |_| show_all.set(true),
+                                            "Show more"
+                                        }
+                                    }
+                                }
                             }
                         }
-                        if total > INITIAL_VISIBLE && !show_all() {
-                            div { class: "flex justify-center mt-6",
-                                button {
-                                    class: "btn btn-ghost btn-sm",
-                                    onclick: move |_| show_all.set(true),
-                                    "Show more"
+                        
+                        // Tracked repos section (only when not filtering)
+                        if show_tracked {
+                            div { class: "border-t pt-8",
+                                h2 { class: "text-lg font-semibold mb-4", "Tracked" }
+                                div { class: "space-y-2",
+                                    for repo in de_duped_tracked {
+                                        button {
+                                            class: "w-full text-left px-4 py-3 hover:bg-base-200 rounded transition",
+                                            onclick: move |_| on_open_discovered.call(repo.clone()),
+                                            span { class: "icon-[lucide--link] size-4 inline-block mr-2 opacity-60" }
+                                            "{repo}"
+                                        }
+                                    }
                                 }
                             }
                         }

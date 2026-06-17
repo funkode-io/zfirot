@@ -18,7 +18,7 @@ use crate::components::{
 };
 use crate::state::{
     assign_self, cached_projects, confirm_classification, last_opened, open_and_track_project,
-    open_project, refresh_projects, refresh_recent_projects, secure_store, AppState,
+    open_project, refresh_projects, refresh_recent_projects, secure_store, tracked_repos, AppState,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -31,9 +31,11 @@ enum View {
     /// `from_cache` is `true` only when this list came from an instant cached
     /// paint that still needs revalidating; a list produced by a live fetch
     /// (cold-cache fallback or a completed refresh) sets it `false` so the
-    /// background effect does not fetch again.
+    /// background effect does not fetch again. `tracked_repos` are shown in a
+    /// separate section.
     Home {
         projects: Vec<Project>,
+        tracked_repos: Vec<RepoRef>,
         from_cache: bool,
     },
     /// A token is stored and the board for `repo` loaded and was classified into
@@ -251,8 +253,13 @@ pub fn App() -> Element {
             // Token present but no project open: show recent projects. Kept
             // visible while the list silently revalidates (stale-while-revalidate)
             // so the background refresh does not flash a spinner.
-            (Some(View::Home { projects, .. }), ..) => rsx! {
-                HomeScreen { projects: projects.clone(), on_open_discovered, on_open_goto }
+            (Some(View::Home { projects, tracked_repos, .. }), ..) => rsx! {
+                HomeScreen {
+                    projects: projects.clone(),
+                    tracked_repos: tracked_repos.clone(),
+                    on_open_discovered,
+                    on_open_goto,
+                }
             },
             (Some(View::NeedToken { reason }), ..) => rsx! {
                 TokenScreen {
@@ -394,11 +401,15 @@ async fn resolve_view(nav: Nav) -> View {
 /// listing (`Unauthorized`/`Forbidden`) is discarded and routes back to the
 /// paste-token screen, just like the board path; any other failure is transient.
 async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToken) -> View {
+    // Get tracked repos (best-effort; a read failure returns an empty list).
+    let tracked = tracked_repos().await.unwrap_or_default();
+
     // Warm cache: render immediately without waiting on GitHub. `from_cache`
     // tells the background effect this paint still needs revalidating.
     if let Ok(Some(projects)) = cached_projects().await {
         return View::Home {
             projects,
+            tracked_repos: tracked,
             from_cache: true,
         };
     }
@@ -407,6 +418,7 @@ async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToke
     match refresh_projects(token).await {
         Ok(ProjectsRefresh::Changed(projects)) => View::Home {
             projects,
+            tracked_repos: tracked,
             from_cache: false,
         },
         // The cache was populated concurrently and already matches the live
@@ -416,6 +428,7 @@ async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToke
         Ok(ProjectsRefresh::Unchanged) => match cached_projects().await {
             Ok(Some(projects)) => View::Home {
                 projects,
+                tracked_repos: tracked,
                 from_cache: false,
             },
             Ok(None) => View::Error("The cached projects vanished during refresh.".into()),

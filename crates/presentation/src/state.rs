@@ -111,6 +111,12 @@ pub async fn cached_projects() -> AppResult<Option<Vec<Project>>> {
     project_store()?.cached_projects().await
 }
 
+/// The repositories the user has summoned by name on the home screen, in
+/// newest-added-first order. A local store read: no token or network involved.
+pub async fn tracked_repos() -> AppResult<Vec<RepoRef>> {
+    project_store()?.tracked_repos().await
+}
+
 /// Refresh the recent-projects list from GitHub, rewriting the local cache only
 /// when it changed, and report the outcome. The caller holds the resolved token
 /// (e.g. the cold-cache blocking fetch on the home screen).

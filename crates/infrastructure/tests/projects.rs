@@ -56,6 +56,18 @@ impl ProjectStorePort for CountingProjectStore {
         *self.cached.lock().expect("lock poisoned") = Some(projects.to_vec());
         Ok(())
     }
+
+    async fn tracked_repos(&self) -> AppResult<Vec<RepoRef>> {
+        Ok(Vec::new())
+    }
+
+    async fn track_repo(&self, _repo: &RepoRef) -> AppAction {
+        Ok(())
+    }
+
+    async fn untrack_repo(&self, _repo: &RepoRef) -> AppAction {
+        Ok(())
+    }
 }
 
 /// A GitHub port that returns projects in a deliberately *unsorted* order, so
