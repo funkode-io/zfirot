@@ -139,6 +139,25 @@ pub async fn open_project(repo: &RepoRef) -> AppAction {
     last_opened_service()?.open_project(repo).await
 }
 
+/// Open a project via the go-to (typed-repo) action: try to load the board to
+/// verify access, and if successful, track the repo before remembering it as
+/// last-opened. Returns the board on success; on failure (e.g. 404), returns the
+/// error and does NOT track.
+pub async fn open_and_track_project(
+    token: &GitHubToken,
+    repo: &RepoRef,
+) -> AppResult<ClassifiedBoard> {
+    let store = project_store()?;
+    // Try to load and classify the board
+    let board = AppState::from_token(token, repo.clone())?
+        .classify_board()
+        .await?;
+    // Success: track the repo (idempotent) and remember as last-opened
+    let _ = store.track_repo(repo).await;
+    let _ = store.remember_last_opened(repo).await;
+    Ok(board)
+}
+
 /// Assign the authenticated user to a Ready Slice's issue, claiming it on
 /// GitHub. Reads the stored token, wires the live adapter scoped to `repo`, and
 /// runs the assign-self use-case; the board is re-polled by the caller on

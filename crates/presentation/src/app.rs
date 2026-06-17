@@ -17,8 +17,8 @@ use crate::components::{
     ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner, TokenScreen,
 };
 use crate::state::{
-    assign_self, cached_projects, confirm_classification, last_opened, open_project,
-    refresh_projects, refresh_recent_projects, secure_store, AppState,
+    assign_self, cached_projects, confirm_classification, last_opened, open_and_track_project,
+    open_project, refresh_projects, refresh_recent_projects, secure_store, AppState,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -163,12 +163,40 @@ pub fn App() -> Element {
         });
     };
 
-    let on_open = move |repo: RepoRef| {
+    let on_open_discovered = move |repo: RepoRef| {
         spawn(async move {
             // Persist the choice (best-effort) and navigate to its board.
             let _ = open_project(&repo).await;
             nav.set(Nav::Project(repo));
             reload += 1;
+        });
+    };
+
+    let on_open_goto = move |repo: RepoRef| {
+        spawn(async move {
+            // For go-to opens, try to load the board and track on success.
+            let token = match AuthService::new(secure_store()).require_token().await {
+                Ok(t) => t,
+                Err(err) => {
+                    token_error.set(Some(err.to_string()));
+                    return;
+                }
+            };
+            match open_and_track_project(&token, &repo).await {
+                Ok(_) => {
+                    // Successfully tracked and loaded: navigate to the board.
+                    nav.set(Nav::Project(repo));
+                    reload += 1;
+                }
+                Err(_) => {
+                    // Could not load board (e.g. 404 or not authorized):
+                    // do not track, show error in home screen context.
+                    // We stay on the home screen; the user can try again or pick
+                    // a different repo.
+                    // For now, ignore the error silently (repo does not exist
+                    // or user does not have access).
+                }
+            }
         });
     };
 
@@ -224,12 +252,8 @@ pub fn App() -> Element {
             // visible while the list silently revalidates (stale-while-revalidate)
             // so the background refresh does not flash a spinner.
             (Some(View::Home { projects, .. }), ..) => rsx! {
-                HomeScreen { projects: projects.clone(), on_open }
+                HomeScreen { projects: projects.clone(), on_open_discovered, on_open_goto }
             },
-            // No token yet, or a stored token was rejected: show the paste-token
-            // screen. A fresh submit error takes precedence over a stale reject
-            // reason carried by the view. `saving` drives the submit spinner while
-            // a freshly-pasted token is validated.
             (Some(View::NeedToken { reason }), ..) => rsx! {
                 TokenScreen {
                     error: token_error().or_else(|| reason.clone()),

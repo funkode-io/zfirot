@@ -5,7 +5,8 @@ use domain::{filter_home, HomeFilter, Project, RepoRef};
 const INITIAL_VISIBLE: usize = 6;
 
 /// The home screen: a search box over the discovered projects with a gated
-/// direct-open action. Emits `on_open` with the chosen repository. Callback-only
+/// direct-open action. Emits `on_open_discovered` when a matching project is
+/// clicked, and `on_open_goto` when the go-to action is triggered. Callback-only
 /// — it neither fetches nor persists anything.
 ///
 /// Typing filters the visible projects by case-insensitive substring on
@@ -14,7 +15,11 @@ const INITIAL_VISIBLE: usize = 6;
 /// valid repo path, a quiet hint is shown instead. The pure decision lives in
 /// [`filter_home`].
 #[component]
-pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Element {
+pub fn HomeScreen(
+    projects: Vec<Project>,
+    on_open_discovered: EventHandler<RepoRef>,
+    on_open_goto: EventHandler<RepoRef>,
+) -> Element {
     let mut show_all = use_signal(|| false);
     let mut query = use_signal(String::new);
 
@@ -52,7 +57,7 @@ pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Ele
                     onkeydown: move |evt| {
                         if evt.key() == Key::Enter {
                             if let Some(repo) = goto_on_enter.clone() {
-                                on_open.call(repo);
+                                on_open_goto.call(repo);
                             }
                         }
                     },
@@ -66,7 +71,7 @@ pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Ele
                     rsx! {
                         div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
                             for project in matches.into_iter().take(visible) {
-                                ProjectCard { project, on_open }
+                                ProjectCard { project, on_open: on_open_discovered }
                             }
                         }
                         if total > INITIAL_VISIBLE && !show_all() {
@@ -86,7 +91,7 @@ pub fn HomeScreen(projects: Vec<Project>, on_open: EventHandler<RepoRef>) -> Ele
                         div { class: "w-full max-w-sm",
                             button {
                                 class: "btn btn-primary w-full",
-                                onclick: move |_| on_open.call(repo.clone()),
+                                onclick: move |_| on_open_goto.call(repo.clone()),
                                 "{label}"
                             }
                         }
