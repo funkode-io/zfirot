@@ -156,6 +156,13 @@ pub trait ProjectStorePort: Send + Sync {
     async fn cached_projects(&self) -> AppResult<Option<Vec<Project>>>;
     /// Replace the cached recent-projects list with `projects`.
     async fn cache_projects(&self, projects: &[Project]) -> AppAction;
+    /// The repositories the user has summoned by name on the home screen, in
+    /// newest-added-first order.
+    async fn tracked_repos(&self) -> AppResult<Vec<RepoRef>>;
+    /// Add a repo to the tracked list if not already present (idempotent).
+    async fn track_repo(&self, repo: &RepoRef) -> AppAction;
+    /// Remove a repo from the tracked list.
+    async fn untrack_repo(&self, repo: &RepoRef) -> AppAction;
 }
 
 /// Shared stores are stores too, so the composition root can hand the same
@@ -176,6 +183,18 @@ impl<S: ProjectStorePort + ?Sized> ProjectStorePort for Arc<S> {
 
     async fn cache_projects(&self, projects: &[Project]) -> AppAction {
         (**self).cache_projects(projects).await
+    }
+
+    async fn tracked_repos(&self) -> AppResult<Vec<RepoRef>> {
+        (**self).tracked_repos().await
+    }
+
+    async fn track_repo(&self, repo: &RepoRef) -> AppAction {
+        (**self).track_repo(repo).await
+    }
+
+    async fn untrack_repo(&self, repo: &RepoRef) -> AppAction {
+        (**self).untrack_repo(repo).await
     }
 }
 
