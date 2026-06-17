@@ -62,8 +62,13 @@ enum Nav {
     Auto,
     /// Explicitly show the home screen (the recent-projects picker).
     Home,
-    /// Show the board for a project the user just chose.
+    /// Show the board for a project the user just chose from the recent list.
     Project(RepoRef),
+    /// Open a project summoned by name (the go-to action): load its board and,
+    /// on success, track it. Resolved once via `open_and_track_project` so a
+    /// go-to open fetches the board only once (no verify-then-reopen double
+    /// fetch), and a failure surfaces like any other board load.
+    GoTo(RepoRef),
 }
 
 #[component]
@@ -175,31 +180,12 @@ pub fn App() -> Element {
     });
 
     let on_open_goto = use_callback(move |repo: RepoRef| {
-        spawn(async move {
-            // For go-to opens, try to load the board and track on success.
-            let token = match AuthService::new(secure_store()).require_token().await {
-                Ok(t) => t,
-                Err(err) => {
-                    token_error.set(Some(err.to_string()));
-                    return;
-                }
-            };
-            match open_and_track_project(&token, &repo).await {
-                Ok(_) => {
-                    // Successfully tracked and loaded: navigate to the board.
-                    nav.set(Nav::Project(repo));
-                    reload += 1;
-                }
-                Err(_) => {
-                    // Could not load board (e.g. 404 or not authorized):
-                    // do not track, show error in home screen context.
-                    // We stay on the home screen; the user can try again or pick
-                    // a different repo.
-                    // For now, ignore the error silently (repo does not exist
-                    // or user does not have access).
-                }
-            }
-        });
+        // The go-to open (load the board, track on success) happens in
+        // `resolve_view` for `Nav::GoTo`, so this only routes there. Doing the
+        // work there means the board is fetched once, and a failure (e.g. a 404)
+        // surfaces through the normal view resolution rather than being dropped.
+        nav.set(Nav::GoTo(repo));
+        reload += 1;
     });
 
     // Back to the project picker. Persistence is untouched, so the next launch
@@ -219,8 +205,10 @@ pub fn App() -> Element {
     // showing instead of flashing a spinner over it.
     let board_loading = matches!(*view.state().read(), UseResourceState::Pending)
         && match (nav(), &*view.read_unchecked()) {
-            (Nav::Project(target), Some(View::Board { repo, .. })) => *repo != target,
-            (Nav::Project(_), _) => true,
+            (Nav::Project(target) | Nav::GoTo(target), Some(View::Board { repo, .. })) => {
+                *repo != target
+            }
+            (Nav::Project(_) | Nav::GoTo(_), _) => true,
             _ => false,
         };
 
@@ -243,7 +231,7 @@ pub fn App() -> Element {
             // with a spinner so the navigation has immediate feedback. A board
             // that is merely self-refreshing keeps `board_loading` false and so
             // falls through to the populated `View::Board` arm below.
-            (_, true, Nav::Project(repo)) => rsx! {
+            (_, true, Nav::Project(repo) | Nav::GoTo(repo)) => rsx! {
                 BoardShell { repo: repo.to_string(), on_home,
                     div { class: "flex justify-center py-16",
                         Spinner { label: "Loading board…" }
@@ -358,10 +346,29 @@ async fn resolve_view(nav: Nav) -> View {
 
     // Decide the project to open from where the user wants to be. `Home` always
     // shows the picker; `Auto` reopens the last-opened project or, failing that,
-    // shows the picker too.
+    // shows the picker too. `GoTo` is resolved here so the go-to open fetches the
+    // board exactly once and tracks on success.
     let repo = match nav {
         Nav::Home => return home_view(&auth, &token).await,
         Nav::Project(repo) => repo,
+        Nav::GoTo(repo) => {
+            // Go-to open: load and classify the board (tracking on success); a
+            // failed load surfaces here rather than being silently dropped.
+            return match open_and_track_project(&token, &repo).await {
+                Ok(board) => View::Board {
+                    repo,
+                    board,
+                    loaded_at: now_hms(),
+                },
+                Err(error) if is_auth_failure(error.kind()) => {
+                    let _ = auth.clear_token().await;
+                    View::NeedToken {
+                        reason: Some(error.to_string()),
+                    }
+                }
+                Err(error) => View::Error(error.to_string()),
+            };
+        }
         Nav::Auto => match last_opened().await {
             Ok(Some(repo)) => repo,
             Ok(None) => return home_view(&auth, &token).await,

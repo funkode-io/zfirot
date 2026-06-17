@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use application::{
     AuthService, BoardService, ClassifiedBoard, GitHubPort, LastOpenedService, ProjectStorePort,
-    ProjectsRefresh, RecentProjectsService, SecureStorePort,
+    ProjectsRefresh, RecentProjectsService, SecureStorePort, TrackedProjectsService,
 };
 use domain::{AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
 #[cfg(debug_assertions)]
@@ -149,19 +149,17 @@ pub async fn open_project(repo: &RepoRef) -> AppAction {
 /// verify access, and if successful, track the repo before remembering it as
 /// last-opened. Returns the board on success; on failure (e.g. 404), returns the
 /// error and does NOT track.
+///
+/// The orchestration lives in [`TrackedProjectsService`]; this only wires the
+/// live adapter and store into it.
 pub async fn open_and_track_project(
     token: &GitHubToken,
     repo: &RepoRef,
 ) -> AppResult<ClassifiedBoard> {
-    let store = project_store()?;
-    // Try to load and classify the board
-    let board = AppState::from_token(token, repo.clone())?
-        .classify_board()
-        .await?;
-    // Success: track the repo (idempotent) and remember as last-opened
-    let _ = store.track_repo(repo).await;
-    let _ = store.remember_last_opened(repo).await;
-    Ok(board)
+    let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
+    TrackedProjectsService::new(port, project_store()?)
+        .open_and_track(repo)
+        .await
 }
 
 /// Assign the authenticated user to a Ready Slice's issue, claiming it on

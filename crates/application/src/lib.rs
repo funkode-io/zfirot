@@ -557,3 +557,42 @@ impl<S: ProjectStorePort> LastOpenedService<S> {
             .map_err(|err| err.with_operation("LastOpenedService::last_opened"))
     }
 }
+
+/// Use-case for opening a project summoned by name on the home screen (the
+/// go-to action), composing the live board fetch ([`BoardService`]) with the
+/// on-device tracked/last-opened store ([`ProjectStorePort`]).
+///
+/// Keeping this orchestration here — rather than in the presentation layer —
+/// makes the "track only on a successful open" behaviour testable at the
+/// use-case seam against fakes (no GitHub, no disk).
+pub struct TrackedProjectsService<G: GitHubPort, S: ProjectStorePort> {
+    board: BoardService<G>,
+    store: S,
+}
+
+impl<G: GitHubPort, S: ProjectStorePort> TrackedProjectsService<G, S> {
+    pub fn new(github: G, store: S) -> Self {
+        Self {
+            board: BoardService::new(github),
+            store,
+        }
+    }
+
+    /// Open a repo summoned by name: load and classify its board to verify
+    /// access, then — only on success — track the repo (idempotent) and
+    /// remember it as last-opened before returning the board. A failed load
+    /// (e.g. a 404 for a repo that does not exist or is not accessible)
+    /// propagates and tracks nothing.
+    ///
+    /// The track and last-opened writes are deliberately **best-effort**: the
+    /// board has already loaded, so a local-store write failure must not fail an
+    /// otherwise-successful open. Such a failure simply leaves the repo
+    /// untracked for now — the next successful open re-attempts it — rather than
+    /// surfacing an error to the user.
+    pub async fn open_and_track(&self, repo: &RepoRef) -> AppResult<ClassifiedBoard> {
+        let board = self.board.classify_board(repo).await?;
+        let _ = self.store.track_repo(repo).await;
+        let _ = self.store.remember_last_opened(repo).await;
+        Ok(board)
+    }
+}
