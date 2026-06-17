@@ -5,7 +5,7 @@
 
 use application::{BoardService, ClassifiedBoard, GitHubPort};
 use async_trait::async_trait;
-use domain::{AgentRef, AppAction, AppError, AppResult, Project, RawIssue, RepoRef, Slice};
+use domain::{AgentRef, AppAction, AppError, AppResult, Project, RawIssue, RepoRef};
 
 /// Build a minimal fake port that returns `agents` from `suggested_agents` and
 /// empty lists everywhere else.
@@ -27,10 +27,6 @@ impl AgentPort {
 
 #[async_trait]
 impl GitHubPort for AgentPort {
-    async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        Ok(vec![])
-    }
-
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
     }

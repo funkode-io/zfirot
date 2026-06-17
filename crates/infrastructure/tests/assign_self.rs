@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use application::{BoardService, GitHubPort};
 use async_trait::async_trait;
-use domain::{
-    AgentRef, AppAction, AppError, AppErrorKind, AppResult, Project, RawIssue, RepoRef, Slice,
-};
+use domain::{AgentRef, AppAction, AppError, AppErrorKind, AppResult, Project, RawIssue, RepoRef};
 
 /// A fake that records which issue it was asked to assign, so the test can
 /// assert the use-case forwarded the right number to the port.
@@ -20,10 +18,6 @@ struct RecordingPort {
 
 #[async_trait]
 impl GitHubPort for RecordingPort {
-    async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        Ok(vec![])
-    }
-
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
     }
@@ -61,10 +55,6 @@ struct FailingPort;
 
 #[async_trait]
 impl GitHubPort for FailingPort {
-    async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        Ok(vec![])
-    }
-
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
     }

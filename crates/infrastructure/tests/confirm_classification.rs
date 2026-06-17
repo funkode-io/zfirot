@@ -10,7 +10,7 @@ use application::{BoardService, GitHubPort};
 use async_trait::async_trait;
 use domain::{
     AgentRef, AppAction, AppError, AppErrorKind, AppResult, IssueClassification, Project, RawIssue,
-    RepoRef, Slice,
+    RepoRef,
 };
 
 /// A fake that records each `(issue_number, label)` it was asked to label, so
@@ -22,10 +22,6 @@ struct RecordingPort {
 
 #[async_trait]
 impl GitHubPort for RecordingPort {
-    async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        Ok(vec![])
-    }
-
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
     }
@@ -66,10 +62,6 @@ struct FailingPort;
 
 #[async_trait]
 impl GitHubPort for FailingPort {
-    async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        Ok(vec![])
-    }
-
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
     }
