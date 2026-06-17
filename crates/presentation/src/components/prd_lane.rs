@@ -81,9 +81,9 @@ pub fn PrdLane(
                             label: state_label(state).to_string(),
                             badge_class: state_badge_class(state).to_string(),
                             slices: bucket,
-                            on_assign: move |number| on_assign.call(number),
+                            on_assign,
                             highlighted,
-                            on_highlight: move |number| on_highlight.call(number),
+                            on_highlight,
                         }
                     }
                 }
