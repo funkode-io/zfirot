@@ -40,12 +40,15 @@ pub fn HomeScreen(
     let body = match outcome {
         HomeFilter::Filtered(matches) => {
             let total = matches.len();
-            let visible = if show_all() { total } else { total.min(INITIAL_VISIBLE) };
+            let visible = if show_all() {
+                total
+            } else {
+                total.min(INITIAL_VISIBLE)
+            };
 
             // Tracked repos already discovered are dropped: a repo present in
             // both lists renders once, under the discovered grid.
-            let discovered_repos: Vec<RepoRef> =
-                projects.iter().map(|p| p.repo.clone()).collect();
+            let discovered_repos: Vec<RepoRef> = projects.iter().map(|p| p.repo.clone()).collect();
             let de_duped_tracked: Vec<RepoRef> = tracked_repos
                 .iter()
                 .filter(|repo| !discovered_repos.contains(repo))
