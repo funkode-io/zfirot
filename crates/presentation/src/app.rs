@@ -165,16 +165,16 @@ pub fn App() -> Element {
         });
     };
 
-    let on_open_discovered = move |repo: RepoRef| {
+    let on_open_discovered = use_callback(move |repo: RepoRef| {
         spawn(async move {
             // Persist the choice (best-effort) and navigate to its board.
             let _ = open_project(&repo).await;
             nav.set(Nav::Project(repo));
             reload += 1;
         });
-    };
+    });
 
-    let on_open_goto = move |repo: RepoRef| {
+    let on_open_goto = use_callback(move |repo: RepoRef| {
         spawn(async move {
             // For go-to opens, try to load the board and track on success.
             let token = match AuthService::new(secure_store()).require_token().await {
@@ -200,7 +200,7 @@ pub fn App() -> Element {
                 }
             }
         });
-    };
+    });
 
     // Back to the project picker. Persistence is untouched, so the next launch
     // still reopens the last project; this only changes the current session.
