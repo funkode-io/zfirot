@@ -38,6 +38,15 @@ impl GitHubPort for RecordingPort {
         Ok(())
     }
 
+    async fn assign_agent(
+        &self,
+        _repo: &RepoRef,
+        _issue_number: u64,
+        _agent: &AgentRef,
+    ) -> AppAction {
+        Ok(())
+    }
+
     async fn add_label(&self, _repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
         self.labelled
             .lock()
@@ -70,6 +79,15 @@ impl GitHubPort for FailingPort {
     }
 
     async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
+        Ok(())
+    }
+
+    async fn assign_agent(
+        &self,
+        _repo: &RepoRef,
+        _issue_number: u64,
+        _agent: &AgentRef,
+    ) -> AppAction {
         Ok(())
     }
 

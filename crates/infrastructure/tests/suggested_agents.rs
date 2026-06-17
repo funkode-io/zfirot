@@ -43,6 +43,15 @@ impl GitHubPort for AgentPort {
         Ok(())
     }
 
+    async fn assign_agent(
+        &self,
+        _repo: &RepoRef,
+        _issue_number: u64,
+        _agent: &AgentRef,
+    ) -> AppAction {
+        Ok(())
+    }
+
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Ok(())
     }
