@@ -45,10 +45,10 @@ impl RepoRef {
             .with_operation("RepoRef::parse"));
         }
         if slash_count > 1 {
-            return Err(
-                AppError::invalid_input("Enter a repository as owner/repo — only one slash is allowed.")
-                    .with_operation("RepoRef::parse"),
-            );
+            return Err(AppError::invalid_input(
+                "Enter a repository as owner/repo — only one slash is allowed.",
+            )
+            .with_operation("RepoRef::parse"));
         }
 
         // SAFETY: exactly one slash was confirmed above
@@ -59,8 +59,10 @@ impl RepoRef {
                 .with_operation("RepoRef::parse"));
         }
         if name.is_empty() {
-            return Err(AppError::invalid_input("Repository name must not be empty.")
-                .with_operation("RepoRef::parse"));
+            return Err(
+                AppError::invalid_input("Repository name must not be empty.")
+                    .with_operation("RepoRef::parse"),
+            );
         }
 
         // GitHub owner: ASCII letters, digits, and hyphens; no leading/trailing hyphen.
@@ -182,10 +184,7 @@ mod tests {
                     assert_eq!(repo.name, name, "input={:?}", case.input);
                 }
                 (Ok(repo), None) => {
-                    panic!(
-                        "expected parse({:?}) to fail, but got {repo:?}",
-                        case.input
-                    );
+                    panic!("expected parse({:?}) to fail, but got {repo:?}", case.input);
                 }
                 (Err(err), None) => {
                     assert_eq!(

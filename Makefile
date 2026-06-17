@@ -1,4 +1,4 @@
-.PHONY: dev run build css css-watch fmt lint test check icon
+.PHONY: dev run build css css-watch fmt lint test check icon hooks
 
 PRESENTATION := crates/presentation
 
@@ -48,3 +48,10 @@ check:
 	cargo fmt --all --check
 	cargo clippy --all-targets --all-features -- -D warnings
 	cargo test
+
+# Install the version-controlled git hooks (sets core.hooksPath to .githooks).
+# Run once after cloning; the pre-push hook then runs `make check` before every
+# push. Bypass in an emergency with `git push --no-verify`.
+hooks:
+	git config core.hooksPath .githooks
+	@echo "Git hooks installed: pre-push runs 'make check'."

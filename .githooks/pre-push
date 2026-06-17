@@ -1,0 +1,11 @@
+#!/bin/sh
+# Pre-push quality gate: format check, lints, and tests must pass before a push.
+#
+# Installed via `make hooks` (sets core.hooksPath to .githooks). To bypass in an
+# emergency, push with `--no-verify` — but prefer fixing the failure.
+
+set -e
+
+echo "pre-push: running quality gate (make check)…"
+make check
+echo "pre-push: quality gate passed."
