@@ -121,6 +121,50 @@ mutation Assign($assignableId: ID!, $assigneeId: ID!) {
 }
 "#;
 
+/// Resolve the node IDs the delegate (assign-agent) mutation needs in one round
+/// trip: the target issue (assignable), the repository (the agent session's
+/// target), its default branch (the session's base ref), and the live
+/// `suggestedActors` list so the chosen Agent's node ID is re-resolved at action
+/// time (the board-load value may be stale or the Agent no longer assignable).
+const AGENT_ASSIGN_IDS_QUERY: &str = r#"
+query AgentAssignIds($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    id
+    defaultBranchRef { name }
+    issue(number: $number) { id }
+    suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 100) {
+      nodes {
+        __typename
+        login
+        ... on Node { id }
+      }
+    }
+  }
+}
+"#;
+
+/// Delegate an issue to an Agent: assign the Agent and attach `agentAssignment`
+/// so GitHub starts a coding session. Unlike [`ASSIGN_MUTATION`] this keeps any
+/// existing human assignees (it adds rather than replaces) and requires the
+/// [`GRAPHQL_FEATURES_HEADER`] feature flags. The board re-polls after success,
+/// so the now-assigned Slice derives `Wip`.
+const AGENT_ASSIGN_MUTATION: &str = r#"
+mutation AssignAgent($assignableId: ID!, $assigneeId: ID!, $repositoryId: ID!, $baseRef: String!) {
+  addAssigneesToAssignable(input: {
+    assignableId: $assignableId,
+    assigneeIds: [$assigneeId],
+    agentAssignment: {targetRepositoryId: $repositoryId, baseRef: $baseRef}
+  }) {
+    clientMutationId
+  }
+}
+"#;
+
+/// The GraphQL feature flags that unlock the `agentAssignment` input and start a
+/// Copilot coding session (per spike 0001). Sent only on the delegate mutation.
+const GRAPHQL_FEATURES_HEADER: &str =
+    "issues_copilot_assignment_api_support,coding_agent_model_selection";
+
 /// Resolve the node IDs the add-label mutation needs: the target issue (the
 /// labelable) and the repository label to add it. Both are looked up in one
 /// round trip before the mutation runs. A label the repository does not define
@@ -380,6 +424,85 @@ impl GitHubClient {
         })
     }
 
+    /// Resolve the issue, repository, default branch and live Agent node IDs the
+    /// delegate mutation needs.
+    async fn fetch_agent_assign_ids(&self, repo: &RepoRef, issue_number: u64) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": AGENT_ASSIGN_IDS_QUERY,
+            "variables": { "owner": repo.owner, "name": repo.name, "number": issue_number },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_agent_assign_ids")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_agent_assign_ids",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_agent_assign_ids")
+                .with_source(err)
+        })
+    }
+
+    /// Run the `addAssigneesToAssignable` delegate mutation, attaching the
+    /// `agentAssignment` input via the feature-flag header so GitHub starts a
+    /// coding session for the resolved node IDs.
+    async fn run_agent_assign_mutation(&self, ids: &AgentAssignIds) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": AGENT_ASSIGN_MUTATION,
+            "variables": {
+                "assignableId": ids.assignable_id,
+                "assigneeId": ids.assignee_id,
+                "repositoryId": ids.repository_id,
+                "baseRef": ids.base_ref,
+            },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .header("GraphQL-Features", GRAPHQL_FEATURES_HEADER)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::run_agent_assign_mutation")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::run_agent_assign_mutation",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::run_agent_assign_mutation")
+                .with_source(err)
+        })
+    }
+
     /// Resolve the issue and label node IDs the add-label mutation needs.
     async fn fetch_label_ids(
         &self,
@@ -559,6 +682,13 @@ impl GitHubPort for GitHubClient {
         let mutation_body = self
             .run_assign_mutation(&ids.assignable_id, &ids.assignee_id)
             .await?;
+        parse_assign_mutation(&mutation_body)
+    }
+
+    async fn assign_agent(&self, repo: &RepoRef, issue_number: u64, agent: &AgentRef) -> AppAction {
+        let ids_body = self.fetch_agent_assign_ids(repo, issue_number).await?;
+        let ids = parse_agent_assign_ids(&ids_body, issue_number, &agent.name)?;
+        let mutation_body = self.run_agent_assign_mutation(&ids).await?;
         parse_assign_mutation(&mutation_body)
     }
 
@@ -876,6 +1006,107 @@ fn assign_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError 
     error
         .with_operation(operation)
         .with_context("errors", message)
+}
+
+/// The resolved node IDs and base ref the delegate (assign-agent) mutation needs.
+#[cfg_attr(test, derive(Debug))]
+struct AgentAssignIds {
+    assignable_id: String,
+    assignee_id: String,
+    repository_id: String,
+    base_ref: String,
+}
+
+/// Parse the agent-assign-ids query response into the IDs the delegate mutation
+/// needs, re-resolving the chosen Agent's node ID live by matching `agent_name`
+/// against the current `suggestedActors`. Pure and offline, so the HTTP boundary
+/// stays thin and testable.
+///
+/// A missing issue maps to `NotFound`; an Agent that is no longer in the
+/// assignable set (e.g. Copilot disabled since board load) also maps to
+/// `NotFound` naming the Agent, so the board can surface a clear message and
+/// leave the Slice unchanged.
+fn parse_agent_assign_ids(
+    body: &str,
+    issue_number: u64,
+    agent_name: &str,
+) -> AppResult<AgentAssignIds> {
+    let response: AgentAssignIdsResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_agent_assign_ids")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        return Err(assign_error(errors, "parse_agent_assign_ids"));
+    }
+
+    let repository = response
+        .data
+        .and_then(|data| data.repository)
+        .ok_or_else(|| {
+            AppError::not_found("Repository not found or not visible to the token")
+                .with_operation("parse_agent_assign_ids")
+        })?;
+
+    let issue = repository.issue.ok_or_else(|| {
+        AppError::not_found("Issue not found or not visible to the token")
+            .with_operation("parse_agent_assign_ids")
+            .with_context("issue", issue_number)
+    })?;
+
+    let base_ref = repository
+        .default_branch_ref
+        .map(|reference| reference.name)
+        .ok_or_else(|| {
+            AppError::internal("The repository has no default branch to start the Agent from")
+                .with_operation("parse_agent_assign_ids")
+        })?;
+
+    let assignee_id = repository
+        .suggested_actors
+        .nodes
+        .into_iter()
+        .filter(|node| node.typename == "Bot")
+        .find(|node| node.login == agent_name)
+        .and_then(|node| node.id)
+        .ok_or_else(|| {
+            AppError::not_found("That Agent is no longer assignable on this repository")
+                .with_operation("parse_agent_assign_ids")
+                .with_context("agent", agent_name)
+        })?;
+
+    Ok(AgentAssignIds {
+        assignable_id: issue.id,
+        assignee_id,
+        repository_id: repository.id,
+        base_ref,
+    })
+}
+
+#[derive(Deserialize)]
+struct AgentAssignIdsResponse {
+    data: Option<AgentAssignIdsData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct AgentAssignIdsData {
+    repository: Option<AgentAssignRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentAssignRepository {
+    id: String,
+    default_branch_ref: Option<RefName>,
+    issue: Option<NodeId>,
+    suggested_actors: ActorConnection,
+}
+
+#[derive(Deserialize)]
+struct RefName {
+    name: String,
 }
 
 /// The resolved node IDs the add-label mutation needs.
@@ -1541,9 +1772,9 @@ struct ActorNode {
 #[cfg(test)]
 mod tests {
     //! Offline tests for the GraphQL response/error parsers (assign-self,
-    //! add-label, and suggested-actors), pinned against recorded GraphQL bodies
-    //! so a GitHub schema or message change can't break a parser without a test
-    //! catching it.
+    //! assign-agent, add-label, and suggested-actors), pinned against recorded
+    //! GraphQL bodies so a GitHub schema or message change can't break a parser
+    //! without a test catching it.
     use super::*;
     use domain::AppErrorKind;
 
@@ -1582,6 +1813,83 @@ mod tests {
         let body = r#"{ "data": { "addAssigneesToAssignable": { "clientMutationId": null } } }"#;
 
         parse_assign_mutation(body).expect("a clean mutation response should be Ok");
+    }
+
+    #[test]
+    fn parse_agent_assign_ids_resolves_ids_and_live_bot() {
+        let body = r#"{
+            "data": {
+                "repository": {
+                    "id": "REPO_1",
+                    "defaultBranchRef": { "name": "main" },
+                    "issue": { "id": "ISSUE_42" },
+                    "suggestedActors": {
+                        "nodes": [
+                            { "__typename": "User", "login": "alice", "id": "USER_1" },
+                            { "__typename": "Bot", "login": "copilot-swe-agent", "id": "BOT_LIVE" }
+                        ]
+                    }
+                }
+            }
+        }"#;
+
+        let ids = parse_agent_assign_ids(body, 42, "copilot-swe-agent").expect("ids should parse");
+
+        assert_eq!(ids.assignable_id, "ISSUE_42");
+        assert_eq!(ids.repository_id, "REPO_1");
+        assert_eq!(ids.base_ref, "main");
+        // The Agent's node ID is the one resolved live, not the caller's value.
+        assert_eq!(ids.assignee_id, "BOT_LIVE");
+    }
+
+    #[test]
+    fn parse_agent_assign_ids_unknown_agent_is_not_found_with_context() {
+        let body = r#"{
+            "data": {
+                "repository": {
+                    "id": "REPO_1",
+                    "defaultBranchRef": { "name": "main" },
+                    "issue": { "id": "ISSUE_42" },
+                    "suggestedActors": { "nodes": [] }
+                }
+            }
+        }"#;
+
+        let error = parse_agent_assign_ids(body, 42, "copilot-swe-agent")
+            .expect_err("an Agent absent from the assignable set should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+        assert!(
+            format!("{error:?}").contains("agent=copilot-swe-agent"),
+            "the Agent name should be attached as context: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_agent_assign_ids_missing_issue_is_not_found_with_context() {
+        let body = r#"{
+            "data": {
+                "repository": {
+                    "id": "REPO_1",
+                    "defaultBranchRef": { "name": "main" },
+                    "issue": null,
+                    "suggestedActors": {
+                        "nodes": [
+                            { "__typename": "Bot", "login": "copilot-swe-agent", "id": "BOT_LIVE" }
+                        ]
+                    }
+                }
+            }
+        }"#;
+
+        let error = parse_agent_assign_ids(body, 7, "copilot-swe-agent")
+            .expect_err("a missing issue should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+        assert!(
+            format!("{error:?}").contains("issue=7"),
+            "the issue number should be attached as context: {error:?}"
+        );
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub trait GitHubPort: Send + Sync {
     /// so picking up a Ready Slice from the board claims it on GitHub.
     async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction;
 
+    /// Delegate an issue to `agent`, so handing a Ready Slice to an Agent starts
+    /// a coding session on GitHub. Like [`assign_self`](Self::assign_self) this
+    /// adds an assignee (which makes the Slice WIP on the next poll); the chosen
+    /// Agent's node ID is resolved live by the adapter at action time.
+    async fn assign_agent(&self, repo: &RepoRef, issue_number: u64, agent: &AgentRef) -> AppAction;
+
     /// Add a label to an issue, so confirming a suggested classification tags it
     /// (`prd` or `slice`) and the next poll reclassifies it onto the board.
     async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction;
@@ -69,6 +75,10 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
 
     async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
         (**self).assign_self(repo, issue_number).await
+    }
+
+    async fn assign_agent(&self, repo: &RepoRef, issue_number: u64, agent: &AgentRef) -> AppAction {
+        (**self).assign_agent(repo, issue_number, agent).await
     }
 
     async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
@@ -239,6 +249,28 @@ impl<P: GitHubPort> BoardService<P> {
     pub async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
         self.port
             .assign_self(repo, issue_number)
+            .await
+            .map_err(|err| {
+                err.with_context("repo", repo)
+                    .with_context("issue", issue_number)
+            })
+    }
+
+    /// Delegate a Ready Slice to `agent`, starting an Agent coding session on
+    /// GitHub.
+    ///
+    /// On success the caller re-polls the board: the now-assigned Slice derives
+    /// `Wip` and leaves the Ready column, exactly as a human-claimed one does. On
+    /// failure the error carries the repo and issue for context and the board is
+    /// left unchanged.
+    pub async fn assign_agent(
+        &self,
+        repo: &RepoRef,
+        issue_number: u64,
+        agent: &AgentRef,
+    ) -> AppAction {
+        self.port
+            .assign_agent(repo, issue_number, agent)
             .await
             .map_err(|err| {
                 err.with_context("repo", repo)

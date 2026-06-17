@@ -1,7 +1,7 @@
-//! Integration test: the assign-self use-case runs against fake ports that
-//! record the assignment (success) and reject it (failure), so both the happy
-//! path and the "surface a clear error, leave the board unchanged" path are
-//! exercised without GitHub access.
+//! Integration test: the assign-agent (delegate) use-case runs against fake
+//! ports that record the delegation (success) and reject it (failure), so both
+//! the happy path and the "surface a clear error, leave the board unchanged"
+//! path are exercised without GitHub access.
 
 use std::sync::{Arc, Mutex};
 
@@ -11,11 +11,11 @@ use domain::{
     AgentRef, AppAction, AppError, AppErrorKind, AppResult, Project, RawIssue, RepoRef, Slice,
 };
 
-/// A fake that records which issue it was asked to assign, so the test can
-/// assert the use-case forwarded the right number to the port.
+/// A fake that records which issue and Agent it was asked to delegate, so the
+/// test can assert the use-case forwarded the chosen Agent to the port.
 #[derive(Default)]
 struct RecordingPort {
-    assigned: Mutex<Vec<u64>>,
+    delegated: Mutex<Vec<(u64, AgentRef)>>,
 }
 
 #[async_trait]
@@ -32,17 +32,20 @@ impl GitHubPort for RecordingPort {
         Ok(vec![])
     }
 
-    async fn assign_self(&self, _repo: &RepoRef, issue_number: u64) -> AppAction {
-        self.assigned.lock().unwrap().push(issue_number);
+    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
         Ok(())
     }
 
     async fn assign_agent(
         &self,
         _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
+        issue_number: u64,
+        agent: &AgentRef,
     ) -> AppAction {
+        self.delegated
+            .lock()
+            .unwrap()
+            .push((issue_number, agent.clone()));
         Ok(())
     }
 
@@ -55,8 +58,8 @@ impl GitHubPort for RecordingPort {
     }
 }
 
-/// A fake that always rejects the assignment, standing in for a token without
-/// permission or a vanished issue.
+/// A fake that always rejects the delegation, standing in for a token without
+/// permission or an Agent that vanished from the assignable set.
 struct FailingPort;
 
 #[async_trait]
@@ -74,9 +77,7 @@ impl GitHubPort for FailingPort {
     }
 
     async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
-        Err(AppError::forbidden(
-            "The token lacks permission to assign this issue",
-        ))
+        Ok(())
     }
 
     async fn assign_agent(
@@ -85,13 +86,13 @@ impl GitHubPort for FailingPort {
         _issue_number: u64,
         _agent: &AgentRef,
     ) -> AppAction {
-        Ok(())
+        Err(AppError::forbidden(
+            "The token lacks permission to assign this issue",
+        ))
     }
 
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
-        Err(AppError::forbidden(
-            "The token lacks permission to label this issue",
-        ))
+        Ok(())
     }
 
     async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
@@ -99,34 +100,46 @@ impl GitHubPort for FailingPort {
     }
 }
 
-#[tokio::test]
-async fn assign_self_forwards_the_issue_number_to_the_port() {
-    let port = Arc::new(RecordingPort::default());
-    let service = BoardService::new(port.clone());
-    let repo = RepoRef::new("funkode-io", "zfirot");
-
-    service
-        .assign_self(&repo, 42)
-        .await
-        .expect("the recording port should accept the assignment");
-
-    let assigned = port.assigned.lock().unwrap().clone();
-    assert_eq!(assigned, vec![42], "the use-case should assign issue #42");
+fn copilot() -> AgentRef {
+    AgentRef {
+        name: "copilot-swe-agent".to_string(),
+        node_id: "BOT_node_id".to_string(),
+    }
 }
 
 #[tokio::test]
-async fn assign_self_surfaces_a_clear_error_with_context() {
+async fn assign_agent_forwards_the_chosen_agent_to_the_port() {
+    let port = Arc::new(RecordingPort::default());
+    let service = BoardService::new(port.clone());
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let agent = copilot();
+
+    service
+        .assign_agent(&repo, 42, &agent)
+        .await
+        .expect("the recording port should accept the delegation");
+
+    let delegated = port.delegated.lock().unwrap().clone();
+    assert_eq!(
+        delegated,
+        vec![(42, agent)],
+        "the use-case should delegate issue #42 to the chosen Agent"
+    );
+}
+
+#[tokio::test]
+async fn assign_agent_surfaces_a_clear_error_with_context() {
     let service = BoardService::new(FailingPort);
     let repo = RepoRef::new("funkode-io", "zfirot");
 
     let error = service
-        .assign_self(&repo, 7)
+        .assign_agent(&repo, 7, &copilot())
         .await
-        .expect_err("a rejected assignment should surface an error");
+        .expect_err("a rejected delegation should surface an error");
 
     // The error reaches the caller as a clear, client-safe message (so the board
-    // can surface it) and is left unchanged — the use-case performs no board
-    // mutation on the failure path.
+    // can surface it) with the board left unchanged — the use-case performs no
+    // board mutation on the failure path.
     assert_eq!(error.kind(), AppErrorKind::Forbidden);
     assert_eq!(
         error.to_string(),
