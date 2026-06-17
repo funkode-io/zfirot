@@ -10,14 +10,16 @@ css:
 css-watch:
 	cd $(PRESENTATION) && npm run watch:css
 
-# Rasterise the ZF monogram (assets/logo.svg) into the bundled window icon
-# (assets/icon.png) used by the desktop window. Uses macOS QuickLook + sips, so
-# it needs no extra tooling; rerun after editing logo.svg.
+# Rasterise the ZF monogram (assets/logo.svg) into the bundled window/app icon
+# (assets/icon.png). Uses macOS QuickLook + sips, so it needs no extra tooling.
+# QuickLook flattens the SVG onto white, so round-icon-corners.py then restores
+# the transparent corners macOS expects. Rerun after editing logo.svg.
 icon:
 	cd $(PRESENTATION)/assets && \
 	qlmanage -t -s 512 -o . logo.svg >/dev/null && \
 	sips -s format png logo.svg.png --out icon.png >/dev/null && \
-	rm -f logo.svg.png
+	rm -f logo.svg.png && \
+	python3 round-icon-corners.py icon.png
 
 # Start the desktop app in dev mode (hot-reload) via the Dioxus CLI.
 # Compiles the stylesheet first so styling is up to date. Loads .env (if present)
