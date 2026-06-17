@@ -143,11 +143,10 @@ query AgentAssignIds($owner: String!, $name: String!, $number: Int!) {
 }
 "#;
 
-/// Delegate an issue to an Agent: assign the Agent and attach `agentAssignment`
-/// so GitHub starts a coding session. Unlike [`ASSIGN_MUTATION`] this keeps any
-/// existing human assignees (it adds rather than replaces) and requires the
-/// [`GRAPHQL_FEATURES_HEADER`] feature flags. The board re-polls after success,
-/// so the now-assigned Slice derives `Wip`.
+/// Delegate an issue to an Agent: extend [`ASSIGN_MUTATION`] with `agentAssignment`
+/// so GitHub starts a coding session, and send the [`GRAPHQL_FEATURES_HEADER`]
+/// feature flags. The board re-polls after success, so the now-assigned Slice
+/// derives `Wip`.
 const AGENT_ASSIGN_MUTATION: &str = r#"
 mutation AssignAgent($assignableId: ID!, $assigneeId: ID!, $repositoryId: ID!, $baseRef: String!) {
   addAssigneesToAssignable(input: {
