@@ -29,9 +29,9 @@ pub fn BoardColumn(
                     SliceCard {
                         key: "{slice.number}",
                         slice: slice.clone(),
-                        on_assign: move |number| on_assign.call(number),
+                        on_assign,
                         highlighted,
-                        on_highlight: move |number| on_highlight.call(number),
+                        on_highlight,
                     }
                 }
             }

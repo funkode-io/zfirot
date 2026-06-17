@@ -533,6 +533,13 @@ fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
     // badge can highlight its referenced card in any column. `None` when nothing
     // is hovered.
     let mut highlighted = use_signal(|| Option::<u64>::None);
+    // A single, stable handler for the highlight intent. The whole card tree
+    // shares this one generational box (forwarded by-value, never re-wrapped),
+    // so a hover/focus event arriving during the background poll's re-render
+    // never invokes a dropped box (`ValueDroppedError`). Re-creating it each
+    // render — or re-wrapping it at every relay layer — would mint a fresh box
+    // per render and reintroduce that race.
+    let on_highlight = use_callback(move |number| highlighted.set(number));
     rsx! {
         div { class: "flex flex-col gap-6",
             for lane in lanes {
@@ -540,9 +547,9 @@ fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
                     key: "{lane.prd.as_ref().map(|prd| prd.number).unwrap_or(0)}",
                     prd: lane.prd,
                     slices: lane.slices,
-                    on_assign: move |number| on_assign.call(number),
+                    on_assign,
                     highlighted: highlighted(),
-                    on_highlight: move |number| highlighted.set(number),
+                    on_highlight,
                 }
             }
         }
@@ -577,7 +584,7 @@ fn OtherIssues(
                             OtherIssueCard {
                                 key: "{issue.number}",
                                 issue: issue.clone(),
-                                on_confirm: move |payload| on_confirm.call(payload),
+                                on_confirm,
                             }
                         }
                     }
