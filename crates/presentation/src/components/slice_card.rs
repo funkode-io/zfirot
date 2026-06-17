@@ -140,11 +140,10 @@ fn AgentActionButtons(
         }
         AgentAction::Picker(agents) => rsx! {
             div { class: "dropdown dropdown-end",
-                div {
+                button {
                     class: "btn btn-xs btn-secondary",
                     tabindex: "0",
-                    role: "button",
-                    "aria-disabled": delegating,
+                    disabled: delegating,
                     if delegating {
                         span { class: "loading loading-spinner loading-xs" }
                     }
@@ -157,7 +156,7 @@ fn AgentActionButtons(
                         tabindex: "0",
                         for agent in agents {
                             li { key: "{agent.node_id}",
-                                a {
+                                button {
                                     onclick: {
                                         let agent = agent.clone();
                                         move |_| on_assign_agent.call((number, agent.clone()))

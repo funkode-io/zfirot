@@ -297,6 +297,13 @@ pub fn App() -> Element {
                 // and leaves the board unchanged.
                 let delegate_repo = repo.clone();
                 let on_assign_agent = move |(number, agent): (u64, AgentRef)| {
+                    // `delegating` tracks a single in-flight delegate. Ignore a
+                    // second one while one is active: starting it would overwrite
+                    // the marker and clear it out-of-order, re-enabling actions
+                    // while a mutation is still running.
+                    if delegating().is_some() {
+                        return;
+                    }
                     let repo = delegate_repo.clone();
                     spawn(async move {
                         delegating.set(Some(number));
