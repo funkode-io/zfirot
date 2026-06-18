@@ -118,6 +118,34 @@ async fn classify_board_derives_blocked_state_from_native_blockers() {
 }
 
 #[tokio::test]
+async fn classify_board_carries_linked_prs_onto_the_slice() {
+    let service = BoardService::new(FakeGitHubPort);
+    let repo = RepoRef::new("funkode-io", "zfirot");
+
+    let ClassifiedBoard { slices, .. } = service
+        .classify_board(&repo)
+        .await
+        .expect("fake port should classify the board");
+
+    // Issue #3 carries an open linked PR in the fake data; classify_board must
+    // copy it through onto the rendered Slice for the `pr #n @u` badge.
+    let slice3 = slices
+        .iter()
+        .find(|s| s.number == 3)
+        .expect("issue #3 should be a confirmed Slice");
+    assert_eq!(
+        slice3.linked_prs.len(),
+        1,
+        "issue #3 has one open linked PR"
+    );
+    assert_eq!(slice3.linked_prs[0].number, 12);
+    assert_eq!(
+        slice3.linked_prs[0].author.as_deref(),
+        Some("carlos-verdes")
+    );
+}
+
+#[tokio::test]
 async fn classify_board_resolves_prd_title_from_native_and_prose_parents() {
     let service = BoardService::new(FakeGitHubPort);
     let repo = RepoRef::new("funkode-io", "zfirot");

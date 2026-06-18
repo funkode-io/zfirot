@@ -38,6 +38,18 @@ _Avoid_: open, available, todo
 A Slice with an open Pull Request linked to it (via the PR's closing reference).
 _Avoid_: in progress, active, doing
 
+**Linked PR**:
+An open Pull Request that closes a Slice's issue (GitHub's closing reference).
+A Slice's open linked PRs share a dedicated row on its card, one `pr #n @u`
+badge each, where `n` is the PR number and `u` is the PR's **author** (for
+delegated work, the Agent's bot account) — on any card that has one, regardless
+of column. Closed PRs are not shown, so replacing one PR with another leaves
+only the still-open one. Clicking a badge opens that PR; hovering shows its
+title. When the Slice is **Blocked**, each PR badge carries a warning marker,
+since the PR is being worked on while the Slice still has an open dependency
+that should land first.
+_Avoid_: closing PR, the PR (a Slice may have more than one open)
+
 **Blocked**:
 A Slice with at least one open "blocked by" dependency.
 _Avoid_: waiting, stuck

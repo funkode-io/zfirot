@@ -13,7 +13,8 @@ use crate::PrdRef;
 pub enum SliceState {
     /// Blockers all closed, no open linked PR, and no assignee.
     Ready,
-    /// An open Pull Request is linked to the Slice.
+    /// An open Pull Request is linked to the Slice, or an assignee has claimed
+    /// it.
     Wip,
     /// At least one open "blocked by" dependency.
     Blocked,
@@ -79,6 +80,25 @@ pub struct DependencyRef {
     pub url: String,
 }
 
+/// A reference to an open Pull Request that closes a Slice's issue (GitHub's
+/// closing reference), for rendering a clickable `pr #n @u` badge on a card.
+/// Carries the PR number (shown on the badge), its author's login (shown as the
+/// `@u` segment, absent when GitHub cannot resolve an author), its title (shown
+/// as a tooltip), and its URL (the badge links to it on GitHub).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedPrRef {
+    /// The referenced GitHub Pull Request number.
+    pub number: u64,
+    /// The PR author's login, shown as the `@u` segment; `None` when GitHub
+    /// cannot resolve an author (e.g. a deleted account), in which case the
+    /// badge omits the `@u` segment.
+    pub author: Option<String>,
+    /// The PR's title, shown as the badge tooltip.
+    pub title: String,
+    /// The PR's URL on GitHub, for opening it in a browser.
+    pub url: String,
+}
+
 /// A read model of a GitHub issue that is a Slice of a PRD.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slice {
@@ -97,6 +117,9 @@ pub struct Slice {
     /// The issues this Slice unblocks (the reverse "blocked by" edge), for the
     /// unblocks badges. Derived across the board by [`resolve_unblocks`].
     pub unblocks: Vec<DependencyRef>,
+    /// The open Pull Requests linked to this Slice via their closing reference,
+    /// for the `pr #n @u` badges.
+    pub linked_prs: Vec<LinkedPrRef>,
 }
 
 /// Raw, GitHub-shaped facts about a single issue, before its [`SliceState`] is
@@ -115,8 +138,9 @@ pub struct RawSlice {
     pub prd: Option<PrdRef>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
-    /// `true` when an open Pull Request is linked via its closing reference.
-    pub has_open_linked_pr: bool,
+    /// The open Pull Requests linked to the issue via their closing reference.
+    /// A non-empty list makes the Slice WIP.
+    pub linked_prs: Vec<LinkedPrRef>,
     /// The still-open "blocked by" dependencies, with their references. A
     /// non-empty list makes the Slice Blocked.
     pub blockers: Vec<DependencyRef>,
@@ -138,6 +162,7 @@ impl RawSlice {
             state,
             blockers: self.blockers,
             unblocks: self.unblocks,
+            linked_prs: self.linked_prs,
         }
     }
 
@@ -156,7 +181,7 @@ impl RawSlice {
         if !self.blockers.is_empty() {
             return SliceState::Blocked;
         }
-        if self.has_open_linked_pr || self.assignee.is_some() {
+        if !self.linked_prs.is_empty() || self.assignee.is_some() {
             return SliceState::Wip;
         }
         SliceState::Ready
@@ -213,9 +238,20 @@ mod tests {
                 url: "https://github.com/funkode-io/zfirot/issues/7".to_string(),
             }),
             assignee: None,
-            has_open_linked_pr: false,
+            linked_prs: vec![],
             blockers: vec![],
             unblocks: vec![],
+        }
+    }
+
+    /// A single open linked PR reference, for exercising WIP derivation and
+    /// carry-through.
+    fn linked_pr() -> LinkedPrRef {
+        LinkedPrRef {
+            number: 200,
+            author: Some("hubot".to_string()),
+            title: "Implement the Slice".to_string(),
+            url: "https://github.com/funkode-io/zfirot/pull/200".to_string(),
         }
     }
 
@@ -240,7 +276,6 @@ mod tests {
             open_blocker_count: u64,
             expected: SliceState,
         }
-
         let cases = [
             Case {
                 name: "no blockers, no PR, no assignee -> Ready",
@@ -312,7 +347,11 @@ mod tests {
             let raw = RawSlice {
                 closed: case.closed,
                 assignee: case.assignee.map(str::to_string),
-                has_open_linked_pr: case.has_open_linked_pr,
+                linked_prs: if case.has_open_linked_pr {
+                    vec![linked_pr()]
+                } else {
+                    vec![]
+                },
                 blockers: blockers(case.open_blocker_count),
                 ..ready_raw()
             };
@@ -335,7 +374,7 @@ mod tests {
             number: 42,
             title: "Wire the thing".to_string(),
             assignee: Some("octocat".to_string()),
-            has_open_linked_pr: true,
+            linked_prs: vec![linked_pr()],
             ..ready_raw()
         };
 
@@ -350,6 +389,7 @@ mod tests {
         );
         assert_eq!(slice.assignee.as_deref(), Some("octocat"));
         assert_eq!(slice.state, SliceState::Wip);
+        assert_eq!(slice.linked_prs, vec![linked_pr()]);
     }
 
     #[test]
@@ -472,6 +512,7 @@ mod tests {
             state,
             blockers: vec![],
             unblocks: vec![],
+            linked_prs: vec![],
         }
     }
 

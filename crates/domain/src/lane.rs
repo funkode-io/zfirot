@@ -86,6 +86,7 @@ mod tests {
             state,
             blockers: vec![],
             unblocks: vec![],
+            linked_prs: vec![],
         }
     }
 

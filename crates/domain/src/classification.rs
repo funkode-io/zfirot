@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::LinkedPrRef;
+
 /// How an open GitHub issue has been classified by the two-tier strategy.
 ///
 /// - **Tier 1 (confident, automatic):** `prd` label → [`IssueClassification::Prd`];
@@ -66,8 +68,8 @@ pub struct RawIssue {
     pub native_blockers: Vec<u64>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
-    /// `true` when an open Pull Request is linked via its closing reference.
-    pub has_open_linked_pr: bool,
+    /// The open Pull Requests linked to the issue via their closing reference.
+    pub linked_prs: Vec<LinkedPrRef>,
     /// `true` when this issue is a native sub-issue child of an issue that
     /// carries the `prd` label.
     pub is_native_child_of_prd: bool,
@@ -208,7 +210,7 @@ mod tests {
             native_parent: None,
             native_blockers: Vec::new(),
             assignee: None,
-            has_open_linked_pr: false,
+            linked_prs: Vec::new(),
             is_native_child_of_prd: false,
         }
     }

@@ -2,7 +2,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AgentRef, AppAction, AppError, AppResult, Project, RawIssue, RepoRef};
+use domain::{AgentRef, AppAction, AppError, AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 
@@ -28,7 +28,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         assignees(first: 1) { nodes { login } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number state } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } } }
       }
     }
   }
@@ -1095,11 +1095,20 @@ fn node_into_project(node: RepositoryNode) -> Project {
 /// `prd`-labelled parent), still-open native blockers, assignee, and linked-PR
 /// state. The cross-issue prose resolution is left to `classify_board`.
 fn map_issue_raw(node: RawIssueNode) -> RawIssue {
-    let has_open_linked_pr = node
+    // `includeClosedPrs: false` means every returned node is an open linked PR,
+    // so each maps straight to a `LinkedPrRef`. A null `author` (e.g. a deleted
+    // account) leaves the `@u` segment off the badge.
+    let linked_prs = node
         .closed_by_pull_requests_references
         .nodes
-        .iter()
-        .any(|pr| pr.state == "OPEN");
+        .into_iter()
+        .map(|pr| LinkedPrRef {
+            number: pr.number,
+            author: pr.author.map(|author| author.login),
+            title: pr.title,
+            url: pr.url,
+        })
+        .collect();
 
     let native_parent = node.parent.as_ref().map(|parent| parent.number);
     let is_native_child_of_prd = node
@@ -1143,7 +1152,7 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
             .into_iter()
             .next()
             .map(|user| user.login),
-        has_open_linked_pr,
+        linked_prs,
         is_native_child_of_prd,
     }
 }
@@ -1217,15 +1226,22 @@ struct Login {
 }
 
 #[derive(Deserialize)]
-struct StateConnection {
-    nodes: Vec<StateNode>,
+struct LinkedPrConnection {
+    nodes: Vec<LinkedPrNode>,
 }
 
 #[derive(Deserialize)]
-struct StateNode {
-    state: String,
+struct LinkedPrNode {
+    number: u64,
+    url: String,
+    title: String,
+    author: Option<AuthorNode>,
 }
 
+#[derive(Deserialize)]
+struct AuthorNode {
+    login: String,
+}
 // ── Issues-for-classification query (open and closed) ────────────────────────
 
 #[derive(Deserialize)]
@@ -1263,7 +1279,7 @@ struct RawIssueNode {
     assignees: LoginConnection,
     parent: Option<ParentIssueNode>,
     blocked_by: BlockerConnection,
-    closed_by_pull_requests_references: StateConnection,
+    closed_by_pull_requests_references: LinkedPrConnection,
 }
 
 #[derive(Deserialize)]

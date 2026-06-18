@@ -378,7 +378,7 @@ impl<P: GitHubPort> BoardService<P> {
                         closed: false,
                         prd,
                         assignee: raw.assignee,
-                        has_open_linked_pr: raw.has_open_linked_pr,
+                        linked_prs: raw.linked_prs,
                         blockers,
                         // Filled by `resolve_unblocks` once the board is mapped.
                         unblocks: Vec::new(),
