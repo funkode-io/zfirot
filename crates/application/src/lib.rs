@@ -17,9 +17,6 @@ use domain::{
 /// returning canned data, with no network access.
 #[async_trait]
 pub trait GitHubPort: Send + Sync {
-    /// Load the Slices that make up a project's board.
-    async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>>;
-
     /// Load the project's issues as raw, GitHub-shaped data, including closed
     /// ones.
     ///
@@ -61,10 +58,6 @@ pub trait GitHubPort: Send + Sync {
 /// `Arc<dyn GitHubPort>` to a [`BoardService`] (and clone it into contexts).
 #[async_trait]
 impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
-    async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        (**self).load_board(repo).await
-    }
-
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         (**self).load_issues(repo).await
     }
@@ -231,14 +224,6 @@ pub struct BoardService<P: GitHubPort> {
 impl<P: GitHubPort> BoardService<P> {
     pub fn new(port: P) -> Self {
         Self { port }
-    }
-
-    /// Load the board for a project.
-    pub async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        self.port
-            .load_board(repo)
-            .await
-            .map_err(|err| err.with_context("repo", repo))
     }
 
     /// Assign the authenticated user to a Ready Slice, claiming it on GitHub.

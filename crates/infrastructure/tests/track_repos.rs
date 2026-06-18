@@ -1,6 +1,6 @@
 use application::{GitHubPort, ProjectStorePort, TrackedProjectsService};
 use async_trait::async_trait;
-use domain::{AgentRef, AppAction, AppError, AppResult, Project, RawIssue, RepoRef, Slice};
+use domain::{AgentRef, AppAction, AppError, AppResult, Project, RawIssue, RepoRef};
 use infrastructure::FakeProjectStore;
 use std::sync::Arc;
 
@@ -79,10 +79,6 @@ struct StubGitHubPort {
 
 #[async_trait]
 impl GitHubPort for StubGitHubPort {
-    async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        Ok(Vec::new())
-    }
-
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         if self.accessible {
             Ok(Vec::new())

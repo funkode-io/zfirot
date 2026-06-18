@@ -1,47 +1,12 @@
-//! The real [`GitHubPort`] adapter: one GraphQL query per board load.
-//!
-//! Relationships are read from GitHub's **native** links first — the sub-issue
-//! `parent` for the PRD, and `blockedBy` dependencies for the Blocked state —
-//! and fall back to parsing the issue body's `## Parent` / `## Blocked by` prose
-//! when those native links are absent. Prose references are resolved against the
-//! issues fetched in the same load, so a prose parent yields the real PRD title
-//! and only prose blockers that are still open count toward Blocked. The HTTP
-//! boundary is kept thin; the payload projection lives in the pure
-//! [`parse_response`] / [`resolve_board`] functions so it is testable offline.
+//! The real [`GitHubPort`] adapter: one GraphQL query per board-classification load.
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{
-    parse_prose, AgentRef, AppAction, AppError, AppResult, DependencyRef, PrdRef, Project,
-    ProseLinks, RawIssue, RawSlice, RepoRef, Slice,
-};
+use domain::{AgentRef, AppAction, AppError, AppResult, Project, RawIssue, RepoRef};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
-
-/// One page of issues, with the native relationships the board derives state
-/// from. `states: OPEN` because the board never shows Done (closed) Slices.
-const BOARD_QUERY: &str = r#"
-query Board($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    issues(first: 50, after: $cursor, states: OPEN, orderBy: {field: CREATED_AT, direction: ASC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        number
-        title
-        url
-        body
-        assignees(first: 1) { nodes { login } }
-        parent { number title url }
-        blockedBy(first: 50) { nodes { number title url state } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
-      }
-    }
-  }
-}
-"#;
 
 /// One page of issues for classification: **open and closed**, with the labels,
 /// native relationships, and linked-PR state the two-tier classifier needs.
@@ -244,37 +209,6 @@ impl GitHubClient {
         Ok(Self {
             http,
             endpoint: GITHUB_GRAPHQL_URL.to_string(),
-        })
-    }
-
-    /// Fetch a single page of issues for `repo`, starting after `cursor`.
-    async fn fetch_page(&self, repo: &RepoRef, cursor: Option<&str>) -> AppResult<String> {
-        let body = serde_json::json!({
-            "query": BOARD_QUERY,
-            "variables": { "owner": repo.owner, "name": repo.name, "cursor": cursor },
-        });
-
-        let response = self
-            .http
-            .post(&self.endpoint)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| {
-                AppError::unavailable("Could not reach GitHub")
-                    .with_operation("GitHubClient::fetch_page")
-                    .with_source(err)
-            })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(status_error(status, &response, "GitHubClient::fetch_page"));
-        }
-
-        response.text().await.map_err(|err| {
-            AppError::unavailable("Could not read GitHub's response")
-                .with_operation("GitHubClient::fetch_page")
-                .with_source(err)
         })
     }
 
@@ -621,26 +555,6 @@ impl GitHubClient {
 
 #[async_trait]
 impl GitHubPort for GitHubClient {
-    async fn load_board(&self, repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        let mut issues = Vec::new();
-        let mut cursor: Option<String> = None;
-
-        loop {
-            let body = self.fetch_page(repo, cursor.as_deref()).await?;
-            let (page, next) = parse_response(&body)?;
-            issues.extend(page);
-            match next {
-                Some(end) => cursor = Some(end),
-                None => break,
-            }
-        }
-
-        Ok(resolve_board(issues)
-            .into_iter()
-            .map(RawSlice::into_slice)
-            .collect())
-    }
-
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         let mut issues = Vec::new();
         let mut cursor: Option<String> = None;
@@ -739,66 +653,9 @@ fn status_error(
     }
 }
 
-/// Parse a GraphQL response body into a page of [`IssueData`]s and the cursor of
-/// the next page (if any). Pure and offline: the primary test seam. Prose
-/// references are resolved later by [`resolve_board`], once every page is in.
-pub fn parse_response(body: &str) -> AppResult<(Vec<IssueData>, Option<String>)> {
-    let response: GraphQlResponse = serde_json::from_str(body).map_err(|err| {
-        AppError::internal("GitHub returned a malformed response")
-            .with_operation("parse_response")
-            .with_source(err)
-    })?;
-
-    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
-        let not_found = errors.iter().any(|error| {
-            error.error_type.as_deref() == Some("NOT_FOUND")
-                || error
-                    .message
-                    .to_lowercase()
-                    .contains("could not resolve to a repository")
-        });
-        let message = errors
-            .into_iter()
-            .map(|error| error.message)
-            .collect::<Vec<_>>()
-            .join("; ");
-        let lowered = message.to_lowercase();
-        // A repository GitHub reports via the `errors` array (e.g. private or
-        // renamed) is still a NotFound, not an Internal failure.
-        let error = if not_found {
-            AppError::not_found("Repository not found or not visible to the token")
-        } else if lowered.contains("rate limit") {
-            AppError::rate_limited("GitHub rate limit exceeded")
-        } else {
-            AppError::internal("GitHub reported a query error")
-        };
-        return Err(error
-            .with_operation("parse_response")
-            .with_context("errors", message));
-    }
-
-    let repository = response
-        .data
-        .and_then(|data| data.repository)
-        .ok_or_else(|| {
-            AppError::not_found("Repository not found or not visible to the token")
-                .with_operation("parse_response")
-        })?;
-
-    let issues = repository.issues;
-    let raw = issues.nodes.into_iter().map(map_issue).collect();
-    let next = if issues.page_info.has_next_page {
-        issues.page_info.end_cursor
-    } else {
-        None
-    };
-
-    Ok((raw, next))
-}
-
 /// Parse a GraphQL issues response into a page of [`RawIssue`]s and the cursor
 /// of the next page (if any), for the two-tier classifier. Pure and offline:
-/// the test seam for `load_issues`. Unlike [`parse_response`], every issue maps
+/// the test seam for `load_issues`. Every issue maps
 /// directly to a [`RawIssue`] (open/closed, labels, native links, linked-PR
 /// state); the cross-issue prose resolution stays in `classify_board`.
 pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<String>)> {
@@ -853,7 +710,7 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
 }
 
 /// Parse a GraphQL projects response into a page of [`Project`]s and the cursor
-/// of the next page (if any). Pure and offline, mirroring [`parse_response`].
+/// of the next page (if any). Pure and offline.
 pub fn parse_projects_response(body: &str) -> AppResult<(Vec<Project>, Option<String>)> {
     let response: ProjectsResponse = serde_json::from_str(body).map_err(|err| {
         AppError::internal("GitHub returned a malformed response")
@@ -1233,129 +1090,6 @@ fn node_into_project(node: RepositoryNode) -> Project {
     }
 }
 
-/// Resolve native-or-prose relationships across a whole board into [`RawSlice`]s.
-///
-/// Native links win; when an issue has none, its parsed prose references are
-/// resolved against the issues fetched in the same load: a prose parent yields
-/// that issue's identity (number, title, url) for the PRD lane, and a prose
-/// blocker counts toward Blocked only if it is still open (open issues are the
-/// only ones in the fetched set).
-pub fn resolve_board(issues: Vec<IssueData>) -> Vec<RawSlice> {
-    let open_numbers: HashSet<u64> = issues.iter().map(|issue| issue.number).collect();
-    let prd_by_number: HashMap<u64, PrdRef> = issues
-        .iter()
-        .map(|issue| {
-            (
-                issue.number,
-                PrdRef {
-                    number: issue.number,
-                    title: issue.title.clone(),
-                    url: issue.url.clone(),
-                },
-            )
-        })
-        .collect();
-
-    let mut raws: Vec<RawSlice> = issues
-        .into_iter()
-        .map(|issue| resolve_issue(issue, &open_numbers, &prd_by_number))
-        .collect();
-    // The reverse "unblocks" edge is derived across the whole board once every
-    // Slice's blockers are resolved.
-    domain::resolve_unblocks(&mut raws);
-    raws
-}
-
-/// Project one [`IssueData`] into a [`RawSlice`], preferring native links and
-/// falling back to its prose references resolved against the fetched board.
-fn resolve_issue(
-    issue: IssueData,
-    open_numbers: &HashSet<u64>,
-    prd_by_number: &HashMap<u64, PrdRef>,
-) -> RawSlice {
-    let prd = match issue.native_parent {
-        Some(parent) => Some(parent),
-        None => issue
-            .prose
-            .parent
-            .and_then(|number| prd_by_number.get(&number).cloned()),
-    };
-
-    let open_blocker_refs = if issue.native_blockers.is_empty() {
-        // No native blockers: fall back to the parsed prose, resolving each
-        // still-open blocker number to its ref (with title) against the board.
-        issue
-            .prose
-            .blocked_by
-            .iter()
-            .filter(|number| open_numbers.contains(number))
-            .filter_map(|number| {
-                prd_by_number.get(number).map(|prd| DependencyRef {
-                    number: *number,
-                    title: prd.title.clone(),
-                    url: prd.url.clone(),
-                })
-            })
-            .collect()
-    } else {
-        // Native links win: keep only the still-open blockers, with their refs.
-        issue
-            .native_blockers
-            .iter()
-            .filter(|blocker| blocker.state.as_str() == "OPEN")
-            .map(|blocker| DependencyRef {
-                number: blocker.number,
-                title: blocker.title.clone(),
-                url: blocker.url.clone(),
-            })
-            .collect()
-    };
-
-    RawSlice {
-        number: issue.number,
-        title: issue.title,
-        url: issue.url,
-        closed: false,
-        prd,
-        assignee: issue.assignee,
-        has_open_linked_pr: issue.has_open_linked_pr,
-        blockers: open_blocker_refs,
-        // Filled by `resolve_unblocks` once the whole board is mapped.
-        unblocks: Vec::new(),
-    }
-}
-
-/// Project one GraphQL issue node into a [`IssueData`]: its native facts plus the
-/// prose relationships parsed from its body, to be resolved by [`resolve_board`].
-/// Only open issues are queried, so a closed issue never reaches this mapping.
-fn map_issue(node: IssueNode) -> IssueData {
-    let has_open_linked_pr = node
-        .closed_by_pull_requests_references
-        .nodes
-        .iter()
-        .any(|pr| pr.state == "OPEN");
-
-    IssueData {
-        number: node.number,
-        title: node.title,
-        url: node.url,
-        assignee: node
-            .assignees
-            .nodes
-            .into_iter()
-            .next()
-            .map(|user| user.login),
-        has_open_linked_pr,
-        native_parent: node.parent.map(|parent| PrdRef {
-            number: parent.number,
-            title: parent.title,
-            url: parent.url,
-        }),
-        native_blockers: node.blocked_by.nodes,
-        prose: parse_prose(&node.body),
-    }
-}
-
 /// Project one GraphQL issue node into a [`RawIssue`] for the two-tier
 /// classifier: open/closed, labels, native parent number (and whether it is a
 /// `prd`-labelled parent), still-open native blockers, assignee, and linked-PR
@@ -1414,26 +1148,6 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
     }
 }
 
-/// A single issue's native facts plus the prose relationships parsed from its
-/// body, before references are resolved against the rest of the board.
-#[derive(Debug)]
-pub struct IssueData {
-    number: u64,
-    title: String,
-    url: String,
-    assignee: Option<String>,
-    has_open_linked_pr: bool,
-    native_parent: Option<PrdRef>,
-    native_blockers: Vec<BoardBlocker>,
-    prose: ProseLinks,
-}
-
-#[derive(Deserialize)]
-struct GraphQlResponse {
-    data: Option<ResponseData>,
-    errors: Option<Vec<GraphQlError>>,
-}
-
 #[derive(Deserialize)]
 struct GraphQlError {
     message: String,
@@ -1486,40 +1200,10 @@ struct MutationResponse {
 }
 
 #[derive(Deserialize)]
-struct ResponseData {
-    repository: Option<RepositoryData>,
-}
-
-#[derive(Deserialize)]
-struct RepositoryData {
-    issues: IssueConnection,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueConnection {
-    page_info: PageInfo,
-    nodes: Vec<IssueNode>,
-}
-
-#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PageInfo {
     has_next_page: bool,
     end_cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueNode {
-    number: u64,
-    title: String,
-    url: String,
-    body: String,
-    assignees: LoginConnection,
-    parent: Option<ParentIssue>,
-    blocked_by: BoardBlockerConnection,
-    closed_by_pull_requests_references: StateConnection,
 }
 
 #[derive(Deserialize)]
@@ -1533,34 +1217,12 @@ struct Login {
 }
 
 #[derive(Deserialize)]
-struct ParentIssue {
-    number: u64,
-    title: String,
-    url: String,
-}
-
-#[derive(Deserialize)]
 struct StateConnection {
     nodes: Vec<StateNode>,
 }
 
 #[derive(Deserialize)]
 struct StateNode {
-    state: String,
-}
-
-/// A native `blockedBy` dependency on the board query, with the reference the
-/// blocker badges link to plus the state used to drop closed blockers.
-#[derive(Deserialize)]
-struct BoardBlockerConnection {
-    nodes: Vec<BoardBlocker>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BoardBlocker {
-    number: u64,
-    title: String,
-    url: String,
     state: String,
 }
 

@@ -168,10 +168,10 @@ mod tests {
     #[test]
     fn debug_includes_operation_and_context() {
         let err = AppError::not_found("Slice does not exist")
-            .with_operation("BoardService::load_board")
+            .with_operation("BoardService::classify_board")
             .with_context("repo", "funkode-io/zfirot");
         let debug = format!("{err:?}");
-        assert!(debug.contains("BoardService::load_board"));
+        assert!(debug.contains("BoardService::classify_board"));
         assert!(debug.contains("funkode-io/zfirot"));
     }
 }

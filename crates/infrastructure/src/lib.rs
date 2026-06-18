@@ -7,31 +7,24 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{
-    AgentRef, AppResult, DependencyRef, PrdRef, Project, RawIssue, RawSlice, RepoRef, Slice,
-};
+use domain::{AgentRef, AppResult, Project, RawIssue, RepoRef};
 
 mod github;
 mod project_store;
 mod secure_store;
 
 pub use github::{
-    parse_issues_response, parse_projects_response, parse_response,
-    parse_suggested_actors_response, resolve_board, GitHubClient,
+    parse_issues_response, parse_projects_response, parse_suggested_actors_response, GitHubClient,
 };
 pub use project_store::{FakeProjectStore, FileProjectStore};
 pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
 
-/// A fake [`GitHubPort`] that returns a fixed set of Slices and raw issues.
+/// A fake [`GitHubPort`] that returns a fixed set of raw issues.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FakeGitHubPort;
 
 #[async_trait]
 impl GitHubPort for FakeGitHubPort {
-    async fn load_board(&self, _repo: &RepoRef) -> AppResult<Vec<Slice>> {
-        Ok(sample_slices())
-    }
-
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(sample_raw_issues())
     }
@@ -84,18 +77,6 @@ pub fn sample_projects() -> Vec<Project> {
             "2024-03-20T18:45:00Z".to_string(),
         ),
     ]
-}
-
-/// Canned board Slices spanning every state, derived from raw GitHub-shaped data
-/// so the fake exercises the same `SliceState` derivation as the real adapter
-/// will. A closed (Done) issue is included; the board hides Done by rendering
-/// only [`SliceState::BOARD`], while the data is retained for future use.
-pub fn sample_slices() -> Vec<Slice> {
-    let mut raws = sample_raw_slices();
-    // Derive the reverse "unblocks" edge across the fake board, mirroring the
-    // real adapter, so the token-less preview shows both badge directions.
-    domain::resolve_unblocks(&mut raws);
-    raws.into_iter().map(RawSlice::into_slice).collect()
 }
 
 /// Canned raw issues for the fake, covering all classification tiers:
@@ -227,124 +208,6 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             assignee: Some("carlos-verdes".to_string()),
             has_open_linked_pr: false,
             is_native_child_of_prd: true,
-        },
-    ]
-}
-
-/// Raw, GitHub-shaped issues for the fake, covering every derived state plus a
-/// Done (closed) issue that must be hidden from the board. Slices span two PRDs
-/// and one no-PRD issue, so the swimlane grouping is demonstrable in a
-/// token-less preview.
-fn sample_raw_slices() -> Vec<RawSlice> {
-    let dashboard = Some(PrdRef {
-        number: 1,
-        title: "Zfirot desktop dashboard".to_string(),
-        url: "https://github.com/funkode-io/zfirot/issues/1".to_string(),
-    });
-    let freshness = Some(PrdRef {
-        number: 8,
-        title: "Board freshness and live updates".to_string(),
-        url: "https://github.com/funkode-io/zfirot/issues/8".to_string(),
-    });
-    vec![
-        // Ready: no blockers, no PR, no assignee. It blocks #6, so it shows an
-        // "unblocks" badge once the reverse edge is derived.
-        RawSlice {
-            number: 4,
-            title: "Live GitHub read: real board for a hardcoded repo".to_string(),
-            url: "https://github.com/funkode-io/zfirot/issues/4".to_string(),
-            closed: false,
-            prd: dashboard.clone(),
-            assignee: None,
-            has_open_linked_pr: false,
-            blockers: vec![],
-            unblocks: vec![],
-        },
-        RawSlice {
-            number: 5,
-            title: "Two-tier issue classification".to_string(),
-            url: "https://github.com/funkode-io/zfirot/issues/5".to_string(),
-            closed: false,
-            prd: dashboard.clone(),
-            assignee: None,
-            has_open_linked_pr: false,
-            blockers: vec![],
-            unblocks: vec![],
-        },
-        // WIP: an open Pull Request is linked.
-        RawSlice {
-            number: 3,
-            title: "Derive SliceState as a pure domain function".to_string(),
-            url: "https://github.com/funkode-io/zfirot/issues/3".to_string(),
-            closed: false,
-            prd: dashboard.clone(),
-            assignee: Some("carlos-verdes".to_string()),
-            has_open_linked_pr: true,
-            blockers: vec![],
-            unblocks: vec![],
-        },
-        // Blocked: blocked by the Ready Slice #4. Belongs to the second PRD, so
-        // it appears in its own swimlane.
-        RawSlice {
-            number: 6,
-            title: "PAT authentication via the OS secure store".to_string(),
-            url: "https://github.com/funkode-io/zfirot/issues/6".to_string(),
-            closed: false,
-            prd: freshness.clone(),
-            assignee: None,
-            has_open_linked_pr: false,
-            blockers: vec![DependencyRef {
-                number: 4,
-                title: "Live GitHub read: real board for a hardcoded repo".to_string(),
-                url: "https://github.com/funkode-io/zfirot/issues/4".to_string(),
-            }],
-            unblocks: vec![],
-        },
-        RawSlice {
-            number: 7,
-            title: "Home screen: recent projects, reopen last".to_string(),
-            url: "https://github.com/funkode-io/zfirot/issues/7".to_string(),
-            closed: false,
-            prd: freshness.clone(),
-            assignee: None,
-            has_open_linked_pr: false,
-            blockers: vec![
-                DependencyRef {
-                    number: 5,
-                    title: "Two-tier issue classification".to_string(),
-                    url: "https://github.com/funkode-io/zfirot/issues/5".to_string(),
-                },
-                DependencyRef {
-                    number: 6,
-                    title: "PAT authentication via the OS secure store".to_string(),
-                    url: "https://github.com/funkode-io/zfirot/issues/6".to_string(),
-                },
-            ],
-            unblocks: vec![],
-        },
-        // No PRD: lands in the trailing "No PRD" lane.
-        RawSlice {
-            number: 11,
-            title: "Spike: evaluate Dioxus signals for live refresh".to_string(),
-            url: "https://github.com/funkode-io/zfirot/issues/11".to_string(),
-            closed: false,
-            prd: None,
-            assignee: None,
-            has_open_linked_pr: false,
-            blockers: vec![],
-            unblocks: vec![],
-        },
-        // Done: closed, so hidden from the board.
-        RawSlice {
-            number: 2,
-            title: "Walking skeleton".to_string(),
-            url: "https://github.com/funkode-io/zfirot/issues/2".to_string(),
-            closed: true,
-            prd: dashboard,
-            assignee: Some("carlos-verdes".to_string()),
-            has_open_linked_pr: false,
-            blockers: vec![],
-            unblocks: vec![],
         },
     ]
 }
