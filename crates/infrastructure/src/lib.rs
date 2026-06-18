@@ -7,7 +7,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AgentRef, AppResult, Project, RawIssue, RepoRef};
+use domain::{AgentRef, AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
 
 mod github;
 mod project_store;
@@ -103,7 +103,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![],
             assignee: None,
-            has_open_linked_pr: false,
+            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Tier-1: confirmed Slice (ready-for-agent label) ──────────────────
@@ -122,7 +122,12 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: Some(1),
             native_blockers: vec![],
             assignee: Some("carlos-verdes".to_string()),
-            has_open_linked_pr: true,
+            linked_prs: vec![LinkedPrRef {
+                number: 12,
+                author: Some("carlos-verdes".to_string()),
+                title: "Derive SliceState as a pure domain function".to_string(),
+                url: "https://github.com/funkode-io/zfirot/pull/12".to_string(),
+            }],
             is_native_child_of_prd: true,
         },
         // ── Tier-1: confirmed Slice (slice label, prose parent fallback) ─────
@@ -142,7 +147,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![3],
             assignee: None,
-            has_open_linked_pr: false,
+            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Tier-2: suggested PRD (no label, but PRD headings) ───────────────
@@ -160,7 +165,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![],
             assignee: None,
-            has_open_linked_pr: false,
+            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Tier-2: suggested Slice (no label, but Slice headings) ───────────
@@ -178,7 +183,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![],
             assignee: None,
-            has_open_linked_pr: false,
+            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Tier-3: unclassified ─────────────────────────────────────────────
@@ -192,7 +197,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![],
             assignee: None,
-            has_open_linked_pr: false,
+            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Closed: omitted by classify_board ────────────────────────────────
@@ -206,7 +211,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: Some(1),
             native_blockers: vec![],
             assignee: Some("carlos-verdes".to_string()),
-            has_open_linked_pr: false,
+            linked_prs: vec![],
             is_native_child_of_prd: true,
         },
     ]

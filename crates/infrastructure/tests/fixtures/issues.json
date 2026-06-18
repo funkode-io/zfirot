@@ -72,7 +72,18 @@
             "closedByPullRequestsReferences": {
               "nodes": [
                 {
-                  "state": "OPEN"
+                  "number": 12,
+                  "url": "https://github.com/funkode-io/zfirot/pull/12",
+                  "title": "Implement SliceState derivation",
+                  "author": {
+                    "login": "carlos-verdes"
+                  }
+                },
+                {
+                  "number": 13,
+                  "url": "https://github.com/funkode-io/zfirot/pull/13",
+                  "title": "Follow-up tweak",
+                  "author": null
                 }
               ]
             }

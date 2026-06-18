@@ -30,6 +30,7 @@ pub fn SliceCard(
 ) -> Element {
     let number = slice.number;
     let is_ready = slice.state == SliceState::Ready;
+    let is_blocked = slice.state == SliceState::Blocked;
     let is_highlighted = highlighted == Some(number);
     let is_delegating = delegating == Some(number);
 
@@ -79,6 +80,26 @@ pub fn SliceCard(
                                 action: agent_action(&agents),
                                 delegating: is_delegating,
                                 on_assign_agent,
+                            }
+                        }
+                    }
+                }
+                if !slice.linked_prs.is_empty() {
+                    div { class: "flex flex-wrap items-center gap-1 mt-2",
+                        for pr in slice.linked_prs.clone() {
+                            a {
+                                key: "{pr.number}",
+                                class: "tooltip tooltip-top badge badge-sm badge-outline link link-hover",
+                                "data-tip": "{pr.title}",
+                                href: "{pr.url}",
+                                if is_blocked {
+                                    span { class: "icon-[lucide--triangle-alert] text-warning size-3" }
+                                }
+                                if let Some(author) = pr.author {
+                                    "pr #{pr.number} @{author}"
+                                } else {
+                                    "pr #{pr.number}"
+                                }
                             }
                         }
                     }

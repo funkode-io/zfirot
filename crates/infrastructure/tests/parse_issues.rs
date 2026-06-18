@@ -37,13 +37,23 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
 
     // A native child of the PRD: parent number resolved, parent is `prd`, and
     // an empty body maps to `None`. Its one native blocker is CLOSED, so it is
-    // dropped from `native_blockers`. An open linked PR is detected.
+    // dropped from `native_blockers`. Two open linked PRs are lifted, one with a
+    // resolved author and one with a null author (no login).
     let child = issue_by_number(&issues, 3);
     assert_eq!(child.native_parent, Some(1));
     assert!(child.is_native_child_of_prd);
     assert_eq!(child.body, None);
     assert_eq!(child.native_blockers, Vec::<u64>::new());
-    assert!(child.has_open_linked_pr);
+    assert_eq!(child.linked_prs.len(), 2);
+    assert_eq!(child.linked_prs[0].number, 12);
+    assert_eq!(child.linked_prs[0].author.as_deref(), Some("carlos-verdes"));
+    assert_eq!(child.linked_prs[0].title, "Implement SliceState derivation");
+    assert_eq!(
+        child.linked_prs[0].url,
+        "https://github.com/funkode-io/zfirot/pull/12"
+    );
+    assert_eq!(child.linked_prs[1].number, 13);
+    assert_eq!(child.linked_prs[1].author, None);
     assert_eq!(child.assignee.as_deref(), Some("carlos-verdes"));
 
     // A `slice`-labelled issue: only the OPEN native blocker (#3) is kept; the
@@ -52,7 +62,7 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     assert_eq!(slice.labels, vec!["slice".to_string()]);
     assert_eq!(slice.native_blockers, vec![3]);
     assert_eq!(slice.native_parent, None);
-    assert!(!slice.has_open_linked_pr);
+    assert!(slice.linked_prs.is_empty());
 
     // An unlabeled issue stays label-free for the heuristic tier.
     let unlabeled = issue_by_number(&issues, 9);
