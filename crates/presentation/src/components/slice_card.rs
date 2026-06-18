@@ -86,7 +86,7 @@ pub fn SliceCard(
                 }
                 if !slice.linked_prs.is_empty() {
                     div { class: "flex flex-wrap items-center gap-1 mt-2",
-                        for pr in slice.linked_prs.clone() {
+                        for pr in slice.linked_prs.iter() {
                             a {
                                 key: "{pr.number}",
                                 class: "tooltip tooltip-top badge badge-sm badge-outline link link-hover",
@@ -95,7 +95,7 @@ pub fn SliceCard(
                                 if is_blocked {
                                     span { class: "icon-[lucide--triangle-alert] text-warning size-3" }
                                 }
-                                if let Some(author) = pr.author {
+                                if let Some(author) = &pr.author {
                                     "pr #{pr.number} @{author}"
                                 } else {
                                     "pr #{pr.number}"
