@@ -45,3 +45,13 @@ pub fn state_badge_class(state: SliceState) -> &'static str {
         SliceState::Done => "badge-neutral",
     }
 }
+
+/// daisyUI background color class for a status dot (dot + label header).
+pub fn state_dot_color(state: SliceState) -> &'static str {
+    match state {
+        SliceState::Ready => "bg-success",
+        SliceState::Wip => "bg-warning",
+        SliceState::Blocked => "bg-error",
+        SliceState::Done => "bg-neutral",
+    }
+}
