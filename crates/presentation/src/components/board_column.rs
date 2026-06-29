@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use domain::{AgentRef, Slice, SliceState};
 
-use super::SliceCard;
+use super::{state_dot_color, SliceCard};
 
 /// A single board column for one [`SliceState`], listing its Slices.
 ///
@@ -14,7 +14,6 @@ use super::SliceCard;
 pub fn BoardColumn(
     state: SliceState,
     label: String,
-    badge_class: String,
     slices: Vec<Slice>,
     agents: Vec<AgentRef>,
     on_assign: EventHandler<u64>,
@@ -24,12 +23,18 @@ pub fn BoardColumn(
     on_highlight: EventHandler<Option<u64>>,
 ) -> Element {
     rsx! {
-        div { class: "bg-base-100 rounded-box p-3",
-            div { class: "flex items-center justify-between mb-3",
-                h2 { class: "font-semibold", "{label}" }
-                span { class: "badge {badge_class}", "{slices.len()}" }
+        div { class: "flex flex-col gap-2",
+            // GitHub Projects–style column header: status dot + label + count pill
+            div { class: "flex items-center gap-2",
+                span {
+                    class: "{state_dot_color(state)} size-2 rounded-full shrink-0",
+                    title: "{label}",
+                }
+                h3 { class: "font-medium text-sm leading-tight", "{label}" }
+                span { class: "badge badge-sm badge-ghost", "{slices.len()}" }
             }
-            div { class: "flex flex-col gap-2",
+            // Bordered, theme-surfaced container for the cards
+            div { class: "border border-base-300 bg-base-100 rounded-box p-2 flex flex-col gap-2",
                 for slice in slices {
                     SliceCard {
                         key: "{slice.number}",

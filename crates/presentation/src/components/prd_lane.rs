@@ -82,7 +82,6 @@ pub fn PrdLane(
                         BoardColumn {
                             state,
                             label: state_label(state).to_string(),
-                            badge_class: state_badge_class(state).to_string(),
                             slices: bucket,
                             agents: agents.clone(),
                             on_assign,
