@@ -39,3 +39,20 @@ Load this when creating branches, committing, or opening PRs.
 - The PR title MUST be a valid Conventional Commit (e.g.
   `feat(presentation): …`, `fix(domain): …`), because the squash-merge commit
   message is derived from it.
+
+## When creating a pull request
+
+- Title MUST be Conventional Commits (the squash merge derives the commit
+  message from it), e.g. `feat(presentation): render linked PRs`,
+  `fix(domain): guard nil parent`.
+- Body must reference the GitHub issue it addresses so reviewers can follow
+  context and so GitHub closes the issue on merge. Use one of:
+  - **Single issue / single commit:** close the ticket with `Closes #NN` (also,
+    mention that same number in the title, e.g. `… (#79)`).
+  - **Multiple issues** (merged work): list them as bullet points and close
+    each explicitly: `- Closes #NN`, `- Closes #MM`. Do not use a blanket
+    `Closes #NN-MM` if it spans unrelated tickets.
+- Include:
+  1. **What changed:** briefly map each layer touched.
+  2. **Acceptance criteria checklist** (if the issue had one) with `[x]` marks,
+     so reviewers can verify completeness at a glance.
