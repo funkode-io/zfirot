@@ -27,6 +27,11 @@ dist/
 # Node / Tailwind toolchain
 node_modules/
 
+# Generated stylesheet: dx (Dioxus 0.7) auto-runs the Tailwind watcher on
+# serve/bundle; `make css` regenerates it for plain `cargo run`. Source of truth
+# is crates/presentation/tailwind.css.
+crates/presentation/assets/tailwind.css
+
 # Local environment (GITHUB_TOKEN etc.); .env.example is committed
 .env
 

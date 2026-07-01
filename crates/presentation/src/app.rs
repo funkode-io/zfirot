@@ -23,7 +23,9 @@ use crate::state::{
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
-/// Build it with `make css` (runs `npm run build:css` in crates/presentation).
+/// `dx serve` / `dx bundle` (Dioxus 0.7) auto-generate it from
+/// `crates/presentation/tailwind.css`; for plain `cargo run`, `make css`
+/// regenerates it. The generated file is untracked (see .gitignore).
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 /// What the root renders once the stored token has been resolved.
