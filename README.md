@@ -8,13 +8,16 @@ backend — and visualises each board's PRD, lanes, and slices. Built with
 
 - **macOS** (Apple Silicon or Intel). Other platforms are untested.
 - [Rust](https://rustup.rs/) (stable toolchain).
-- [Node.js](https://nodejs.org/) — used to compile the Tailwind/daisyUI stylesheet.
 - The [Dioxus CLI](https://dioxuslabs.com/learn/0.7/getting_started/) (`dx`),
-  needed for `make dev` and `make bundle`:
+  needed for `make dev` and `make bundle`. Dioxus 0.7 auto-runs the Tailwind
+  watcher, so no separate Node/Tailwind step is needed for those:
 
   ```sh
   cargo install dioxus-cli
   ```
+
+- [Node.js](https://nodejs.org/) — only for `make run` (plain `cargo run`),
+  which regenerates the Tailwind/daisyUI stylesheet via `make css`.
 
 ## Run on macOS
 
@@ -26,7 +29,7 @@ Build an optimised, self-contained `.app` you can run without the toolchain:
 make bundle
 ```
 
-This compiles the stylesheet and produces the bundle under
+This produces the bundle under
 `target/dx/zfirot/bundle/macos/macos/`:
 
 - `Zfirot.app` — double-click to run, or drag it into `/Applications`.
@@ -40,9 +43,9 @@ normally.
 ### Option B — run from source
 
 ```sh
-make run    # build the stylesheet and run once via cargo
+make run    # regenerate the stylesheet and run once via cargo
 # or
-make dev    # hot-reloading dev mode via the Dioxus CLI
+make dev    # hot-reloading dev mode via the Dioxus CLI (auto-runs Tailwind)
 ```
 
 ## Authentication
@@ -66,8 +69,8 @@ Keychain** (never on disk in plain text) and reused on the next launch.
 ```sh
 make hooks   # install the pre-push quality gate (run once after cloning)
 make check   # fmt --check, clippy -D warnings, and tests (the gate the hook runs)
-make css     # recompile the stylesheet
-make dev     # hot-reloading desktop app
+make css     # regenerate the stylesheet (only needed for `make run`)
+make dev     # hot-reloading desktop app (dx auto-runs Tailwind)
 ```
 
 See [AGENTS.md](AGENTS.md) and [CONTEXT.md](CONTEXT.md) for architecture and

@@ -2,10 +2,6 @@
 
 PRESENTATION := crates/presentation
 
-# Compile the Tailwind + daisyUI + Iconify stylesheet into the bundled asset.
-css:
-	cd $(PRESENTATION) && npm install && npm run build:css
-
 # Recompile the stylesheet on change (run alongside `make dev`).
 css-watch:
 	cd $(PRESENTATION) && npm run watch:css
@@ -21,11 +17,19 @@ icon:
 	rm -f logo.svg.png && \
 	python3 round-icon-corners.py icon.png
 
+# Compile the Tailwind + daisyUI + Iconify stylesheet into the generated asset
+# (crates/presentation/assets/tailwind.css). Only needed for `make run` (plain
+# `cargo run`); `dx serve`/`dx bundle` auto-run the Tailwind watcher in Dioxus
+# 0.7. The generated stylesheet is untracked (see .gitignore).
+css:
+	cd $(PRESENTATION) && npm install && npm run build:css
+
 # Start the desktop app in dev mode (hot-reload) via the Dioxus CLI.
-# Compiles the stylesheet first so styling is up to date. Loads .env (if present)
-# so ZFIROT_GITHUB_TOKEN reaches the dev-only env secure store, avoiding repeated
+# Dioxus 0.7 detects crates/presentation/tailwind.css and auto-runs the Tailwind
+# watcher, so no separate CSS build step is needed. Loads .env (if present) so
+# ZFIROT_GITHUB_TOKEN reaches the dev-only env secure store, avoiding repeated
 # OS keychain prompts across rebuilds.
-dev: css
+dev:
 	set -a; [ -f .env ] && . ./.env; set +a; dx serve --package zfirot --platform desktop
 
 # Run the app once without the Dioxus CLI.
@@ -37,9 +41,10 @@ build:
 	cargo build
 
 # Build a standalone, optimised macOS app you can run without the toolchain.
-# Compiles the stylesheet first, then produces a .app (and .dmg) under
-# target/dx/zfirot/bundle/macos/macos/. Open the .app or drag it to /Applications.
-bundle: css
+# `dx bundle` auto-runs the Tailwind watcher (Dioxus 0.7), then produces a .app
+# (and .dmg) under target/dx/zfirot/bundle/macos/macos/. Open the .app or drag it
+# to /Applications.
+bundle:
 	dx bundle --release --package zfirot --platform desktop
 	@echo "App bundled under target/dx/zfirot/bundle/macos/macos/ — open Zfirot.app or drag it to /Applications."
 
