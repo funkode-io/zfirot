@@ -118,8 +118,8 @@ pub struct ClassifiedBoard {
 /// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
 /// the board's identity map. Numbers absent from the board (e.g. closed or beyond
 /// the fetched page) yield `None`, so they are simply not shown as a badge.
-fn dependency_ref(number: u64, prd_by_number: &HashMap<u64, PrdRef>) -> Option<DependencyRef> {
-    prd_by_number.get(&number).map(|prd| DependencyRef {
+fn dependency_ref(number: u64, issue_by_number: &HashMap<u64, PrdRef>) -> Option<DependencyRef> {
+    issue_by_number.get(&number).map(|prd| DependencyRef {
         number,
         title: prd.title.clone(),
         url: prd.url.clone(),
@@ -133,12 +133,12 @@ fn dependency_ref(number: u64, prd_by_number: &HashMap<u64, PrdRef>) -> Option<D
 fn resolve_open_blockers(
     candidates: impl IntoIterator<Item = u64>,
     open_numbers: &HashSet<u64>,
-    prd_by_number: &HashMap<u64, PrdRef>,
+    issue_by_number: &HashMap<u64, PrdRef>,
 ) -> Vec<DependencyRef> {
     candidates
         .into_iter()
         .filter(|number| open_numbers.contains(number))
-        .filter_map(|number| dependency_ref(number, prd_by_number))
+        .filter_map(|number| dependency_ref(number, issue_by_number))
         .collect()
 }
 
@@ -338,8 +338,9 @@ impl<P: GitHubPort> BoardService<P> {
         // Identity of every issue in the board, so a Slice's parent reference
         // (native or prose) resolves to its PRD ref (number + title + url) for
         // the swimlane header and link.
-        let prd_by_number: HashMap<u64, PrdRef> = raw_issues
+        let issue_by_number: HashMap<u64, PrdRef> = raw_issues
             .iter()
+            .filter(|raw| !raw.closed)
             .map(|raw| {
                 (
                     raw.number,
@@ -371,13 +372,13 @@ impl<P: GitHubPort> BoardService<P> {
                         resolve_open_blockers(
                             raw.native_blockers.iter().copied(),
                             &open_numbers,
-                            &prd_by_number,
+                            &issue_by_number,
                         )
                     } else {
                         resolve_open_blockers(
                             parse_blockers_from_body(body_str),
                             &open_numbers,
-                            &prd_by_number,
+                            &issue_by_number,
                         )
                     };
                     // Resolve the parent PRD: prefer the native parent link,
@@ -386,7 +387,7 @@ impl<P: GitHubPort> BoardService<P> {
                     let prd = raw
                         .native_parent
                         .or_else(|| parse_parent_from_body(body_str))
-                        .and_then(|number| prd_by_number.get(&number).cloned());
+                        .and_then(|number| issue_by_number.get(&number).cloned());
                     slices.push(RawSlice {
                         number: raw.number,
                         title: raw.title,
