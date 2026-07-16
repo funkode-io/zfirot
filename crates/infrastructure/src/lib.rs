@@ -120,7 +120,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             labels: vec!["ready-for-agent".to_string()],
             closed: false,
             native_parent: Some(1),
-            native_blockers: vec![],
+            native_blockers: vec![2],
             assignee: Some("carlos-verdes".to_string()),
             linked_prs: vec![LinkedPrRef {
                 number: 12,
@@ -145,7 +145,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             labels: vec!["slice".to_string()],
             closed: false,
             native_parent: None,
-            native_blockers: vec![3],
+            native_blockers: vec![3, 2],
             assignee: None,
             linked_prs: vec![],
             is_native_child_of_prd: false,

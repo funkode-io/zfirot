@@ -64,7 +64,7 @@ pub struct RawIssue {
     pub closed: bool,
     /// Issue number of the native GitHub sub-issue parent, if present.
     pub native_parent: Option<u64>,
-    /// Issue numbers of still-open native "blocked by" dependency issues.
+    /// Issue numbers of native "blocked by" dependency issues (open and closed).
     pub native_blockers: Vec<u64>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,

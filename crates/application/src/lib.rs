@@ -151,20 +151,36 @@ pub enum BoardRefresh {
 /// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
 /// the board's identity map. Numbers absent from the board (e.g. closed or beyond
 /// the fetched page) yield `None`, so they are simply not shown as a badge.
-fn dependency_ref(number: u64, prd_by_number: &HashMap<u64, PrdRef>) -> Option<DependencyRef> {
-    prd_by_number.get(&number).map(|prd| DependencyRef {
+fn dependency_ref(number: u64, issue_by_number: &HashMap<u64, PrdRef>) -> Option<DependencyRef> {
+    issue_by_number.get(&number).map(|prd| DependencyRef {
         number,
         title: prd.title.clone(),
         url: prd.url.clone(),
     })
 }
 
+/// Resolve a Slice's candidate blocker numbers (native or prose) into badge
+/// refs, keeping only blockers still open in this board. Numbers absent from
+/// `open_numbers` (closed or not in the fetched board) are dropped, avoiding a
+/// false Blocked state.
+fn resolve_open_blockers(
+    candidates: impl IntoIterator<Item = u64>,
+    open_numbers: &HashSet<u64>,
+    issue_by_number: &HashMap<u64, PrdRef>,
+) -> Vec<DependencyRef> {
+    candidates
+        .into_iter()
+        .filter(|number| open_numbers.contains(number))
+        .filter_map(|number| dependency_ref(number, issue_by_number))
+        .collect()
+}
+
 /// Pure projection from a raw issue set + discovered agents to a classified board.
 pub fn classify(raw_issues: &[RawIssue], agents: &[AgentRef]) -> ClassifiedBoard {
-    // The numbers of issues that are still open in this board, so prose blockers
-    // (which carry no open/closed state of their own) can be filtered to open
-    // ones only — mirroring the still-open guarantee that native blockers already
-    // have, and avoiding a false Blocked state.
+    // The numbers of issues that are still open in this board, so prose
+    // blockers (which carry no open/closed state of their own) and native
+    // blockers (which may include closed issues) can be filtered to open
+    // ones only, avoiding a false Blocked state.
     let open_numbers: HashSet<u64> = raw_issues
         .iter()
         .filter(|raw| !raw.closed)
@@ -174,8 +190,9 @@ pub fn classify(raw_issues: &[RawIssue], agents: &[AgentRef]) -> ClassifiedBoard
     // Identity of every issue in the board, so a Slice's parent reference
     // (native or prose) resolves to its PRD ref (number + title + url) for the
     // swimlane header and link.
-    let prd_by_number: HashMap<u64, PrdRef> = raw_issues
+    let issue_by_number: HashMap<u64, PrdRef> = raw_issues
         .iter()
+        .filter(|raw| !raw.closed)
         .map(|raw| {
             (
                 raw.number,
@@ -200,21 +217,21 @@ pub fn classify(raw_issues: &[RawIssue], agents: &[AgentRef]) -> ClassifiedBoard
         match classify_issue(&raw) {
             IssueClassification::Slice => {
                 let body_str = raw.body.as_deref().unwrap_or("");
-                // Use native blockers (already still-open) when present;
-                // otherwise fall back to prose, keeping only blockers that are
-                // still open in this board. Each is resolved to its ref (number +
-                // url) against the board for the blocker badges.
+                // Use native blockers when present; otherwise fall back to
+                // prose. Both feed the same open-set filter + ref resolution
+                // (see `resolve_open_blockers`) for the blocker badges.
                 let blockers: Vec<DependencyRef> = if !raw.native_blockers.is_empty() {
-                    raw.native_blockers
-                        .iter()
-                        .filter_map(|number| dependency_ref(*number, &prd_by_number))
-                        .collect()
+                    resolve_open_blockers(
+                        raw.native_blockers.iter().copied(),
+                        &open_numbers,
+                        &issue_by_number,
+                    )
                 } else {
-                    parse_blockers_from_body(body_str)
-                        .into_iter()
-                        .filter(|number| open_numbers.contains(number))
-                        .filter_map(|number| dependency_ref(number, &prd_by_number))
-                        .collect()
+                    resolve_open_blockers(
+                        parse_blockers_from_body(body_str),
+                        &open_numbers,
+                        &issue_by_number,
+                    )
                 };
                 // Resolve the parent PRD: prefer the native parent link, fall
                 // back to the prose `## Parent` reference, then look the number up
@@ -222,7 +239,7 @@ pub fn classify(raw_issues: &[RawIssue], agents: &[AgentRef]) -> ClassifiedBoard
                 let prd = raw
                     .native_parent
                     .or_else(|| parse_parent_from_body(body_str))
-                    .and_then(|number| prd_by_number.get(&number).cloned());
+                    .and_then(|number| issue_by_number.get(&number).cloned());
                 slices.push(RawSlice {
                     number: raw.number,
                     title: raw.title,

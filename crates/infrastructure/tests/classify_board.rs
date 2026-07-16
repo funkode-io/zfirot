@@ -1,7 +1,8 @@
 //! Integration test: the classify-board use-case runs end-to-end against the fake port.
 
 use application::{BoardService, ClassifiedBoard};
-use domain::{IssueClassification, RepoRef};
+use async_trait::async_trait;
+use domain::{AgentRef, AppAction, AppResult, IssueClassification, Project, RawIssue, RepoRef};
 use infrastructure::FakeGitHubPort;
 
 #[tokio::test]
@@ -91,30 +92,44 @@ async fn classify_board_derives_blocked_state_from_native_blockers() {
         .await
         .expect("fake port should classify the board");
 
-    // Issue #5 carries native_blockers=[3] (issue #3 is still open), so the
-    // derived Slice is Blocked regardless of any prose "## Blocked by" section.
-    let slice5 = slices
-        .iter()
-        .find(|s| s.number == 5)
-        .expect("issue #5 should be a confirmed Slice");
-    assert_eq!(
-        slice5.state,
-        SliceState::Blocked,
-        "issue #5 should be Blocked from its native blocker on the still-open #3"
-    );
+    struct Case {
+        issue: u64,
+        expected_state: SliceState,
+        expected_open_blockers: usize,
+    }
+    let cases = [
+        Case {
+            // Issue #5 carries native blockers [3, 2], but only #3 is open.
+            issue: 5,
+            expected_state: SliceState::Blocked,
+            expected_open_blockers: 1,
+        },
+        Case {
+            // Issue #3 carries only a CLOSED native blocker (#2), so classifier
+            // filtering must drop it and avoid a false Blocked state.
+            issue: 3,
+            expected_state: SliceState::Wip,
+            expected_open_blockers: 0,
+        },
+    ];
 
-    // Issue #3 has no native blockers and only a prose "## Blocked by - #2",
-    // but #2 is closed, so the prose blocker is filtered out and #3 is not
-    // falsely marked Blocked (it is WIP via its open linked PR / assignee).
-    let slice3 = slices
-        .iter()
-        .find(|s| s.number == 3)
-        .expect("issue #3 should be a confirmed Slice");
-    assert_ne!(
-        slice3.state,
-        SliceState::Blocked,
-        "issue #3's only prose blocker (#2) is closed, so it must not be Blocked"
-    );
+    for case in cases {
+        let slice = slices
+            .iter()
+            .find(|s| s.number == case.issue)
+            .unwrap_or_else(|| panic!("issue #{} should be a confirmed Slice", case.issue));
+        assert_eq!(
+            slice.state, case.expected_state,
+            "issue #{} derived unexpected state from native blockers",
+            case.issue
+        );
+        assert_eq!(
+            slice.blockers.len(),
+            case.expected_open_blockers,
+            "issue #{} had unexpected open-blocker count after classifier filtering",
+            case.issue
+        );
+    }
 }
 
 #[tokio::test]
@@ -177,5 +192,84 @@ async fn classify_board_resolves_prd_title_from_native_and_prose_parents() {
         slice5.prd.as_ref().map(|prd| prd.title.as_str()),
         Some("Zfirot desktop dashboard"),
         "issue #5's prose parent should resolve to PRD #1's title"
+    );
+}
+
+#[derive(Clone)]
+struct ClosedParentFixturePort;
+
+#[async_trait]
+impl application::GitHubPort for ClosedParentFixturePort {
+    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        Ok(vec![
+            RawIssue {
+                number: 50,
+                title: "Closed PRD".to_string(),
+                url: "https://github.com/funkode-io/zfirot/issues/50".to_string(),
+                body: None,
+                labels: vec!["prd".to_string()],
+                closed: true,
+                native_parent: None,
+                native_blockers: vec![],
+                assignee: None,
+                linked_prs: vec![],
+                is_native_child_of_prd: false,
+            },
+            RawIssue {
+                number: 51,
+                title: "Open Slice with closed native parent".to_string(),
+                url: "https://github.com/funkode-io/zfirot/issues/51".to_string(),
+                body: None,
+                labels: vec!["slice".to_string()],
+                closed: false,
+                native_parent: Some(50),
+                native_blockers: vec![],
+                assignee: None,
+                linked_prs: vec![],
+                is_native_child_of_prd: false,
+            },
+        ])
+    }
+
+    async fn list_projects(&self) -> AppResult<Vec<Project>> {
+        Ok(vec![])
+    }
+
+    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
+        Ok(())
+    }
+
+    async fn assign_agent(
+        &self,
+        _repo: &RepoRef,
+        _issue_number: u64,
+        _agent: &AgentRef,
+    ) -> AppAction {
+        Ok(())
+    }
+
+    async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
+        Ok(())
+    }
+
+    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn classify_board_places_slice_with_closed_native_parent_in_no_prd_lane() {
+    let service = BoardService::new(ClosedParentFixturePort);
+    let repo = RepoRef::new("funkode-io", "zfirot");
+
+    let ClassifiedBoard { slices, .. } = service
+        .classify_board(&repo)
+        .await
+        .expect("fixture port should classify the board");
+
+    assert_eq!(slices.len(), 1, "fixture should return one open slice");
+    assert_eq!(
+        slices[0].prd, None,
+        "a slice whose native parent PRD is closed must render under No PRD"
     );
 }
