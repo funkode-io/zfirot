@@ -27,7 +27,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         labels(first: 20) { nodes { name } }
         assignees(first: 1) { nodes { login } }
         parent { number labels(first: 20) { nodes { name } } }
-        blockedBy(first: 50) { nodes { number state } }
+        blockedBy(first: 50) { nodes { number } }
         closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } } }
       }
     }
@@ -1092,8 +1092,9 @@ fn node_into_project(node: RepositoryNode) -> Project {
 
 /// Project one GraphQL issue node into a [`RawIssue`] for the two-tier
 /// classifier: open/closed, labels, native parent number (and whether it is a
-/// `prd`-labelled parent), still-open native blockers, assignee, and linked-PR
-/// state. The cross-issue prose resolution is left to `classify_board`.
+/// `prd`-labelled parent), native blockers (open and closed), assignee, and
+/// linked-PR state. The cross-issue open-set filtering and prose resolution are
+/// left to `classify_board`.
 fn map_issue_raw(node: RawIssueNode) -> RawIssue {
     // `includeClosedPrs: false` means every returned node is an open linked PR,
     // so each maps straight to a `LinkedPrRef`. A null `author` (e.g. a deleted
@@ -1117,12 +1118,12 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
         .map(|parent| parent.labels.nodes.iter().any(|label| label.name == "prd"))
         .unwrap_or(false);
 
-    // Only still-open blockers count toward Blocked; closed ones are dropped.
+    // Carry every native blocker (open and closed); classifier-level filtering
+    // resolves the board's currently-open set.
     let native_blockers = node
         .blocked_by
         .nodes
         .into_iter()
-        .filter(|blocker| blocker.state == "OPEN")
         .map(|blocker| blocker.number)
         .collect();
 
@@ -1308,7 +1309,6 @@ struct BlockerConnection {
 #[derive(Deserialize)]
 struct BlockerNode {
     number: u64,
-    state: String,
 }
 
 #[derive(Deserialize)]

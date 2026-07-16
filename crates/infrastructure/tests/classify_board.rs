@@ -103,17 +103,22 @@ async fn classify_board_derives_blocked_state_from_native_blockers() {
         "issue #5 should be Blocked from its native blocker on the still-open #3"
     );
 
-    // Issue #3 has no native blockers and only a prose "## Blocked by - #2",
-    // but #2 is closed, so the prose blocker is filtered out and #3 is not
-    // falsely marked Blocked (it is WIP via its open linked PR / assignee).
+    // Issue #3 carries only a CLOSED native blocker (#2), so classifier-level
+    // open-set filtering must drop it and avoid a false Blocked state (it stays
+    // WIP via its open linked PR / assignee).
     let slice3 = slices
         .iter()
         .find(|s| s.number == 3)
         .expect("issue #3 should be a confirmed Slice");
+    assert_eq!(
+        slice3.blockers.len(),
+        0,
+        "issue #3's closed native blocker (#2) must be filtered out"
+    );
     assert_ne!(
         slice3.state,
         SliceState::Blocked,
-        "issue #3's only prose blocker (#2) is closed, so it must not be Blocked"
+        "issue #3's only native blocker (#2) is closed, so it must not be Blocked"
     );
 }
 
