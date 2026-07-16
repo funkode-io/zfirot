@@ -8,15 +8,12 @@ use serde::Deserialize;
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 
-/// One page of issues for classification: **open and closed**, with the labels,
+/// One page of issues for classification: **open issues only**, with the labels,
 /// native relationships, and linked-PR state the two-tier classifier needs.
-/// `classify_board` filters closed issues out, but they are still fetched so a
-/// Slice's native parent or blocker that happens to be closed is visible to the
-/// mapping (and a closed blocker is correctly dropped, not silently missing).
 const ISSUES_QUERY: &str = r#"
 query Issues($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
-    issues(first: 50, after: $cursor, states: [OPEN, CLOSED], orderBy: {field: CREATED_AT, direction: ASC}) {
+    issues(first: 50, after: $cursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
@@ -212,7 +209,7 @@ impl GitHubClient {
         })
     }
 
-    /// Fetch a single page of issues for classification (open and closed) for
+    /// Fetch a single page of open issues for classification for
     /// `repo`, starting after `cursor`.
     async fn fetch_issues_page(&self, repo: &RepoRef, cursor: Option<&str>) -> AppResult<String> {
         let body = serde_json::json!({
@@ -1242,7 +1239,7 @@ struct LinkedPrNode {
 struct AuthorNode {
     login: String,
 }
-// ── Issues-for-classification query (open and closed) ────────────────────────
+// ── Issues-for-classification query (open only) ──────────────────────────────
 
 #[derive(Deserialize)]
 struct IssuesResponse {
