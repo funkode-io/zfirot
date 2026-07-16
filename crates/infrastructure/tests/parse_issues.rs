@@ -36,14 +36,15 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     assert!(prd.body.is_some());
 
     // A native child of the PRD: parent number resolved, parent is `prd`, and
-    // an empty body maps to `None`. Its one native blocker is CLOSED, so it is
-    // dropped from `native_blockers`. Two open linked PRs are lifted, one with a
-    // resolved author and one with a null author (no login).
+    // an empty body maps to `None`. Native blockers are carried through as-is
+    // (including CLOSED blockers) so classifier-level filtering has all facts.
+    // Two open linked PRs are lifted, one with a resolved author and one with a
+    // null author (no login).
     let child = issue_by_number(&issues, 3);
     assert_eq!(child.native_parent, Some(1));
     assert!(child.is_native_child_of_prd);
     assert_eq!(child.body, None);
-    assert_eq!(child.native_blockers, Vec::<u64>::new());
+    assert_eq!(child.native_blockers, vec![2]);
     assert_eq!(child.linked_prs.len(), 2);
     assert_eq!(child.linked_prs[0].number, 12);
     assert_eq!(child.linked_prs[0].author.as_deref(), Some("carlos-verdes"));
@@ -56,11 +57,12 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     assert_eq!(child.linked_prs[1].author, None);
     assert_eq!(child.assignee.as_deref(), Some("carlos-verdes"));
 
-    // A `slice`-labelled issue: only the OPEN native blocker (#3) is kept; the
-    // CLOSED one (#2) is dropped. No native parent here (prose handles it).
+    // A `slice`-labelled issue: both OPEN and CLOSED native blockers are kept
+    // for classifier-level open-set filtering. No native parent here (prose
+    // handles it).
     let slice = issue_by_number(&issues, 5);
     assert_eq!(slice.labels, vec!["slice".to_string()]);
-    assert_eq!(slice.native_blockers, vec![3]);
+    assert_eq!(slice.native_blockers, vec![3, 2]);
     assert_eq!(slice.native_parent, None);
     assert!(slice.linked_prs.is_empty());
 

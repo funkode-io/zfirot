@@ -310,9 +310,9 @@ impl<P: GitHubPort> BoardService<P> {
             .map_err(|err| err.with_context("repo", repo))?;
 
         // The numbers of issues that are still open in this board, so prose
-        // blockers (which carry no open/closed state of their own) can be
-        // filtered to open ones only — mirroring the still-open guarantee that
-        // native blockers already have, and avoiding a false Blocked state.
+        // blockers (which carry no open/closed state of their own) and native
+        // blockers (which may include closed issues) can be filtered to open
+        // ones only, avoiding a false Blocked state.
         let open_numbers: HashSet<u64> = raw_issues
             .iter()
             .filter(|raw| !raw.closed)
@@ -349,14 +349,16 @@ impl<P: GitHubPort> BoardService<P> {
             match classify_issue(&raw) {
                 IssueClassification::Slice => {
                     let body_str = raw.body.as_deref().unwrap_or("");
-                    // Use native blockers (already still-open) when present;
-                    // otherwise fall back to prose, keeping only blockers that
-                    // are still open in this board. Each is resolved to its ref
-                    // (number + url) against the board for the blocker badges.
+                    // Use native blockers when present; otherwise fall back to
+                    // prose. In both cases, keep only blockers that are still
+                    // open in this board. Each is resolved to its ref (number +
+                    // url) against the board for the blocker badges.
                     let blockers: Vec<DependencyRef> = if !raw.native_blockers.is_empty() {
                         raw.native_blockers
                             .iter()
-                            .filter_map(|number| dependency_ref(*number, &issue_by_number))
+                            .copied()
+                            .filter(|number| open_numbers.contains(number))
+                            .filter_map(|number| dependency_ref(number, &issue_by_number))
                             .collect()
                     } else {
                         parse_blockers_from_body(body_str)
