@@ -126,6 +126,22 @@ fn dependency_ref(number: u64, prd_by_number: &HashMap<u64, PrdRef>) -> Option<D
     })
 }
 
+/// Resolve a Slice's candidate blocker numbers (native or prose) into badge
+/// refs, keeping only blockers still open in this board. Numbers absent from
+/// `open_numbers` (closed or not in the fetched board) are dropped, avoiding a
+/// false Blocked state.
+fn resolve_open_blockers(
+    candidates: impl IntoIterator<Item = u64>,
+    open_numbers: &HashSet<u64>,
+    prd_by_number: &HashMap<u64, PrdRef>,
+) -> Vec<DependencyRef> {
+    candidates
+        .into_iter()
+        .filter(|number| open_numbers.contains(number))
+        .filter_map(|number| dependency_ref(number, prd_by_number))
+        .collect()
+}
+
 /// The seam between the application and the OS secure store (real or fake).
 ///
 /// `infrastructure` implements this against the operating system's credential
@@ -349,22 +365,20 @@ impl<P: GitHubPort> BoardService<P> {
                 IssueClassification::Slice => {
                     let body_str = raw.body.as_deref().unwrap_or("");
                     // Use native blockers when present; otherwise fall back to
-                    // prose. In both cases, keep only blockers that are still
-                    // open in this board. Each is resolved to its ref (number +
-                    // url) against the board for the blocker badges.
+                    // prose. Both feed the same open-set filter + ref resolution
+                    // (see `resolve_open_blockers`) for the blocker badges.
                     let blockers: Vec<DependencyRef> = if !raw.native_blockers.is_empty() {
-                        raw.native_blockers
-                            .iter()
-                            .copied()
-                            .filter(|number| open_numbers.contains(number))
-                            .filter_map(|number| dependency_ref(number, &prd_by_number))
-                            .collect()
+                        resolve_open_blockers(
+                            raw.native_blockers.iter().copied(),
+                            &open_numbers,
+                            &prd_by_number,
+                        )
                     } else {
-                        parse_blockers_from_body(body_str)
-                            .into_iter()
-                            .filter(|number| open_numbers.contains(number))
-                            .filter_map(|number| dependency_ref(number, &prd_by_number))
-                            .collect()
+                        resolve_open_blockers(
+                            parse_blockers_from_body(body_str),
+                            &open_numbers,
+                            &prd_by_number,
+                        )
                     };
                     // Resolve the parent PRD: prefer the native parent link,
                     // fall back to the prose `## Parent` reference, then look the
