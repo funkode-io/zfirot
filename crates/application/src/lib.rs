@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use domain::{
@@ -115,6 +116,38 @@ pub struct ClassifiedBoard {
     pub agents: Vec<AgentRef>,
 }
 
+/// A retained fetch snapshot of a board, used to decide whether a refresh would
+/// repaint anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardSnapshot {
+    raw_issues: Vec<RawIssue>,
+    agents: Vec<AgentRef>,
+    /// The instant captured at fetch start.
+    pub fetched_at: Instant,
+}
+
+impl BoardSnapshot {
+    fn same_facts_as(&self, other: &Self) -> bool {
+        self.raw_issues == other.raw_issues && self.agents == other.agents
+    }
+}
+
+/// The loaded board view plus its retained snapshot for refresh decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedBoard {
+    pub board: ClassifiedBoard,
+    pub snapshot: BoardSnapshot,
+}
+
+/// Outcome of refreshing a retained board snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardRefresh {
+    /// The fetched facts differ from the retained snapshot: repaint with `view`.
+    Changed(LoadedBoard),
+    /// The fetched facts match the retained snapshot: keep current UI as-is.
+    Unchanged,
+}
+
 /// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
 /// the board's identity map. Numbers absent from the board (e.g. closed or beyond
 /// the fetched page) yield `None`, so they are simply not shown as a badge.
@@ -140,6 +173,114 @@ fn resolve_open_blockers(
         .filter(|number| open_numbers.contains(number))
         .filter_map(|number| dependency_ref(number, issue_by_number))
         .collect()
+}
+
+/// Pure projection from a raw issue set + discovered agents to a classified board.
+pub fn classify(raw_issues: &[RawIssue], agents: &[AgentRef]) -> ClassifiedBoard {
+    // The numbers of issues that are still open in this board, so prose
+    // blockers (which carry no open/closed state of their own) and native
+    // blockers (which may include closed issues) can be filtered to open
+    // ones only, avoiding a false Blocked state.
+    let open_numbers: HashSet<u64> = raw_issues
+        .iter()
+        .filter(|raw| !raw.closed)
+        .map(|raw| raw.number)
+        .collect();
+
+    // Identity of every issue in the board, so a Slice's parent reference
+    // (native or prose) resolves to its PRD ref (number + title + url) for the
+    // swimlane header and link.
+    let issue_by_number: HashMap<u64, PrdRef> = raw_issues
+        .iter()
+        .filter(|raw| !raw.closed)
+        .map(|raw| {
+            (
+                raw.number,
+                PrdRef {
+                    number: raw.number,
+                    title: raw.title.clone(),
+                    url: raw.url.clone(),
+                },
+            )
+        })
+        .collect();
+
+    let mut slices = Vec::new();
+    let mut prds = Vec::new();
+    let mut other = Vec::new();
+
+    for raw in raw_issues.iter().cloned() {
+        if raw.closed {
+            continue;
+        }
+
+        match classify_issue(&raw) {
+            IssueClassification::Slice => {
+                let body_str = raw.body.as_deref().unwrap_or("");
+                // Use native blockers when present; otherwise fall back to
+                // prose. Both feed the same open-set filter + ref resolution
+                // (see `resolve_open_blockers`) for the blocker badges.
+                let blockers: Vec<DependencyRef> = if !raw.native_blockers.is_empty() {
+                    resolve_open_blockers(
+                        raw.native_blockers.iter().copied(),
+                        &open_numbers,
+                        &issue_by_number,
+                    )
+                } else {
+                    resolve_open_blockers(
+                        parse_blockers_from_body(body_str),
+                        &open_numbers,
+                        &issue_by_number,
+                    )
+                };
+                // Resolve the parent PRD: prefer the native parent link, fall
+                // back to the prose `## Parent` reference, then look the number up
+                // among the issues in this board.
+                let prd = raw
+                    .native_parent
+                    .or_else(|| parse_parent_from_body(body_str))
+                    .and_then(|number| issue_by_number.get(&number).cloned());
+                slices.push(RawSlice {
+                    number: raw.number,
+                    title: raw.title,
+                    url: raw.url,
+                    closed: false,
+                    prd,
+                    assignee: raw.assignee,
+                    linked_prs: raw.linked_prs,
+                    blockers,
+                    // Filled by `resolve_unblocks` once the board is mapped.
+                    unblocks: Vec::new(),
+                });
+            }
+            IssueClassification::Prd => {
+                prds.push(Prd {
+                    number: raw.number,
+                    title: raw.title,
+                });
+            }
+            classification => {
+                other.push(OtherIssue {
+                    number: raw.number,
+                    title: raw.title,
+                    url: raw.url,
+                    classification,
+                });
+            }
+        }
+    }
+
+    // Derive the reverse "unblocks" edge across the whole board, then project
+    // each raw Slice into its read model with the derived state.
+    resolve_unblocks(&mut slices);
+    let slices = slices.into_iter().map(RawSlice::into_slice).collect();
+
+    ClassifiedBoard {
+        slices,
+        prds,
+        other,
+        agents: agents.to_vec(),
+    }
 }
 
 /// The seam between the application and the OS secure store (real or fake).
@@ -311,118 +452,15 @@ impl<P: GitHubPort> BoardService<P> {
             })
     }
 
-    /// Load and classify all open issues for a project, returning the board
-    /// split into confirmed Slices and an "other open issues" bucket.
-    ///
-    /// Closed issues are omitted. Confident-tier-1 Slices appear in
-    /// [`ClassifiedBoard::slices`]; confident PRDs appear in
-    /// [`ClassifiedBoard::prds`]; suggested and unclassified issues appear in
-    /// [`ClassifiedBoard::other`].
-    pub async fn classify_board(&self, repo: &RepoRef) -> AppResult<ClassifiedBoard> {
+    /// Load the project's board view plus a retained snapshot captured at fetch
+    /// start, to support unchanged refresh decisions.
+    pub async fn load(&self, repo: &RepoRef) -> AppResult<LoadedBoard> {
+        let fetched_at = Instant::now();
         let raw_issues = self
             .port
             .load_issues(repo)
             .await
             .map_err(|err| err.with_context("repo", repo))?;
-
-        // The numbers of issues that are still open in this board, so prose
-        // blockers (which carry no open/closed state of their own) and native
-        // blockers (which may include closed issues) can be filtered to open
-        // ones only, avoiding a false Blocked state.
-        let open_numbers: HashSet<u64> = raw_issues
-            .iter()
-            .filter(|raw| !raw.closed)
-            .map(|raw| raw.number)
-            .collect();
-
-        // Identity of every issue in the board, so a Slice's parent reference
-        // (native or prose) resolves to its PRD ref (number + title + url) for
-        // the swimlane header and link.
-        let issue_by_number: HashMap<u64, PrdRef> = raw_issues
-            .iter()
-            .filter(|raw| !raw.closed)
-            .map(|raw| {
-                (
-                    raw.number,
-                    PrdRef {
-                        number: raw.number,
-                        title: raw.title.clone(),
-                        url: raw.url.clone(),
-                    },
-                )
-            })
-            .collect();
-
-        let mut slices = Vec::new();
-        let mut prds = Vec::new();
-        let mut other = Vec::new();
-
-        for raw in raw_issues {
-            if raw.closed {
-                continue;
-            }
-
-            match classify_issue(&raw) {
-                IssueClassification::Slice => {
-                    let body_str = raw.body.as_deref().unwrap_or("");
-                    // Use native blockers when present; otherwise fall back to
-                    // prose. Both feed the same open-set filter + ref resolution
-                    // (see `resolve_open_blockers`) for the blocker badges.
-                    let blockers: Vec<DependencyRef> = if !raw.native_blockers.is_empty() {
-                        resolve_open_blockers(
-                            raw.native_blockers.iter().copied(),
-                            &open_numbers,
-                            &issue_by_number,
-                        )
-                    } else {
-                        resolve_open_blockers(
-                            parse_blockers_from_body(body_str),
-                            &open_numbers,
-                            &issue_by_number,
-                        )
-                    };
-                    // Resolve the parent PRD: prefer the native parent link,
-                    // fall back to the prose `## Parent` reference, then look the
-                    // number up among the issues in this board.
-                    let prd = raw
-                        .native_parent
-                        .or_else(|| parse_parent_from_body(body_str))
-                        .and_then(|number| issue_by_number.get(&number).cloned());
-                    slices.push(RawSlice {
-                        number: raw.number,
-                        title: raw.title,
-                        url: raw.url,
-                        closed: false,
-                        prd,
-                        assignee: raw.assignee,
-                        linked_prs: raw.linked_prs,
-                        blockers,
-                        // Filled by `resolve_unblocks` once the board is mapped.
-                        unblocks: Vec::new(),
-                    });
-                }
-                IssueClassification::Prd => {
-                    prds.push(Prd {
-                        number: raw.number,
-                        title: raw.title,
-                    });
-                }
-                classification => {
-                    other.push(OtherIssue {
-                        number: raw.number,
-                        title: raw.title,
-                        url: raw.url,
-                        classification,
-                    });
-                }
-            }
-        }
-
-        // Derive the reverse "unblocks" edge across the whole board, then project
-        // each raw Slice into its read model with the derived state.
-        resolve_unblocks(&mut slices);
-        let slices = slices.into_iter().map(RawSlice::into_slice).collect();
-
         // Discover Assignable Agents best-effort: a failure yields an empty set
         // and the board still classifies its Slices normally.
         let agents = match self.port.suggested_agents(repo).await {
@@ -433,12 +471,33 @@ impl<P: GitHubPort> BoardService<P> {
             }
         };
 
-        Ok(ClassifiedBoard {
-            slices,
-            prds,
-            other,
-            agents,
+        Ok(LoadedBoard {
+            board: classify(&raw_issues, &agents),
+            snapshot: BoardSnapshot {
+                raw_issues,
+                agents,
+                fetched_at,
+            },
         })
+    }
+
+    /// Refresh against a retained snapshot and report whether the board changed.
+    pub async fn refresh(
+        &self,
+        repo: &RepoRef,
+        snapshot: &BoardSnapshot,
+    ) -> AppResult<BoardRefresh> {
+        let loaded = self.load(repo).await?;
+        if loaded.snapshot.same_facts_as(snapshot) {
+            return Ok(BoardRefresh::Unchanged);
+        }
+        Ok(BoardRefresh::Changed(loaded))
+    }
+
+    /// Load and classify all open issues for a project, returning only the board
+    /// view (compatibility wrapper over [`BoardService::load`]).
+    pub async fn classify_board(&self, repo: &RepoRef) -> AppResult<ClassifiedBoard> {
+        Ok(self.load(repo).await?.board)
     }
 }
 
@@ -649,8 +708,8 @@ impl<G: GitHubPort, S: ProjectStorePort> TrackedProjectsService<G, S> {
     /// otherwise-successful open. Such a failure simply leaves the repo
     /// untracked for now — the next successful open re-attempts it — rather than
     /// surfacing an error to the user.
-    pub async fn open_and_track(&self, repo: &RepoRef) -> AppResult<ClassifiedBoard> {
-        let board = self.board.classify_board(repo).await?;
+    pub async fn open_and_track(&self, repo: &RepoRef) -> AppResult<LoadedBoard> {
+        let board = self.board.load(repo).await?;
         let _ = self.store.track_repo(repo).await;
         let _ = self.store.remember_last_opened(repo).await;
         Ok(board)

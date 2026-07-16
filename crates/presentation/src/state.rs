@@ -8,8 +8,9 @@
 use std::sync::Arc;
 
 use application::{
-    AuthService, BoardService, ClassifiedBoard, GitHubPort, LastOpenedService, ProjectStorePort,
-    ProjectsRefresh, RecentProjectsService, SecureStorePort, TrackedProjectsService,
+    AuthService, BoardRefresh, BoardService, BoardSnapshot, GitHubPort, LastOpenedService,
+    LoadedBoard, ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
+    TrackedProjectsService,
 };
 use domain::{AgentRef, AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
 #[cfg(debug_assertions)]
@@ -74,11 +75,16 @@ impl AppState {
         Self { repo, port }
     }
 
-    /// Load and classify the board for the wired project: confirmed Slices for
-    /// the Kanban columns plus the "other open issues" bucket.
-    pub async fn classify_board(&self) -> AppResult<ClassifiedBoard> {
+    /// Load and classify the board for the wired project, returning the
+    /// retained snapshot used by refresh.
+    pub async fn load_board(&self) -> AppResult<LoadedBoard> {
+        BoardService::new(self.port.clone()).load(&self.repo).await
+    }
+
+    /// Refresh the board against a retained snapshot.
+    pub async fn refresh_board(&self, snapshot: &BoardSnapshot) -> AppResult<BoardRefresh> {
         BoardService::new(self.port.clone())
-            .classify_board(&self.repo)
+            .refresh(&self.repo, snapshot)
             .await
     }
 
@@ -168,13 +174,19 @@ pub async fn open_project(repo: &RepoRef) -> AppAction {
 ///
 /// The orchestration lives in [`TrackedProjectsService`]; this only wires the
 /// live adapter and store into it.
-pub async fn open_and_track_project(
-    token: &GitHubToken,
-    repo: &RepoRef,
-) -> AppResult<ClassifiedBoard> {
+pub async fn open_and_track_project(token: &GitHubToken, repo: &RepoRef) -> AppResult<LoadedBoard> {
     let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
     TrackedProjectsService::new(port, project_store()?)
         .open_and_track(repo)
+        .await
+}
+
+/// Refresh the open board against its retained snapshot and report if it
+/// changed. Reads the stored token and wires the live adapter for `repo`.
+pub async fn refresh_board(repo: &RepoRef, snapshot: &BoardSnapshot) -> AppResult<BoardRefresh> {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    AppState::from_token(&token, repo.clone())?
+        .refresh_board(snapshot)
         .await
 }
 
