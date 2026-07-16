@@ -110,9 +110,19 @@ pub fn App() -> Element {
     let mut board_snapshot = use_signal(|| Option::<BoardSnapshot>::None);
     // True while a manual board refresh is in flight.
     let mut board_refreshing = use_signal(|| false);
+    // A board view fetched by a `Changed` refresh, handed to the next `view`
+    // resolution so it repaints the fresh board without a second network fetch.
+    let mut prefetched_board = use_signal(|| Option::<View>::None);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
+                          // A `Changed` refresh stashed the freshly-fetched board here; repaint it
+                          // directly instead of fetching the same board a second time.
+        if prefetched_board.peek().is_some() {
+            if let Some(prefetched) = prefetched_board.write().take() {
+                return prefetched;
+            }
+        }
         resolve_view(nav()).await
     });
 
@@ -167,8 +177,19 @@ pub fn App() -> Element {
             // `peek` reads the latest view without subscribing, so this loop is
             // never restarted by its own re-resolves.
             if let Some(View::Board { repo, .. }) = &*view.peek() {
+                let repo = repo.clone();
                 if let Some(snapshot) = board_snapshot() {
-                    if let Ok(BoardRefresh::Changed(_)) = refresh_board(repo, &snapshot).await {
+                    if let Ok(BoardRefresh::Changed(loaded)) = refresh_board(&repo, &snapshot).await
+                    {
+                        // Stash the already-fetched board and repaint from it, so
+                        // a change costs one fetch, not two (refresh + reload).
+                        board_snapshot.set(Some(loaded.snapshot.clone()));
+                        prefetched_board.set(Some(View::Board {
+                            repo,
+                            board: loaded.board,
+                            loaded_at: now_hms(),
+                            snapshot: loaded.snapshot,
+                        }));
                         reload += 1;
                     }
                 }
@@ -186,7 +207,17 @@ pub fn App() -> Element {
             if let Some(snapshot) = board_snapshot() {
                 spawn(async move {
                     board_refreshing.set(true);
-                    if let Ok(BoardRefresh::Changed(_)) = refresh_board(&repo, &snapshot).await {
+                    if let Ok(BoardRefresh::Changed(loaded)) = refresh_board(&repo, &snapshot).await
+                    {
+                        // Repaint from the fetched board rather than reloading,
+                        // which would fetch the same board again.
+                        board_snapshot.set(Some(loaded.snapshot.clone()));
+                        prefetched_board.set(Some(View::Board {
+                            repo,
+                            board: loaded.board,
+                            loaded_at: now_hms(),
+                            snapshot: loaded.snapshot,
+                        }));
                         reload += 1;
                     }
                     board_refreshing.set(false);
@@ -216,6 +247,7 @@ pub fn App() -> Element {
         spawn(async move {
             // Persist the choice (best-effort) and navigate to its board.
             let _ = open_project(&repo).await;
+            prefetched_board.set(None);
             nav.set(Nav::Project(repo));
             reload += 1;
         });
@@ -227,6 +259,7 @@ pub fn App() -> Element {
         // work there means the board is fetched once, and a failure (e.g. a 404)
         // surfaces through the normal view resolution rather than being dropped.
         nav.set(Nav::GoTo(repo));
+        prefetched_board.set(None);
         reload += 1;
     });
 
@@ -245,6 +278,7 @@ pub fn App() -> Element {
     // Reset the revalidate guard so returning to Home refreshes the list again.
     let on_home = move |_| {
         nav.set(Nav::Home);
+        prefetched_board.set(None);
         revalidated.set(false);
         reload += 1;
     };
@@ -269,9 +303,9 @@ pub fn App() -> Element {
     // confirming. The board stays on screen (see `board_loading`), so this only
     // drives a small in-flight indicator on the Refresh button rather than
     // replacing any content.
-    let refreshing = matches!(*view.state().read(), UseResourceState::Pending)
+    let refreshing = (matches!(*view.state().read(), UseResourceState::Pending)
         && matches!(&*view.read_unchecked(), Some(View::Board { .. }))
-        && !board_loading
+        && !board_loading)
         || board_refreshing();
 
     rsx! {

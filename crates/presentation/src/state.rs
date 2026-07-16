@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use application::{
-    AuthService, BoardRefresh, BoardService, BoardSnapshot, ClassifiedBoard, GitHubPort,
-    LastOpenedService, LoadedBoard, ProjectStorePort, ProjectsRefresh, RecentProjectsService,
-    SecureStorePort, TrackedProjectsService,
+    AuthService, BoardRefresh, BoardService, BoardSnapshot, GitHubPort, LastOpenedService,
+    LoadedBoard, ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
+    TrackedProjectsService,
 };
 use domain::{AgentRef, AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
 #[cfg(debug_assertions)]
@@ -73,14 +73,6 @@ impl AppState {
     /// Build a state around an arbitrary port, for previews and tests.
     pub fn with_port(repo: RepoRef, port: Arc<dyn GitHubPort>) -> Self {
         Self { repo, port }
-    }
-
-    /// Load and classify the board for the wired project: confirmed Slices for
-    /// the Kanban columns plus the "other open issues" bucket.
-    pub async fn classify_board(&self) -> AppResult<ClassifiedBoard> {
-        BoardService::new(self.port.clone())
-            .classify_board(&self.repo)
-            .await
     }
 
     /// Load and classify the board for the wired project, returning the
