@@ -91,35 +91,44 @@ async fn classify_board_derives_blocked_state_from_native_blockers() {
         .await
         .expect("fake port should classify the board");
 
-    // Issue #5 carries native_blockers=[3] (issue #3 is still open), so the
-    // derived Slice is Blocked regardless of any prose "## Blocked by" section.
-    let slice5 = slices
-        .iter()
-        .find(|s| s.number == 5)
-        .expect("issue #5 should be a confirmed Slice");
-    assert_eq!(
-        slice5.state,
-        SliceState::Blocked,
-        "issue #5 should be Blocked from its native blocker on the still-open #3"
-    );
+    struct Case {
+        issue: u64,
+        expected_state: SliceState,
+        expected_open_blockers: usize,
+    }
+    let cases = [
+        Case {
+            // Issue #5 carries native blockers [3, 2], but only #3 is open.
+            issue: 5,
+            expected_state: SliceState::Blocked,
+            expected_open_blockers: 1,
+        },
+        Case {
+            // Issue #3 carries only a CLOSED native blocker (#2), so classifier
+            // filtering must drop it and avoid a false Blocked state.
+            issue: 3,
+            expected_state: SliceState::Wip,
+            expected_open_blockers: 0,
+        },
+    ];
 
-    // Issue #3 carries only a CLOSED native blocker (#2), so classifier-level
-    // open-set filtering must drop it and avoid a false Blocked state (it stays
-    // WIP via its open linked PR / assignee).
-    let slice3 = slices
-        .iter()
-        .find(|s| s.number == 3)
-        .expect("issue #3 should be a confirmed Slice");
-    assert_eq!(
-        slice3.blockers.len(),
-        0,
-        "issue #3's closed native blocker (#2) must be filtered out"
-    );
-    assert_ne!(
-        slice3.state,
-        SliceState::Blocked,
-        "issue #3's only native blocker (#2) is closed, so it must not be Blocked"
-    );
+    for case in cases {
+        let slice = slices
+            .iter()
+            .find(|s| s.number == case.issue)
+            .unwrap_or_else(|| panic!("issue #{} should be a confirmed Slice", case.issue));
+        assert_eq!(
+            slice.state, case.expected_state,
+            "issue #{} derived unexpected state from native blockers",
+            case.issue
+        );
+        assert_eq!(
+            slice.blockers.len(),
+            case.expected_open_blockers,
+            "issue #{} had unexpected open-blocker count after classifier filtering",
+            case.issue
+        );
+    }
 }
 
 #[tokio::test]
