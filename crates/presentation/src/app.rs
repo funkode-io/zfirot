@@ -8,12 +8,12 @@
 
 use application::{
     AuthService, BoardRefresh, BoardSnapshot, ClassifiedBoard, OtherIssue, ProjectsRefresh,
-    SecureStorePort, ThemePreference,
+    SecureStorePort,
 };
 use dioxus::prelude::*;
 use domain::{
     group_into_lanes, AgentRef, AppErrorKind, BoardSummary, GitHubToken, IssueClassification,
-    PollInterval, Project, RepoRef, Slice,
+    PollInterval, Project, RepoRef, Slice, ThemePreference,
 };
 
 use crate::components::{
@@ -151,11 +151,7 @@ pub fn App() -> Element {
                     apply_data_theme(stored);
                     theme.set(stored);
                 }
-                Ok(None) => {
-                    clear_data_theme();
-                    theme.set(resolve_system_theme().await);
-                }
-                Err(_) => {
+                Ok(None) | Err(_) => {
                     clear_data_theme();
                     theme.set(resolve_system_theme().await);
                 }

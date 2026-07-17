@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use domain::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AgentRef,
     AppAction, AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef,
-    Project, RawIssue, RawSlice, RepoRef, Slice,
+    Project, RawIssue, RawSlice, RepoRef, Slice, ThemePreference,
 };
 
 /// The seam between the application and any GitHub backend (real or fake).
@@ -342,32 +342,6 @@ pub trait SecureStorePort: Send + Sync {
     async fn load_token(&self) -> AppResult<Option<GitHubToken>>;
     /// Remove the stored token, if any (signing out).
     async fn delete_token(&self) -> AppAction;
-}
-
-/// The user-selected app theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThemePreference {
-    Light,
-    Dark,
-}
-
-impl ThemePreference {
-    /// The daisyUI theme name for this preference.
-    pub const fn as_data_theme(self) -> &'static str {
-        match self {
-            Self::Light => "light",
-            Self::Dark => "dark",
-        }
-    }
-
-    /// Parse a persisted daisyUI theme name.
-    pub fn from_data_theme(value: &str) -> Option<Self> {
-        match value {
-            "light" => Some(Self::Light),
-            "dark" => Some(Self::Dark),
-            _ => None,
-        }
-    }
 }
 
 /// Shared stores are stores too, so the composition root can pick a store at

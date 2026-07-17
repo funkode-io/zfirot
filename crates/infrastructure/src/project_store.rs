@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use application::{ProjectStorePort, ThemePreference};
+use application::ProjectStorePort;
 use async_trait::async_trait;
-use domain::{AppAction, AppError, AppResult, Project, RepoRef};
+use domain::{AppAction, AppError, AppResult, Project, RepoRef, ThemePreference};
 
 /// The config sub-directory and files Zfirot uses for locally-owned project
 /// state: the last-opened project and the cached recent-projects list.
@@ -229,6 +229,7 @@ impl ProjectStorePort for FileProjectStore {
             Err(err) => {
                 return Err(AppError::internal("Could not read the theme preference.")
                     .with_operation("FileProjectStore::theme_preference")
+                    .with_context("path", path.display().to_string())
                     .with_source(err))
             }
         };
@@ -242,17 +243,20 @@ impl ProjectStorePort for FileProjectStore {
             std::fs::create_dir_all(parent).map_err(|err| {
                 AppError::internal("Could not create the config directory.")
                     .with_operation("FileProjectStore::remember_theme_preference")
+                    .with_context("path", path.display().to_string())
                     .with_source(err)
             })?;
         }
         let bytes = serde_json::to_vec_pretty(theme.as_data_theme()).map_err(|err| {
             AppError::internal("Could not encode the theme preference.")
                 .with_operation("FileProjectStore::remember_theme_preference")
+                .with_context("path", path.display().to_string())
                 .with_source(err)
         })?;
         std::fs::write(&path, bytes).map_err(|err| {
             AppError::internal("Could not save the theme preference.")
                 .with_operation("FileProjectStore::remember_theme_preference")
+                .with_context("path", path.display().to_string())
                 .with_source(err)
         })
     }

@@ -10,9 +10,12 @@ use std::sync::Arc;
 use application::{
     AuthService, BoardRefresh, BoardService, BoardSnapshot, GitHubPort, LastOpenedService,
     LoadedBoard, ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
-    ThemePreference, TrackedProjectsService,
+    TrackedProjectsService,
 };
-use domain::{AgentRef, AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
+use domain::{
+    AgentRef, AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef,
+    ThemePreference,
+};
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
 use infrastructure::{FileProjectStore, GitHubClient, KeyringSecureStore};

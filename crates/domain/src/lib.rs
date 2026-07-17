@@ -14,6 +14,7 @@ mod project;
 mod prose;
 mod repo;
 mod slice;
+mod theme;
 mod token;
 
 pub use agent::AgentRef;
@@ -31,4 +32,5 @@ pub use repo::RepoRef;
 pub use slice::{
     resolve_unblocks, BoardSummary, DependencyRef, LinkedPrRef, RawSlice, Slice, SliceState,
 };
+pub use theme::ThemePreference;
 pub use token::GitHubToken;

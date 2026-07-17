@@ -4,10 +4,10 @@
 
 use application::{
     GitHubPort, LastOpenedService, ProjectStorePort, ProjectsRefresh, ProjectsService,
-    RecentProjectsService, ThemePreference,
+    RecentProjectsService,
 };
 use async_trait::async_trait;
-use domain::{AgentRef, AppAction, AppResult, Project, RawIssue, RepoRef};
+use domain::{AgentRef, AppAction, AppResult, Project, RawIssue, RepoRef, ThemePreference};
 use infrastructure::FakeProjectStore;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
