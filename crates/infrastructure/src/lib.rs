@@ -9,10 +9,12 @@ use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{AgentRef, AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
 
+mod board_cache;
 mod github;
 mod project_store;
 mod secure_store;
 
+pub use board_cache::{FakeBoardCache, FileBoardCache};
 pub use github::{
     parse_issues_response, parse_projects_response, parse_suggested_actors_response, GitHubClient,
 };

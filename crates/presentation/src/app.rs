@@ -7,8 +7,8 @@
 //! new one, with the reason shown inline.
 
 use application::{
-    AuthService, BoardRefresh, BoardSnapshot, ClassifiedBoard, OtherIssue, ProjectsRefresh,
-    SecureStorePort,
+    AuthService, BoardOpen, BoardRefresh, BoardSnapshot, ClassifiedBoard, OtherIssue,
+    ProjectsRefresh, SecureStorePort,
 };
 use dioxus::prelude::*;
 use domain::{
@@ -21,8 +21,8 @@ use crate::components::{
 };
 use crate::state::{
     assign_agent, assign_self, cached_projects, confirm_classification, last_opened,
-    open_and_track_project, open_project, refresh_board, refresh_projects, refresh_recent_projects,
-    secure_store, tracked_repos, untrack_repo, AppState,
+    open_and_track_project, open_board, open_project, refresh_board, refresh_projects,
+    refresh_recent_projects, secure_store, tracked_repos, untrack_repo,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -52,6 +52,7 @@ enum View {
         board: ClassifiedBoard,
         loaded_at: String,
         snapshot: BoardSnapshot,
+        from_cache: bool,
     },
     /// Show the paste-token screen. `reason` is `Some` when a stored token was
     /// rejected by GitHub (so the user knows why they are being asked again) and
@@ -101,6 +102,9 @@ pub fn App() -> Element {
     // home screen, not on every `reload` bump. Reset when the user navigates
     // back to Home so returning revalidates again.
     let mut revalidated = use_signal(|| false);
+    // Guards the board stale-while-revalidate refresh so a cached board paints
+    // instantly and then revalidates once per open.
+    let mut board_revalidated = use_signal(|| Option::<RepoRef>::None);
     // True while a freshly-pasted token is being validated and persisted. This
     // save is a mutation, not part of the read-only `view` resource, so it needs
     // its own in-flight flag to drive the spinner on the submit button.
@@ -159,6 +163,39 @@ pub fn App() -> Element {
         }
     });
 
+    // Stale-while-revalidate for project boards: if a board was painted from the
+    // local cache, refresh it once in the background and repaint only if changed.
+    use_effect(move || {
+        let cached_board = match view.read().as_ref() {
+            Some(View::Board {
+                repo,
+                snapshot,
+                from_cache: true,
+                ..
+            }) => Some((repo.clone(), snapshot.clone())),
+            _ => None,
+        };
+        if let Some((repo, snapshot)) = cached_board {
+            if board_revalidated().as_ref() == Some(&repo) {
+                return;
+            }
+            board_revalidated.set(Some(repo.clone()));
+            spawn(async move {
+                if let Ok(BoardRefresh::Changed(loaded)) = refresh_board(&repo, &snapshot).await {
+                    board_snapshot.set(Some(loaded.snapshot.clone()));
+                    prefetched_board.set(Some(View::Board {
+                        repo,
+                        board: loaded.board,
+                        loaded_at: now_hms(),
+                        snapshot: loaded.snapshot,
+                        from_cache: false,
+                    }));
+                    reload += 1;
+                }
+            });
+        }
+    });
+
     // Background poll: while a board is open, re-resolve it on a fixed cadence so
     // the columns, counts, and "last updated" timestamp stay fresh without the
     // user clicking Refresh. The interval is the configurable `PollInterval`
@@ -189,6 +226,7 @@ pub fn App() -> Element {
                             board: loaded.board,
                             loaded_at: now_hms(),
                             snapshot: loaded.snapshot,
+                            from_cache: false,
                         }));
                         reload += 1;
                     }
@@ -217,6 +255,7 @@ pub fn App() -> Element {
                             board: loaded.board,
                             loaded_at: now_hms(),
                             snapshot: loaded.snapshot,
+                            from_cache: false,
                         }));
                         reload += 1;
                     }
@@ -248,6 +287,7 @@ pub fn App() -> Element {
             // Persist the choice (best-effort) and navigate to its board.
             let _ = open_project(&repo).await;
             prefetched_board.set(None);
+            board_revalidated.set(None);
             nav.set(Nav::Project(repo));
             reload += 1;
         });
@@ -260,6 +300,7 @@ pub fn App() -> Element {
         // surfaces through the normal view resolution rather than being dropped.
         nav.set(Nav::GoTo(repo));
         prefetched_board.set(None);
+        board_revalidated.set(None);
         reload += 1;
     });
 
@@ -279,6 +320,7 @@ pub fn App() -> Element {
     let on_home = move |_| {
         nav.set(Nav::Home);
         prefetched_board.set(None);
+        board_revalidated.set(None);
         revalidated.set(false);
         reload += 1;
     };
@@ -489,6 +531,7 @@ async fn resolve_view(nav: Nav) -> View {
                     board: loaded.board,
                     loaded_at: now_hms(),
                     snapshot: loaded.snapshot,
+                    from_cache: false,
                 },
                 Err(error) if is_auth_failure(error.kind()) => {
                     let _ = auth.clear_token().await;
@@ -506,17 +549,20 @@ async fn resolve_view(nav: Nav) -> View {
         },
     };
 
-    let state = match AppState::from_token(&token, repo.clone()) {
-        Ok(state) => state,
-        Err(error) => return View::Error(error.to_string()),
-    };
-
-    match state.load_board().await {
-        Ok(loaded) => View::Board {
+    match open_board(&repo).await {
+        Ok(BoardOpen::Cached(loaded)) => View::Board {
             repo,
             board: loaded.board,
             loaded_at: now_hms(),
             snapshot: loaded.snapshot,
+            from_cache: true,
+        },
+        Ok(BoardOpen::Cold(loaded)) => View::Board {
+            repo,
+            board: loaded.board,
+            loaded_at: now_hms(),
+            snapshot: loaded.snapshot,
+            from_cache: false,
         },
         Err(error) if is_auth_failure(error.kind()) => {
             // The stored token was rejected (revoked, expired, or missing
