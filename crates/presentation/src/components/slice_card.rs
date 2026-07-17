@@ -43,9 +43,9 @@ pub fn SliceCard(
     };
 
     let card_class = if is_highlighted {
-        "card card-sm bg-base-100 shadow-sm ring-2 ring-primary py-1.5 px-3"
+        "card card-sm bg-base-300 shadow-sm ring-2 ring-primary py-1.5 px-3"
     } else {
-        "card card-sm bg-base-100 shadow-sm py-1.5 px-3"
+        "card card-sm bg-base-300 shadow-sm py-1.5 px-3"
     };
 
     rsx! {
@@ -200,7 +200,7 @@ fn AgentActionButtons(
                 }
                 if !delegating {
                     ul {
-                        class: "dropdown-content menu bg-base-100 rounded-box z-10 w-44 p-2 shadow-sm",
+                        class: "dropdown-content menu bg-base-200 rounded-box z-10 w-44 p-2 shadow-sm",
                         tabindex: "0",
                         for agent in agents {
                             li { key: "{agent.node_id}",

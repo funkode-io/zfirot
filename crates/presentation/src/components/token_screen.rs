@@ -16,8 +16,8 @@ pub fn TokenScreen(
     let is_blank = token.read().trim().is_empty();
 
     rsx! {
-        div { class: "min-h-screen bg-base-200 flex items-center justify-center p-6",
-            div { class: "card w-full max-w-md bg-base-100 shadow-md",
+        div { class: "min-h-screen bg-base-100 flex items-center justify-center p-6", "data-theme": "zfirot-dark",
+            div { class: "card w-full max-w-md bg-base-200 shadow-md",
                 div { class: "card-body",
                     h2 { class: "card-title", "Connect to GitHub" }
                     p { class: "text-sm opacity-70",
@@ -29,7 +29,7 @@ pub fn TokenScreen(
                         span { class: "icon-[lucide--external-link] size-4" }
                         "Create a fine-grained token on GitHub"
                     }
-                    div { class: "rounded-box bg-base-200 p-3 text-sm",
+                    div { class: "rounded-box bg-base-300 p-3 text-sm",
                         p { class: "font-medium mb-1", "Required repository permissions:" }
                         ul { class: "list-disc list-inside opacity-80",
                             li { "Issues — Read and write" }

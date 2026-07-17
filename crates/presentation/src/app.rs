@@ -613,7 +613,7 @@ fn BoardShell(
     #[props(default)] last_updated: Option<String>,
 ) -> Element {
     rsx! {
-        div { class: "min-h-screen bg-base-200 p-6",
+        div { class: "min-h-screen bg-base-100 p-6", "data-theme": "zfirot-dark",
             header { class: "flex items-center gap-2 mb-6",
                 ZfirotLogo {}
                 h1 { class: "text-2xl font-bold", "Zfirot" }
@@ -756,7 +756,7 @@ fn OtherIssues(
     let count = issues.len();
     rsx! {
         section { class: "mt-6",
-            div { class: "collapse collapse-arrow bg-base-100 border border-base-300",
+            div { class: "collapse collapse-arrow bg-base-200 border border-base-300",
                 input { r#type: "checkbox" }
                 div { class: "collapse-title text-lg font-semibold flex items-center gap-2",
                     "Other open issues"
