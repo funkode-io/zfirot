@@ -14,7 +14,11 @@ struct SequencePort {
 }
 
 impl SequencePort {
-    fn new(issues: Vec<Vec<RawIssue>>, deltas: Vec<Vec<RawIssue>>, agents: Vec<Vec<AgentRef>>) -> Self {
+    fn new(
+        issues: Vec<Vec<RawIssue>>,
+        deltas: Vec<Vec<RawIssue>>,
+        agents: Vec<Vec<AgentRef>>,
+    ) -> Self {
         Self {
             issues: Mutex::new(VecDeque::from(issues)),
             deltas: Mutex::new(VecDeque::from(deltas)),
@@ -34,7 +38,11 @@ impl GitHubPort for SequencePort {
             .expect("issues sequence should have a value"))
     }
 
-    async fn load_issues_since(&self, _repo: &RepoRef, _since: DateTime<Utc>) -> AppResult<Vec<RawIssue>> {
+    async fn load_issues_since(
+        &self,
+        _repo: &RepoRef,
+        _since: DateTime<Utc>,
+    ) -> AppResult<Vec<RawIssue>> {
         Ok(self
             .deltas
             .lock()
@@ -98,11 +106,7 @@ async fn refresh_reports_unchanged_when_snapshot_facts_match() {
         name: "copilot".to_string(),
         node_id: "BOT_NODE_1".to_string(),
     }];
-    let service = BoardService::new(SequencePort::new(
-        vec![issues],
-        vec![vec![]],
-        vec![agents],
-    ));
+    let service = BoardService::new(SequencePort::new(vec![issues], vec![vec![]], vec![agents]));
     let repo = RepoRef::new("funkode-io", "zfirot");
 
     let loaded = service.load(&repo).await.expect("load should succeed");

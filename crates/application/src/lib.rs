@@ -30,7 +30,18 @@ pub trait GitHubPort: Send + Sync {
 
     /// Load issues updated at or after `since`, including closed ones so close
     /// transitions can be removed from retained snapshots.
-    async fn load_issues_since(&self, repo: &RepoRef, since: DateTime<Utc>) -> AppResult<Vec<RawIssue>> {
+    ///
+    /// The default is a **safe full-load fallback**: it ignores `since` and
+    /// delegates to [`load_issues`](Self::load_issues), whose result (all issues,
+    /// closed included) is a superset of the requested delta — so the contract
+    /// still holds and close transitions remain observable; only the delta
+    /// optimization is forfeited. Adapters override this to fetch just the delta
+    /// (e.g. GitHub's `filterBy: { since }`).
+    async fn load_issues_since(
+        &self,
+        repo: &RepoRef,
+        since: DateTime<Utc>,
+    ) -> AppResult<Vec<RawIssue>> {
         let _ = since;
         self.load_issues(repo).await
     }
@@ -70,7 +81,11 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
         (**self).load_issues(repo).await
     }
 
-    async fn load_issues_since(&self, repo: &RepoRef, since: DateTime<Utc>) -> AppResult<Vec<RawIssue>> {
+    async fn load_issues_since(
+        &self,
+        repo: &RepoRef,
+        since: DateTime<Utc>,
+    ) -> AppResult<Vec<RawIssue>> {
         (**self).load_issues_since(repo, since).await
     }
 
@@ -162,7 +177,10 @@ pub enum BoardRefresh {
 fn merge_issues(retained: &[RawIssue], delta: &[RawIssue]) -> Vec<RawIssue> {
     let mut merged: Vec<RawIssue> = retained.to_vec();
     for issue in delta {
-        if let Some(position) = merged.iter().position(|current| current.number == issue.number) {
+        if let Some(position) = merged
+            .iter()
+            .position(|current| current.number == issue.number)
+        {
             if issue.closed {
                 merged.remove(position);
             } else {
@@ -519,7 +537,10 @@ impl<P: GitHubPort> BoardService<P> {
             .port
             .load_issues_since(repo, snapshot.fetched_at)
             .await
-            .map_err(|err| err.with_context("repo", repo))?;
+            .map_err(|err| {
+                err.with_context("repo", repo)
+                    .with_context("since", snapshot.fetched_at)
+            })?;
         let raw_issues = merge_issues(&snapshot.raw_issues, &delta);
         let loaded = LoadedBoard {
             board: classify(&raw_issues, &snapshot.agents),

@@ -663,7 +663,11 @@ impl GitHubPort for GitHubClient {
         Ok(projects)
     }
 
-    async fn load_issues_since(&self, repo: &RepoRef, since: DateTime<Utc>) -> AppResult<Vec<RawIssue>> {
+    async fn load_issues_since(
+        &self,
+        repo: &RepoRef,
+        since: DateTime<Utc>,
+    ) -> AppResult<Vec<RawIssue>> {
         let mut issues = Vec::new();
         let mut cursor: Option<String> = None;
 
