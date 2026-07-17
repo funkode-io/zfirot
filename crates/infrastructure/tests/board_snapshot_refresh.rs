@@ -135,6 +135,7 @@ async fn refresh_reports_changed_when_snapshot_facts_differ() {
         native_parent: Some(1),
         native_blockers: vec![],
         assignee: None,
+        assignee_avatar_url: None,
         linked_prs: vec![],
         is_native_child_of_prd: true,
     };
@@ -177,6 +178,7 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
         native_parent: None,
         native_blockers: vec![],
         assignee: None,
+        assignee_avatar_url: None,
         linked_prs: vec![],
         is_native_child_of_prd: false,
     };
@@ -190,6 +192,7 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
         native_parent: None,
         native_blockers: vec![42],
         assignee: None,
+        assignee_avatar_url: None,
         linked_prs: vec![],
         is_native_child_of_prd: false,
     };
