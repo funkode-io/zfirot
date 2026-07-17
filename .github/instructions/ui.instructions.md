@@ -20,6 +20,14 @@ applyTo: "crates/presentation/**/*.rs"
 - Styling: daisyUI (Tailwind). Icons: Iconify (Tailwind integration), using the
   **Lucide** set via the `@iconify/tailwind4` plugin — reference icons as utility
   classes, e.g. `icon-[lucide--layout-dashboard]`.
+- **Do not commit the compiled stylesheet.**
+  `crates/presentation/assets/tailwind.css` is generated from Tailwind + daisyUI
+  at build time — `dx serve`/`dx bundle` auto-run the Tailwind watcher (Dioxus
+  0.7), and `make css` regenerates it for plain `cargo run`. It was deliberately
+  untracked in #85 and is gitignored, so agents should **never** `git add -f` it
+  and issues/PRs must not carry a "rebuild and commit `tailwind.css`" step. Just
+  write the daisyUI/Tailwind utility classes in the `.rs` components; the CSS is
+  produced by the toolchain, not by hand.
 - Reusable `components` are **callback-only**: no API calls; take callbacks as
   props so they can be previewed and tested without GitHub. Desktop-specific
   components/pages live under `presentation/desktop/`.
