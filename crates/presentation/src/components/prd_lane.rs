@@ -25,6 +25,7 @@ pub fn PrdLane(
     on_highlight: EventHandler<Option<u64>>,
 ) -> Element {
     let mut collapsed = use_signal(|| false);
+    let total_slices = slices.len();
 
     // Bucket each Slice into its board column exactly once, so a Slice is cloned
     // at most once per render regardless of how many columns there are.
@@ -47,34 +48,37 @@ pub fn PrdLane(
     rsx! {
         section { class: "bg-base-200 rounded-box p-4",
             button {
-                class: "flex items-center gap-3 w-full text-left",
+                class: "flex items-center justify-between gap-3 w-full text-left",
                 "aria-label": if collapsed() { "Expand lane" } else { "Collapse lane" },
                 onclick: move |_| collapsed.set(!collapsed()),
-                match prd {
-                    Some(prd) => rsx! {
-                        a {
-                            class: "link link-hover font-semibold",
-                            href: "{prd.url}",
-                            onclick: move |e: Event<MouseData>| e.stop_propagation(),
-                            "#{prd.number} {prd.title}"
-                        }
-                    },
-                    None => rsx! {
-                        span { class: "font-semibold opacity-70", "No PRD" }
-                    },
-                }
-                if collapsed() {
-                    div { class: "flex items-center gap-1",
-                        for (state , count) in counts.iter().copied() {
-                            span {
-                                class: "badge badge-sm {state_badge_class(state)}",
-                                title: "{state_label(state)}",
-                                "{count}"
+                div { class: "flex min-w-0 items-center gap-3",
+                    match prd {
+                        Some(prd) => rsx! {
+                            a {
+                                class: "link link-hover font-semibold truncate",
+                                href: "{prd.url}",
+                                onclick: move |e: Event<MouseData>| e.stop_propagation(),
+                                "#{prd.number} {prd.title}"
+                            }
+                            span { class: "badge badge-sm badge-outline badge-neutral shrink-0", "{slices_pill_label(total_slices)}" }
+                        },
+                        None => rsx! {
+                            span { class: "font-semibold opacity-70", "No PRD" }
+                        },
+                    }
+                    if collapsed() {
+                        div { class: "flex items-center gap-1",
+                            for (state , count) in counts.iter().copied() {
+                                span {
+                                    class: "badge badge-sm {state_badge_class(state)}",
+                                    title: "{state_label(state)}",
+                                    "{count}"
+                                }
                             }
                         }
                     }
                 }
-                span { class: if collapsed() { "icon-[lucide--chevron-down] ml-auto" } else { "icon-[lucide--chevron-up] ml-auto" } }
+                span { class: if collapsed() { "icon-[lucide--chevron-down] shrink-0" } else { "icon-[lucide--chevron-up] shrink-0" } }
             }
             if !collapsed() {
                 div { class: "grid grid-cols-1 md:grid-cols-3 gap-4 mt-3",
@@ -94,5 +98,13 @@ pub fn PrdLane(
                 }
             }
         }
+    }
+}
+
+fn slices_pill_label(total_slices: usize) -> String {
+    if total_slices == 1 {
+        "1 slice".to_string()
+    } else {
+        format!("{total_slices} slices")
     }
 }
