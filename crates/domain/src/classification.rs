@@ -68,6 +68,8 @@ pub struct RawIssue {
     pub native_blockers: Vec<u64>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
+    /// Avatar URL of the assignee, when assigned and available.
+    pub assignee_avatar_url: Option<String>,
     /// The open Pull Requests linked to the issue via their closing reference.
     pub linked_prs: Vec<LinkedPrRef>,
     /// `true` when this issue is a native sub-issue child of an issue that
@@ -210,6 +212,7 @@ mod tests {
             native_parent: None,
             native_blockers: Vec::new(),
             assignee: None,
+            assignee_avatar_url: None,
             linked_prs: Vec::new(),
             is_native_child_of_prd: false,
         }

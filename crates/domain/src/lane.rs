@@ -83,6 +83,7 @@ mod tests {
             url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
             prd,
             assignee: None,
+            assignee_avatar_url: None,
             state,
             blockers: vec![],
             unblocks: vec![],

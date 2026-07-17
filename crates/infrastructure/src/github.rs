@@ -22,7 +22,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         body
         state
         labels(first: 20) { nodes { name } }
-        assignees(first: 1) { nodes { login } }
+        assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
         closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } } }
@@ -1144,12 +1144,12 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
         closed: node.state != "OPEN",
         native_parent,
         native_blockers,
-        assignee: node
+        assignee: node.assignees.nodes.first().map(|user| user.login.clone()),
+        assignee_avatar_url: node
             .assignees
             .nodes
-            .into_iter()
-            .next()
-            .map(|user| user.login),
+            .first()
+            .map(|user| user.avatar_url.clone()),
         linked_prs,
         is_native_child_of_prd,
     }
@@ -1221,6 +1221,8 @@ struct LoginConnection {
 #[derive(Deserialize)]
 struct Login {
     login: String,
+    #[serde(rename = "avatarUrl")]
+    avatar_url: String,
 }
 
 #[derive(Deserialize)]

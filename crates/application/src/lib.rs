@@ -247,6 +247,7 @@ pub fn classify(raw_issues: &[RawIssue], agents: &[AgentRef]) -> ClassifiedBoard
                     closed: false,
                     prd,
                     assignee: raw.assignee,
+                    assignee_avatar_url: raw.assignee_avatar_url,
                     linked_prs: raw.linked_prs,
                     blockers,
                     // Filled by `resolve_unblocks` once the board is mapped.
