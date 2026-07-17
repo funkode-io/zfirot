@@ -3,9 +3,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use domain::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AgentRef,
     AppAction, AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef,
@@ -27,6 +27,13 @@ pub trait GitHubPort: Send + Sync {
     /// prose-fallback parsing. Closed issues are included (`RawIssue.closed`);
     /// `classify_board` is responsible for omitting them.
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>>;
+
+    /// Load issues updated at or after `since`, including closed ones so close
+    /// transitions can be removed from retained snapshots.
+    async fn load_issues_since(&self, repo: &RepoRef, since: DateTime<Utc>) -> AppResult<Vec<RawIssue>> {
+        let _ = since;
+        self.load_issues(repo).await
+    }
 
     /// List the repositories the token can access, for the home screen. Ordering
     /// is the adapter's best effort; [`ProjectsService`] re-sorts by recency.
@@ -61,6 +68,10 @@ pub trait GitHubPort: Send + Sync {
 impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         (**self).load_issues(repo).await
+    }
+
+    async fn load_issues_since(&self, repo: &RepoRef, since: DateTime<Utc>) -> AppResult<Vec<RawIssue>> {
+        (**self).load_issues_since(repo, since).await
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -122,8 +133,8 @@ pub struct ClassifiedBoard {
 pub struct BoardSnapshot {
     raw_issues: Vec<RawIssue>,
     agents: Vec<AgentRef>,
-    /// The instant captured at fetch start.
-    pub fetched_at: Instant,
+    /// The UTC timestamp captured at fetch start.
+    pub fetched_at: DateTime<Utc>,
 }
 
 impl BoardSnapshot {
@@ -146,6 +157,22 @@ pub enum BoardRefresh {
     Changed(LoadedBoard),
     /// The fetched facts match the retained snapshot: keep current UI as-is.
     Unchanged,
+}
+
+fn merge_issues(retained: &[RawIssue], delta: &[RawIssue]) -> Vec<RawIssue> {
+    let mut merged: Vec<RawIssue> = retained.to_vec();
+    for issue in delta {
+        if let Some(position) = merged.iter().position(|current| current.number == issue.number) {
+            if issue.closed {
+                merged.remove(position);
+            } else {
+                merged[position] = issue.clone();
+            }
+        } else if !issue.closed {
+            merged.push(issue.clone());
+        }
+    }
+    merged
 }
 
 /// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
@@ -455,7 +482,7 @@ impl<P: GitHubPort> BoardService<P> {
     /// Load the project's board view plus a retained snapshot captured at fetch
     /// start, to support unchanged refresh decisions.
     pub async fn load(&self, repo: &RepoRef) -> AppResult<LoadedBoard> {
-        let fetched_at = Instant::now();
+        let fetched_at = Utc::now();
         let raw_issues = self
             .port
             .load_issues(repo)
@@ -487,7 +514,21 @@ impl<P: GitHubPort> BoardService<P> {
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
-        let loaded = self.load(repo).await?;
+        let fetched_at = Utc::now();
+        let delta = self
+            .port
+            .load_issues_since(repo, snapshot.fetched_at)
+            .await
+            .map_err(|err| err.with_context("repo", repo))?;
+        let raw_issues = merge_issues(&snapshot.raw_issues, &delta);
+        let loaded = LoadedBoard {
+            board: classify(&raw_issues, &snapshot.agents),
+            snapshot: BoardSnapshot {
+                raw_issues,
+                agents: snapshot.agents.clone(),
+                fetched_at,
+            },
+        };
         if loaded.snapshot.same_facts_as(snapshot) {
             return Ok(BoardRefresh::Unchanged);
         }

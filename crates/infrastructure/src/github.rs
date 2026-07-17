@@ -2,6 +2,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use domain::{AgentRef, AppAction, AppError, AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -14,6 +15,36 @@ const ISSUES_QUERY: &str = r#"
 query Issues($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     issues(first: 50, after: $cursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        url
+        body
+        state
+        labels(first: 20) { nodes { name } }
+        assignees(first: 1) { nodes { login } }
+        parent { number labels(first: 20) { nodes { name } } }
+        blockedBy(first: 50) { nodes { number } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } } }
+      }
+    }
+  }
+}
+"#;
+
+/// One page of issue deltas for incremental refresh: open and closed issues
+/// updated at or after `since`.
+const ISSUES_SINCE_QUERY: &str = r#"
+query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: DateTime!) {
+  repository(owner: $owner, name: $name) {
+    issues(
+      first: 50,
+      after: $cursor,
+      states: [OPEN, CLOSED],
+      filterBy: { since: $since },
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
@@ -241,6 +272,52 @@ impl GitHubClient {
         response.text().await.map_err(|err| {
             AppError::unavailable("Could not read GitHub's response")
                 .with_operation("GitHubClient::fetch_issues_page")
+                .with_source(err)
+        })
+    }
+
+    /// Fetch a single page of issue deltas for `repo`, updated at or after
+    /// `since`, starting after `cursor`.
+    async fn fetch_issues_since_page(
+        &self,
+        repo: &RepoRef,
+        since: &DateTime<Utc>,
+        cursor: Option<&str>,
+    ) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": ISSUES_SINCE_QUERY,
+            "variables": {
+                "owner": repo.owner,
+                "name": repo.name,
+                "cursor": cursor,
+                "since": since.to_rfc3339(),
+            },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_issues_since_page")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_issues_since_page",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_issues_since_page")
                 .with_source(err)
         })
     }
@@ -584,6 +661,25 @@ impl GitHubPort for GitHubClient {
         }
 
         Ok(projects)
+    }
+
+    async fn load_issues_since(&self, repo: &RepoRef, since: DateTime<Utc>) -> AppResult<Vec<RawIssue>> {
+        let mut issues = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let body = self
+                .fetch_issues_since_page(repo, &since, cursor.as_deref())
+                .await?;
+            let (page, next) = parse_issues_response(&body)?;
+            issues.extend(page);
+            match next {
+                Some(end) => cursor = Some(end),
+                None => break,
+            }
+        }
+
+        Ok(issues)
     }
 
     async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
