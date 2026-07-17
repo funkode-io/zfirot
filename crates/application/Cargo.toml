@@ -8,3 +8,4 @@ license.workspace = true
 domain.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+chrono.workspace = true
