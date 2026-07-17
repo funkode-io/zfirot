@@ -7,9 +7,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use domain::{
-    classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AgentRef,
-    AppAction, AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef,
-    Project, RawIssue, RawSlice, RepoRef, Slice,
+    classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AppAction,
+    AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef, Project,
+    RawIssue, RawSlice, RepoRef, Slice,
 };
 
 /// The seam between the application and any GitHub backend (real or fake).
@@ -36,23 +36,9 @@ pub trait GitHubPort: Send + Sync {
     /// so picking up a Ready Slice from the board claims it on GitHub.
     async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction;
 
-    /// Delegate an issue to `agent`, so handing a Ready Slice to an Agent starts
-    /// a coding session on GitHub. Like [`assign_self`](Self::assign_self) this
-    /// adds an assignee (which makes the Slice WIP on the next poll); the chosen
-    /// Agent's node ID is resolved live by the adapter at action time.
-    async fn assign_agent(&self, repo: &RepoRef, issue_number: u64, agent: &AgentRef) -> AppAction;
-
     /// Add a label to an issue, so confirming a suggested classification tags it
     /// (`prd` or `slice`) and the next poll reclassifies it onto the board.
     async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction;
-
-    /// Discover which Agents can currently be assigned on `repo`.
-    ///
-    /// Queries GitHub's `suggestedActors(capabilities: [CAN_BE_ASSIGNED])` and
-    /// keeps only bot actors. Returns zero or more [`AgentRef`]s. An empty
-    /// result (e.g. Copilot not enabled) is a valid success; the caller treats a
-    /// failure the same as an empty result (best-effort discovery).
-    async fn suggested_agents(&self, repo: &RepoRef) -> AppResult<Vec<AgentRef>>;
 }
 
 /// Shared ports are ports too, so the composition root can hand the same
@@ -71,16 +57,8 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
         (**self).assign_self(repo, issue_number).await
     }
 
-    async fn assign_agent(&self, repo: &RepoRef, issue_number: u64, agent: &AgentRef) -> AppAction {
-        (**self).assign_agent(repo, issue_number, agent).await
-    }
-
     async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
         (**self).add_label(repo, issue_number, label).await
-    }
-
-    async fn suggested_agents(&self, repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        (**self).suggested_agents(repo).await
     }
 }
 
@@ -106,14 +84,11 @@ pub struct OtherIssue {
 /// - `slices` — tier-1 confirmed Slices, ready for the Kanban columns.
 /// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
 /// - `other`  — suggested and unclassified issues for the "other open issues" bucket.
-/// - `agents` — Agents that can currently be assigned on this repo (zero or more),
-///   discovered best-effort during classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedBoard {
     pub slices: Vec<Slice>,
     pub prds: Vec<Prd>,
     pub other: Vec<OtherIssue>,
-    pub agents: Vec<AgentRef>,
 }
 
 /// A retained fetch snapshot of a board, used to decide whether a refresh would
@@ -121,14 +96,13 @@ pub struct ClassifiedBoard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardSnapshot {
     raw_issues: Vec<RawIssue>,
-    agents: Vec<AgentRef>,
     /// The instant captured at fetch start.
     pub fetched_at: Instant,
 }
 
 impl BoardSnapshot {
     fn same_facts_as(&self, other: &Self) -> bool {
-        self.raw_issues == other.raw_issues && self.agents == other.agents
+        self.raw_issues == other.raw_issues
     }
 }
 
@@ -175,8 +149,8 @@ fn resolve_open_blockers(
         .collect()
 }
 
-/// Pure projection from a raw issue set + discovered agents to a classified board.
-pub fn classify(raw_issues: &[RawIssue], agents: &[AgentRef]) -> ClassifiedBoard {
+/// Pure projection from a raw issue set to a classified board.
+pub fn classify(raw_issues: &[RawIssue]) -> ClassifiedBoard {
     // The numbers of issues that are still open in this board, so prose
     // blockers (which carry no open/closed state of their own) and native
     // blockers (which may include closed issues) can be filtered to open
@@ -279,7 +253,6 @@ pub fn classify(raw_issues: &[RawIssue], agents: &[AgentRef]) -> ClassifiedBoard
         slices,
         prds,
         other,
-        agents: agents.to_vec(),
     }
 }
 
@@ -398,28 +371,6 @@ impl<P: GitHubPort> BoardService<P> {
             })
     }
 
-    /// Delegate a Ready Slice to `agent`, starting an Agent coding session on
-    /// GitHub.
-    ///
-    /// On success the caller re-polls the board: the now-assigned Slice derives
-    /// `Wip` and leaves the Ready column, exactly as a human-claimed one does. On
-    /// failure the error carries the repo and issue for context and the board is
-    /// left unchanged.
-    pub async fn assign_agent(
-        &self,
-        repo: &RepoRef,
-        issue_number: u64,
-        agent: &AgentRef,
-    ) -> AppAction {
-        self.port
-            .assign_agent(repo, issue_number, agent)
-            .await
-            .map_err(|err| {
-                err.with_context("repo", repo)
-                    .with_context("issue", issue_number)
-            })
-    }
-
     /// Confirm a *suggested* classification by adding its tier-1 label (`prd` or
     /// `slice`) to the issue on GitHub.
     ///
@@ -461,21 +412,11 @@ impl<P: GitHubPort> BoardService<P> {
             .load_issues(repo)
             .await
             .map_err(|err| err.with_context("repo", repo))?;
-        // Discover Assignable Agents best-effort: a failure yields an empty set
-        // and the board still classifies its Slices normally.
-        let agents = match self.port.suggested_agents(repo).await {
-            Ok(agents) => agents,
-            Err(e) => {
-                tracing::warn!(repo = %repo, error = ?e, "agent discovery failed; degrading to empty agent set");
-                Vec::new()
-            }
-        };
 
         Ok(LoadedBoard {
-            board: classify(&raw_issues, &agents),
+            board: classify(&raw_issues),
             snapshot: BoardSnapshot {
                 raw_issues,
-                agents,
                 fetched_at,
             },
         })

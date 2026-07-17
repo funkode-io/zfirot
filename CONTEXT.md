@@ -59,20 +59,18 @@ A closed Slice or PRD. Hidden from the active board.
 _Avoid_: complete, finished, merged
 
 **Agent**:
-A non-human worker that can be given a Ready Slice to work on. In v1 the only
-Agent is GitHub's hosted Copilot coding agent, delegated to by assigning its bot
-account to the Slice's issue. Self-hosted Agents (containers the app launches)
-are a later phase. Delegating to an Agent is one way to pick up a Slice; the goal
-is to parallelise work across every available Agent.
+A non-human worker that can be given a Ready Slice to work on (in v1, GitHub's
+hosted Copilot coding agent). Hand-off to an Agent happens **outside the app**
+via a dedicated PR-creation skill that opens a PR and comments to the agent; the
+app itself no longer assigns Agents (the GitHub delegate mutation proved
+unreliable). The goal is still to parallelise work across every available Agent.
 _Avoid_: bot, worker, copilot (the specific provider, not the role)
 
-**Assignable Agent**:
-An Agent that can currently be given a Slice on a given repo, discovered live per
-board. The board carries the full set of them (zero or more); in v1 the set is
-either empty or just GitHub's Copilot, but later it also includes any local
-Agents. When a Slice is delegated the user picks which Assignable Agent does the
-work. Carried on the board read model as current state, never persisted.
-_Avoid_: available bot, copilot id, the agent (there may be several)
+**Assignable Agent** _(removed)_:
+Previously the live-discovered set of Agents the app carried on the board read
+model and let the user delegate a Slice to. Removed together with in-app Agent
+assignment; kept here so older commits and the superseded ADR 0003 still read
+coherently.
 
 **Unclassified issue**:
 An open GitHub Issue the app cannot confidently map to a PRD or Slice. Surfaced

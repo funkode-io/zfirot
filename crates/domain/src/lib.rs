@@ -3,7 +3,6 @@
 //! `Prd` and `Slice` are read models projected from GitHub (GitHub is the source
 //! of truth). This crate has no dependencies on other layers.
 
-mod agent;
 mod classification;
 mod error;
 mod freshness;
@@ -16,7 +15,6 @@ mod repo;
 mod slice;
 mod token;
 
-pub use agent::AgentRef;
 pub use classification::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
 };
