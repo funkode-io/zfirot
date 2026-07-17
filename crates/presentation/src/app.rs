@@ -8,7 +8,7 @@
 
 use application::{
     AuthService, BoardRefresh, BoardSnapshot, ClassifiedBoard, OtherIssue, ProjectsRefresh,
-    SecureStorePort,
+    SecureStorePort, ThemePreference,
 };
 use dioxus::prelude::*;
 use domain::{
@@ -22,7 +22,8 @@ use crate::components::{
 use crate::state::{
     assign_agent, assign_self, cached_projects, confirm_classification, last_opened,
     open_and_track_project, open_project, refresh_board, refresh_projects, refresh_recent_projects,
-    secure_store, tracked_repos, untrack_repo, AppState,
+    remember_theme_preference, secure_store, theme_preference, tracked_repos, untrack_repo,
+    AppState,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -113,6 +114,11 @@ pub fn App() -> Element {
     // A board view fetched by a `Changed` refresh, handed to the next `view`
     // resolution so it repaints the fresh board without a second network fetch.
     let mut prefetched_board = use_signal(|| Option::<View>::None);
+    // The currently active theme for the toggle UI. When no preference is stored,
+    // this is initialised from the OS `prefers-color-scheme`.
+    let mut theme = use_signal(|| ThemePreference::Light);
+    // Runs theme initialisation exactly once.
+    let mut theme_initialized = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -130,6 +136,31 @@ pub fn App() -> Element {
     use_effect(move || match view.read().as_ref() {
         Some(View::Board { snapshot, .. }) => board_snapshot.set(Some(snapshot.clone())),
         _ => board_snapshot.set(None),
+    });
+
+    // Resolve persisted theme once on launch. With no stored preference, leave
+    // `data-theme` unset so daisyUI follows the OS `prefers-color-scheme`.
+    use_effect(move || {
+        if theme_initialized() {
+            return;
+        }
+        theme_initialized.set(true);
+        spawn(async move {
+            match theme_preference().await {
+                Ok(Some(stored)) => {
+                    apply_data_theme(stored);
+                    theme.set(stored);
+                }
+                Ok(None) => {
+                    clear_data_theme();
+                    theme.set(resolve_system_theme().await);
+                }
+                Err(_) => {
+                    clear_data_theme();
+                    theme.set(resolve_system_theme().await);
+                }
+            }
+        });
     });
 
     // Stale-while-revalidate: once the home screen has painted *from the cache*,
@@ -283,6 +314,19 @@ pub fn App() -> Element {
         reload += 1;
     };
 
+    // Toggle and persist the selected app theme.
+    let on_toggle_theme = move |_| {
+        spawn(async move {
+            let next = match theme() {
+                ThemePreference::Light => ThemePreference::Dark,
+                ThemePreference::Dark => ThemePreference::Light,
+            };
+            apply_data_theme(next);
+            theme.set(next);
+            let _ = remember_theme_preference(next).await;
+        });
+    };
+
     // True only on a *cold* board load: the user navigated to a project whose
     // board is not on screen yet (opening it from home, or reopening the last
     // one on launch). A board *self-refresh* — the background poll, the Refresh
@@ -319,7 +363,7 @@ pub fn App() -> Element {
             // that is merely self-refreshing keeps `board_loading` false and so
             // falls through to the populated `View::Board` arm below.
             (_, true, Nav::Project(repo) | Nav::GoTo(repo)) => rsx! {
-                BoardShell { repo: repo.to_string(), on_home,
+                BoardShell { repo: repo.to_string(), on_home, theme: theme(), on_toggle_theme,
                     div { class: "flex justify-center py-16",
                         Spinner { label: "Loading board…" }
                     }
@@ -419,6 +463,8 @@ pub fn App() -> Element {
                     BoardShell {
                         repo: repo.to_string(),
                         on_home,
+                        theme: theme(),
+                        on_toggle_theme,
                         on_refresh,
                         refreshing,
                         last_updated: loaded_at.clone(),
@@ -443,7 +489,7 @@ pub fn App() -> Element {
                 }
             }
             (Some(View::Error(message)), ..) => rsx! {
-                BoardShell { on_home, on_refresh,
+                BoardShell { on_home, on_refresh, theme: theme(), on_toggle_theme,
                     ErrorBanner { message: message.clone() }
                 }
             },
@@ -584,6 +630,32 @@ async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToke
     }
 }
 
+fn apply_data_theme(theme: ThemePreference) {
+    let script = format!(
+        "document.documentElement.setAttribute('data-theme', '{}');",
+        theme.as_data_theme()
+    );
+    document::eval(&script);
+}
+
+fn clear_data_theme() {
+    document::eval("document.documentElement.removeAttribute('data-theme');");
+}
+
+async fn resolve_system_theme() -> ThemePreference {
+    let prefers_dark = document::eval(
+        "return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;",
+    )
+    .join::<bool>()
+    .await
+    .unwrap_or(false);
+    if prefers_dark {
+        ThemePreference::Dark
+    } else {
+        ThemePreference::Light
+    }
+}
+
 /// Whether an error means the token itself is the problem (so the user should be
 /// asked for a new one) rather than a transient/network failure.
 fn is_auth_failure(kind: AppErrorKind) -> bool {
@@ -607,6 +679,8 @@ fn now_hms() -> String {
 fn BoardShell(
     children: Element,
     on_home: EventHandler<()>,
+    theme: ThemePreference,
+    on_toggle_theme: EventHandler<()>,
     #[props(default)] repo: Option<String>,
     #[props(default)] on_refresh: Option<EventHandler<()>>,
     #[props(default)] refreshing: bool,
@@ -631,6 +705,17 @@ fn BoardShell(
                 }
                 // Freshness controls, pushed to the right.
                 div { class: "ml-auto flex items-center gap-3",
+                    button {
+                        class: "btn btn-ghost btn-sm btn-square",
+                        title: "Toggle theme",
+                        aria_label: "Toggle theme",
+                        onclick: move |_| on_toggle_theme.call(()),
+                        if theme == ThemePreference::Dark {
+                            span { class: "icon-[lucide--moon] size-5" }
+                        } else {
+                            span { class: "icon-[lucide--sun] size-5" }
+                        }
+                    }
                     if let Some(updated) = last_updated {
                         span { class: "text-xs opacity-60", "Updated {updated}" }
                     }

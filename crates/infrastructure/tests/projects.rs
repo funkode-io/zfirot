@@ -4,7 +4,7 @@
 
 use application::{
     GitHubPort, LastOpenedService, ProjectStorePort, ProjectsRefresh, ProjectsService,
-    RecentProjectsService,
+    RecentProjectsService, ThemePreference,
 };
 use async_trait::async_trait;
 use domain::{AgentRef, AppAction, AppResult, Project, RawIssue, RepoRef};
@@ -66,6 +66,14 @@ impl ProjectStorePort for CountingProjectStore {
     }
 
     async fn untrack_repo(&self, _repo: &RepoRef) -> AppAction {
+        Ok(())
+    }
+
+    async fn theme_preference(&self) -> AppResult<Option<ThemePreference>> {
+        Ok(None)
+    }
+
+    async fn remember_theme_preference(&self, _theme: ThemePreference) -> AppAction {
         Ok(())
     }
 }
@@ -183,6 +191,28 @@ async fn cached_projects_round_trip_through_the_store() {
         store.cached_projects().await.expect("store should read"),
         Some(sorted_live()),
         "the cached list reads back unchanged"
+    );
+}
+
+#[tokio::test]
+async fn theme_preference_round_trips_through_the_store() {
+    let store = FakeProjectStore::empty();
+
+    assert_eq!(
+        store.theme_preference().await.expect("store should read"),
+        None,
+        "no theme preference is stored initially"
+    );
+
+    store
+        .remember_theme_preference(ThemePreference::Dark)
+        .await
+        .expect("saving should persist the preference");
+
+    assert_eq!(
+        store.theme_preference().await.expect("store should read"),
+        Some(ThemePreference::Dark),
+        "the saved theme preference reads back unchanged"
     );
 }
 

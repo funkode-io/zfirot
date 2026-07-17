@@ -344,6 +344,32 @@ pub trait SecureStorePort: Send + Sync {
     async fn delete_token(&self) -> AppAction;
 }
 
+/// The user-selected app theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemePreference {
+    Light,
+    Dark,
+}
+
+impl ThemePreference {
+    /// The daisyUI theme name for this preference.
+    pub const fn as_data_theme(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// Parse a persisted daisyUI theme name.
+    pub fn from_data_theme(value: &str) -> Option<Self> {
+        match value {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+}
+
 /// Shared stores are stores too, so the composition root can pick a store at
 /// runtime (`Arc<dyn SecureStorePort>`) and hand it to an [`AuthService`].
 #[async_trait]
@@ -384,6 +410,10 @@ pub trait ProjectStorePort: Send + Sync {
     async fn track_repo(&self, repo: &RepoRef) -> AppAction;
     /// Remove a repo from the tracked list.
     async fn untrack_repo(&self, repo: &RepoRef) -> AppAction;
+    /// The persisted theme preference, or `None` when unset.
+    async fn theme_preference(&self) -> AppResult<Option<ThemePreference>>;
+    /// Persist the selected theme preference.
+    async fn remember_theme_preference(&self, theme: ThemePreference) -> AppAction;
 }
 
 /// Shared stores are stores too, so the composition root can hand the same
@@ -416,6 +446,14 @@ impl<S: ProjectStorePort + ?Sized> ProjectStorePort for Arc<S> {
 
     async fn untrack_repo(&self, repo: &RepoRef) -> AppAction {
         (**self).untrack_repo(repo).await
+    }
+
+    async fn theme_preference(&self) -> AppResult<Option<ThemePreference>> {
+        (**self).theme_preference().await
+    }
+
+    async fn remember_theme_preference(&self, theme: ThemePreference) -> AppAction {
+        (**self).remember_theme_preference(theme).await
     }
 }
 
