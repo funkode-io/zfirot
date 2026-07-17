@@ -56,6 +56,10 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     assert_eq!(child.linked_prs[1].number, 13);
     assert_eq!(child.linked_prs[1].author, None);
     assert_eq!(child.assignee.as_deref(), Some("carlos-verdes"));
+    assert_eq!(
+        child.assignee_avatar_url.as_deref(),
+        Some("https://avatars.githubusercontent.com/u/1?v=4")
+    );
 
     // A `slice`-labelled issue: both OPEN and CLOSED native blockers are kept
     // for classifier-level open-set filtering. No native parent here (prose

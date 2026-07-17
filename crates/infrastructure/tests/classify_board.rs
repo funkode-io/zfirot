@@ -158,6 +158,11 @@ async fn classify_board_carries_linked_prs_onto_the_slice() {
         slice3.linked_prs[0].author.as_deref(),
         Some("carlos-verdes")
     );
+    assert_eq!(
+        slice3.assignee_avatar_url.as_deref(),
+        Some("https://avatars.githubusercontent.com/u/1?v=4"),
+        "issue #3 assignee avatar should be carried to the Slice read model"
+    );
 }
 
 #[tokio::test]
@@ -212,6 +217,7 @@ impl application::GitHubPort for ClosedParentFixturePort {
                 native_parent: None,
                 native_blockers: vec![],
                 assignee: None,
+                assignee_avatar_url: None,
                 linked_prs: vec![],
                 is_native_child_of_prd: false,
             },
@@ -225,6 +231,7 @@ impl application::GitHubPort for ClosedParentFixturePort {
                 native_parent: Some(50),
                 native_blockers: vec![],
                 assignee: None,
+                assignee_avatar_url: None,
                 linked_prs: vec![],
                 is_native_child_of_prd: false,
             },
