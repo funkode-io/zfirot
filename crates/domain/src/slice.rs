@@ -111,6 +111,8 @@ pub struct Slice {
     pub prd: Option<PrdRef>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
+    /// Avatar URL of the assignee, when assigned and available.
+    pub assignee_avatar_url: Option<String>,
     pub state: SliceState,
     /// The still-open issues this Slice is blocked by, for the blocker badges.
     pub blockers: Vec<DependencyRef>,
@@ -138,6 +140,8 @@ pub struct RawSlice {
     pub prd: Option<PrdRef>,
     /// GitHub login of the assignee, when assigned.
     pub assignee: Option<String>,
+    /// Avatar URL of the assignee, when assigned and available.
+    pub assignee_avatar_url: Option<String>,
     /// The open Pull Requests linked to the issue via their closing reference.
     /// A non-empty list makes the Slice WIP.
     pub linked_prs: Vec<LinkedPrRef>,
@@ -159,6 +163,7 @@ impl RawSlice {
             url: self.url,
             prd: self.prd,
             assignee: self.assignee,
+            assignee_avatar_url: self.assignee_avatar_url,
             state,
             blockers: self.blockers,
             unblocks: self.unblocks,
@@ -238,6 +243,7 @@ mod tests {
                 url: "https://github.com/funkode-io/zfirot/issues/7".to_string(),
             }),
             assignee: None,
+            assignee_avatar_url: None,
             linked_prs: vec![],
             blockers: vec![],
             unblocks: vec![],
@@ -374,6 +380,7 @@ mod tests {
             number: 42,
             title: "Wire the thing".to_string(),
             assignee: Some("octocat".to_string()),
+            assignee_avatar_url: Some("https://avatars.githubusercontent.com/u/1?v=4".to_string()),
             linked_prs: vec![linked_pr()],
             ..ready_raw()
         };
@@ -388,6 +395,10 @@ mod tests {
             Some("A PRD")
         );
         assert_eq!(slice.assignee.as_deref(), Some("octocat"));
+        assert_eq!(
+            slice.assignee_avatar_url.as_deref(),
+            Some("https://avatars.githubusercontent.com/u/1?v=4")
+        );
         assert_eq!(slice.state, SliceState::Wip);
         assert_eq!(slice.linked_prs, vec![linked_pr()]);
     }
@@ -509,6 +520,7 @@ mod tests {
             url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
             prd: None,
             assignee: None,
+            assignee_avatar_url: None,
             state,
             blockers: vec![],
             unblocks: vec![],

@@ -74,7 +74,19 @@ pub fn SliceCard(
                     "#{slice.number}"
                 }
                 if let Some(assignee) = slice.assignee.clone() {
-                    span { class: "text-xs text-base-content/60","@{assignee}" }
+                    if let Some(avatar_url) = slice.assignee_avatar_url.clone() {
+                        div { class: "avatar",
+                            div { class: "w-5 rounded-full",
+                                img {
+                                    src: "{avatar_url}",
+                                    alt: "@{assignee}",
+                                }
+                            }
+                        }
+                        span { class: "text-xs text-base-content/60","@{assignee}" }
+                    } else {
+                        span { class: "text-xs text-base-content/60","@{assignee}" }
+                    }
                 } else {
                     // Ready cards reserve space for the action buttons on this row.
                     div { class: "flex items-center gap-1 ml-auto",
