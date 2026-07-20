@@ -19,6 +19,38 @@ Load this when creating branches, committing, or opening PRs.
 - NEVER force-push a branch with an open PR; address review with new commits.
 - Remotes: `upstream` = funkode-io/zfirot, `origin` = carlos-verdes/zfirot.
 
+## Avoiding silent merge-loss across parallel PRs
+
+Two PRs that are each green in isolation can still corrupt `main` when merged in
+sequence, because the local `pre-push` hook only ever sees one branch. This has
+happened twice:
+
+- **Build break (#81 + #89):** #81 added a `RawIssue` field; #89's test built
+  `RawIssue` without it. Merged together, `main` failed to compile.
+- **Silent feature-loss (#110 + #111):** both rewrote the same `BoardShell`.
+  #111 was branched off `main` *before* #110 merged, so merging #111 reverted
+  #110's theme switcher — and it still **compiled**, so nothing flagged it.
+
+The second class is the dangerous one: a merge can delete a shipped feature
+without any conflict marker or CI failure, because the reverting side simply
+never references the deleted code. Guard against it:
+
+- **Merge only from a branch that is up to date with `main`.** Before merging,
+  `git merge upstream/main` into the PR branch and let CI re-run on the combined
+  result. Branch protection enforces this ("require branches to be up to date").
+  This turns a silent revert into a visible conflict you must resolve.
+- **When a sibling PR merges, immediately sync every other open PR** with
+  `main`. Do not let an open branch drift across a sibling merge — the longer it
+  drifts, the more likely its stale copy of a shared file wins.
+- **Do not parallelise PRs that edit the same hot file** (e.g. `app.rs` /
+  `BoardShell`). If two frontier tickets both touch one component, **stack**
+  them (one based on the other's branch) instead of opening both off `main`.
+- **After merging a PR that touches a shared file, verify no sibling feature
+  was reverted** — grep `main` for the sibling's key symbols (e.g. a type,
+  component, or port method it introduced) before moving on.
+- Resolving a conflict means **keeping both features**, never taking one whole
+  side blindly. A clean `cargo build` is not proof the merge was correct.
+
 ## Before pushing
 
 - Run `make hooks` once after cloning to install the version-controlled git
