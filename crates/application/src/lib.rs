@@ -171,8 +171,11 @@ pub struct LoadedBoard {
 pub enum BoardRefresh {
     /// The fetched facts differ from the retained snapshot: repaint with `view`.
     Changed(LoadedBoard),
-    /// The fetched facts match the retained snapshot: keep current UI as-is.
-    Unchanged,
+    /// The fetched facts match the retained snapshot: keep the current UI as-is,
+    /// but adopt this snapshot so its advanced `fetched_at` moves the next delta
+    /// `since` window forward (in memory and on disk) instead of re-fetching the
+    /// same growing window every time.
+    Unchanged(BoardSnapshot),
 }
 
 fn merge_issues(retained: &[RawIssue], delta: &[RawIssue]) -> Vec<RawIssue> {
@@ -577,7 +580,7 @@ impl<P: GitHubPort> BoardService<P> {
             },
         };
         if loaded.snapshot.same_facts_as(snapshot) {
-            return Ok(BoardRefresh::Unchanged);
+            return Ok(BoardRefresh::Unchanged(loaded.snapshot));
         }
         Ok(BoardRefresh::Changed(loaded))
     }
@@ -646,7 +649,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         let refresh = self.board.refresh(repo, snapshot).await?;
         let snapshot_to_cache = match &refresh {
             BoardRefresh::Changed(loaded) => &loaded.snapshot,
-            BoardRefresh::Unchanged => snapshot,
+            BoardRefresh::Unchanged(snapshot) => snapshot,
         };
         self.cache
             .cache_board(repo, snapshot_to_cache)

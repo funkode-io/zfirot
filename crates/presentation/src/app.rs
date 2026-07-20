@@ -181,16 +181,24 @@ pub fn App() -> Element {
             }
             board_revalidated.set(Some(repo.clone()));
             spawn(async move {
-                if let Ok(BoardRefresh::Changed(loaded)) = refresh_board(&repo, &snapshot).await {
-                    board_snapshot.set(Some(loaded.snapshot.clone()));
-                    prefetched_board.set(Some(View::Board {
-                        repo,
-                        board: loaded.board,
-                        loaded_at: now_hms(),
-                        snapshot: loaded.snapshot,
-                        from_cache: false,
-                    }));
-                    reload += 1;
+                match refresh_board(&repo, &snapshot).await {
+                    Ok(BoardRefresh::Changed(loaded)) => {
+                        board_snapshot.set(Some(loaded.snapshot.clone()));
+                        prefetched_board.set(Some(View::Board {
+                            repo,
+                            board: loaded.board,
+                            loaded_at: now_hms(),
+                            snapshot: loaded.snapshot,
+                            from_cache: false,
+                        }));
+                        reload += 1;
+                    }
+                    // Facts unchanged: don't repaint, but adopt the snapshot so
+                    // its advanced `fetched_at` moves the next delta window on.
+                    Ok(BoardRefresh::Unchanged(snapshot)) => {
+                        board_snapshot.set(Some(snapshot));
+                    }
+                    Err(_) => {}
                 }
             });
         }
@@ -216,19 +224,26 @@ pub fn App() -> Element {
             if let Some(View::Board { repo, .. }) = &*view.peek() {
                 let repo = repo.clone();
                 if let Some(snapshot) = board_snapshot() {
-                    if let Ok(BoardRefresh::Changed(loaded)) = refresh_board(&repo, &snapshot).await
-                    {
-                        // Stash the already-fetched board and repaint from it, so
-                        // a change costs one fetch, not two (refresh + reload).
-                        board_snapshot.set(Some(loaded.snapshot.clone()));
-                        prefetched_board.set(Some(View::Board {
-                            repo,
-                            board: loaded.board,
-                            loaded_at: now_hms(),
-                            snapshot: loaded.snapshot,
-                            from_cache: false,
-                        }));
-                        reload += 1;
+                    match refresh_board(&repo, &snapshot).await {
+                        Ok(BoardRefresh::Changed(loaded)) => {
+                            // Stash the already-fetched board and repaint from it, so
+                            // a change costs one fetch, not two (refresh + reload).
+                            board_snapshot.set(Some(loaded.snapshot.clone()));
+                            prefetched_board.set(Some(View::Board {
+                                repo,
+                                board: loaded.board,
+                                loaded_at: now_hms(),
+                                snapshot: loaded.snapshot,
+                                from_cache: false,
+                            }));
+                            reload += 1;
+                        }
+                        // Facts unchanged: don't repaint, but adopt the snapshot so
+                        // its advanced `fetched_at` moves the next delta window on.
+                        Ok(BoardRefresh::Unchanged(snapshot)) => {
+                            board_snapshot.set(Some(snapshot));
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -245,19 +260,26 @@ pub fn App() -> Element {
             if let Some(snapshot) = board_snapshot() {
                 spawn(async move {
                     board_refreshing.set(true);
-                    if let Ok(BoardRefresh::Changed(loaded)) = refresh_board(&repo, &snapshot).await
-                    {
-                        // Repaint from the fetched board rather than reloading,
-                        // which would fetch the same board again.
-                        board_snapshot.set(Some(loaded.snapshot.clone()));
-                        prefetched_board.set(Some(View::Board {
-                            repo,
-                            board: loaded.board,
-                            loaded_at: now_hms(),
-                            snapshot: loaded.snapshot,
-                            from_cache: false,
-                        }));
-                        reload += 1;
+                    match refresh_board(&repo, &snapshot).await {
+                        Ok(BoardRefresh::Changed(loaded)) => {
+                            // Repaint from the fetched board rather than reloading,
+                            // which would fetch the same board again.
+                            board_snapshot.set(Some(loaded.snapshot.clone()));
+                            prefetched_board.set(Some(View::Board {
+                                repo,
+                                board: loaded.board,
+                                loaded_at: now_hms(),
+                                snapshot: loaded.snapshot,
+                                from_cache: false,
+                            }));
+                            reload += 1;
+                        }
+                        // Facts unchanged: don't repaint, but adopt the snapshot so
+                        // its advanced `fetched_at` moves the next delta window on.
+                        Ok(BoardRefresh::Unchanged(snapshot)) => {
+                            board_snapshot.set(Some(snapshot));
+                        }
+                        Err(_) => {}
                     }
                     board_refreshing.set(false);
                 });

@@ -80,19 +80,6 @@ impl AppState {
         Self { repo, port }
     }
 
-    /// Load and classify the board for the wired project, returning the
-    /// retained snapshot used by refresh.
-    pub async fn load_board(&self) -> AppResult<LoadedBoard> {
-        BoardService::new(self.port.clone()).load(&self.repo).await
-    }
-
-    /// Refresh the board against a retained snapshot.
-    pub async fn refresh_board(&self, snapshot: &BoardSnapshot) -> AppResult<BoardRefresh> {
-        BoardService::new(self.port.clone())
-            .refresh(&self.repo, snapshot)
-            .await
-    }
-
     /// Assign the authenticated user to a Ready Slice's issue, claiming it on
     /// GitHub. The caller re-polls the board on success.
     pub async fn assign_self(&self, issue_number: u64) -> AppAction {

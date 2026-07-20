@@ -228,7 +228,7 @@ async fn seeded_open_uses_cache_then_refreshes_and_rewrites_cache() {
                 "delta should be applied on top of cache"
             );
         }
-        BoardRefresh::Unchanged => panic!("closing an issue in delta should change the board"),
+        BoardRefresh::Unchanged(_) => panic!("closing an issue in delta should change the board"),
     }
 
     assert!(cache.writes() >= 2, "successful refresh rewrites cache");
@@ -286,4 +286,50 @@ async fn cache_is_scoped_per_repo_for_switch_and_reopen() {
         }
         BoardOpen::Cold(_) => panic!("seeded repo b should open from cache"),
     }
+}
+
+#[tokio::test]
+async fn unchanged_refresh_advances_cached_fetched_at() {
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        SequencePort::new(
+            vec![vec![open_issue(30, "Stable")]],
+            // Empty delta => the board facts are unchanged on refresh.
+            vec![vec![]],
+            vec![vec![]],
+        ),
+        cache.clone(),
+    );
+
+    let snapshot = match service.open(&repo).await.expect("cold open should seed") {
+        BoardOpen::Cold(loaded) => loaded.snapshot,
+        BoardOpen::Cached(_) => panic!("first open is cold"),
+    };
+
+    let refresh = service
+        .refresh_cached(&repo, &snapshot)
+        .await
+        .expect("refresh should succeed");
+
+    // Facts are unchanged, but the snapshot must carry an advanced `fetched_at`
+    // so the next delta `since` window moves forward instead of growing.
+    let advanced = match refresh {
+        BoardRefresh::Unchanged(advanced) => advanced,
+        BoardRefresh::Changed(_) => panic!("empty delta should leave the board unchanged"),
+    };
+    assert!(
+        advanced.fetched_at > snapshot.fetched_at,
+        "unchanged refresh must advance fetched_at",
+    );
+
+    let cached = cache
+        .cached_board(&repo)
+        .await
+        .expect("cache read should succeed")
+        .expect("cache should hold a snapshot");
+    assert_eq!(
+        cached.fetched_at, advanced.fetched_at,
+        "unchanged refresh must persist the advanced snapshot to the cache",
+    );
 }
