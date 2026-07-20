@@ -27,7 +27,7 @@ pub fn Spinner(#[props(default)] label: Option<String>) -> Element {
 #[component]
 pub fn LoadingScreen(#[props(default)] label: Option<String>) -> Element {
     rsx! {
-        div { class: "min-h-screen bg-base-100 grid place-items-center", "data-theme": "zfirot-dark",
+        div { class: "min-h-screen bg-base-100 grid place-items-center",
             Spinner { label }
         }
     }

@@ -13,7 +13,7 @@ use application::{
 use dioxus::prelude::*;
 use domain::{
     group_into_lanes, AppErrorKind, BoardSummary, GitHubToken, IssueClassification, PollInterval,
-    Project, ReconcileInterval, RepoRef, Slice,
+    Project, ReconcileInterval, RepoRef, Slice, ThemePreference,
 };
 
 use crate::components::{
@@ -22,8 +22,8 @@ use crate::components::{
 use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
     confirm_classification, last_opened, open_and_track_project, open_board, open_project,
-    reconcile_board, refresh_board, refresh_projects, refresh_recent_projects, secure_store,
-    tracked_repos, untrack_repo,
+    reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
+    remember_theme_preference, secure_store, theme_preference, tracked_repos, untrack_repo,
 };
 use tracing::warn;
 
@@ -118,6 +118,11 @@ pub fn App() -> Element {
     let mut prefetched_board = use_signal(|| Option::<View>::None);
     // Global board-cache usage shown in the top bar.
     let mut cache_stats = use_signal(BoardCacheUsage::default);
+    // The currently active theme for the toggle UI. When no preference is stored,
+    // this is initialised from the OS `prefers-color-scheme`.
+    let mut theme = use_signal(|| ThemePreference::Light);
+    // Runs theme initialisation exactly once.
+    let mut theme_initialized = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -143,6 +148,28 @@ pub fn App() -> Element {
         spawn(async move {
             if let Ok(usage) = cache_usage().await {
                 cache_stats.set(usage);
+            }
+        });
+    });
+
+    // Resolve persisted theme once on launch. With no stored preference, leave
+    // `data-theme` unset so daisyUI follows the OS `prefers-color-scheme`.
+    use_effect(move || {
+        if theme_initialized() {
+            return;
+        }
+        theme_initialized.set(true);
+        spawn(async move {
+            match theme_preference().await {
+                Ok(Some(stored)) => {
+                    apply_data_theme(stored);
+                    theme.set(stored);
+                }
+                Ok(None) | Err(_) => {
+                    let system = resolve_system_theme().await;
+                    apply_data_theme(system);
+                    theme.set(system);
+                }
             }
         });
     });
@@ -408,6 +435,19 @@ pub fn App() -> Element {
         reload += 1;
     };
 
+    // Toggle and persist the selected app theme.
+    let on_toggle_theme = move |_| {
+        spawn(async move {
+            let next = match theme() {
+                ThemePreference::Light => ThemePreference::Dark,
+                ThemePreference::Dark => ThemePreference::Light,
+            };
+            apply_data_theme(next);
+            theme.set(next);
+            let _ = remember_theme_preference(next).await;
+        });
+    };
+
     // True only on a *cold* board load: the user navigated to a project whose
     // board is not on screen yet (opening it from home, or reopening the last
     // one on launch). A board *self-refresh* — the background poll, the Refresh
@@ -447,6 +487,8 @@ pub fn App() -> Element {
                 BoardShell {
                     repo: repo.to_string(),
                     on_home,
+                    theme: theme(),
+                    on_toggle_theme,
                     cache_usage: cache_stats(),
                     on_clear_cache_all,
                     on_clear_cache_repo,
@@ -519,6 +561,8 @@ pub fn App() -> Element {
                     BoardShell {
                         repo: repo.to_string(),
                         on_home,
+                        theme: theme(),
+                        on_toggle_theme,
                         on_refresh,
                         refreshing,
                         last_updated: loaded_at.clone(),
@@ -546,6 +590,8 @@ pub fn App() -> Element {
                 BoardShell {
                     on_home,
                     on_refresh,
+                    theme: theme(),
+                    on_toggle_theme,
                     cache_usage: cache_stats(),
                     on_clear_cache_all,
                     on_clear_cache_repo,
@@ -693,6 +739,28 @@ async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToke
     }
 }
 
+fn apply_data_theme(theme: ThemePreference) {
+    let script = format!(
+        "document.documentElement.setAttribute('data-theme', '{}');",
+        theme.as_data_theme()
+    );
+    document::eval(&script);
+}
+
+async fn resolve_system_theme() -> ThemePreference {
+    let prefers_dark = document::eval(
+        "return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;",
+    )
+    .join::<bool>()
+    .await
+    .unwrap_or(false);
+    if prefers_dark {
+        ThemePreference::Dark
+    } else {
+        ThemePreference::Light
+    }
+}
+
 /// Whether an error means the token itself is the problem (so the user should be
 /// asked for a new one) rather than a transient/network failure.
 fn is_auth_failure(kind: AppErrorKind) -> bool {
@@ -716,6 +784,8 @@ fn now_hms() -> String {
 fn BoardShell(
     children: Element,
     on_home: EventHandler<()>,
+    theme: ThemePreference,
+    on_toggle_theme: EventHandler<()>,
     #[props(default)] repo: Option<String>,
     #[props(default)] on_refresh: Option<EventHandler<()>>,
     #[props(default)] refreshing: bool,
@@ -726,7 +796,7 @@ fn BoardShell(
 ) -> Element {
     let total_cache = format_bytes(cache_usage.total_bytes);
     rsx! {
-        div { class: "min-h-screen bg-base-100 p-6", "data-theme": "zfirot-dark",
+        div { class: "min-h-screen bg-base-100 p-6",
             header { class: "flex items-center gap-2 mb-6",
                 ZfirotLogo {}
                 h1 { class: "text-2xl font-bold", "Zfirot" }
@@ -746,13 +816,17 @@ fn BoardShell(
                 div { class: "ml-auto flex items-center gap-3",
                     div { class: "flex items-center gap-1",
                         div { class: "dropdown dropdown-end",
-                            button {
+                            div {
                                 class: "btn btn-ghost btn-sm gap-2",
+                                tabindex: "0",
+                                role: "button",
                                 title: "Board cache usage",
                                 span { class: "icon-[lucide--database] size-4" }
                                 span { class: "text-xs font-medium", "{total_cache}" }
                             }
-                            ul { class: "dropdown-content menu p-2 shadow bg-base-200 rounded-box w-80 mt-1 z-10",
+                            ul {
+                                tabindex: "0",
+                                class: "dropdown-content menu p-2 shadow bg-base-200 rounded-box w-80 mt-1 z-10",
                                 li { class: "menu-title text-xs", span { "Cache usage" } }
                                 if cache_usage.projects.is_empty() {
                                     li { span { class: "text-xs opacity-70", "No cached projects" } }
@@ -794,6 +868,17 @@ fn BoardShell(
                                 onclick: move |_| on_clear_cache_all.call(()),
                                 span { class: "icon-[lucide--eraser] size-5" }
                             }
+                        }
+                    }
+                    button {
+                        class: "btn btn-ghost btn-sm btn-square",
+                        title: "Toggle theme",
+                        aria_label: "Toggle theme",
+                        onclick: move |_| on_toggle_theme.call(()),
+                        if theme == ThemePreference::Dark {
+                            span { class: "icon-[lucide--moon] size-5" }
+                        } else {
+                            span { class: "icon-[lucide--sun] size-5" }
                         }
                     }
                     if let Some(updated) = last_updated {

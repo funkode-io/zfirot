@@ -16,7 +16,7 @@ pub fn TokenScreen(
     let is_blank = token.read().trim().is_empty();
 
     rsx! {
-        div { class: "min-h-screen bg-base-100 flex items-center justify-center p-6", "data-theme": "zfirot-dark",
+        div { class: "min-h-screen bg-base-100 flex items-center justify-center p-6",
             div { class: "card w-full max-w-md bg-base-200 shadow-md",
                 div { class: "card-body",
                     h2 { class: "card-title", "Connect to GitHub" }
