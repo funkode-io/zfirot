@@ -379,8 +379,14 @@ async fn clearing_all_cache_forces_cold_reopen_and_reseed() {
         cache.clone(),
     );
 
-    let _ = service.open(&repo_a).await.expect("first open should seed repo a");
-    let _ = service.open(&repo_b).await.expect("first open should seed repo b");
+    let _ = service
+        .open(&repo_a)
+        .await
+        .expect("first open should seed repo a");
+    let _ = service
+        .open(&repo_b)
+        .await
+        .expect("first open should seed repo b");
     cache.clear_all().await.expect("clear all should succeed");
 
     match service

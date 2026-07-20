@@ -734,12 +734,15 @@ fn BoardShell(
                                                 }
                                                 div { class: "flex items-center gap-2 shrink-0",
                                                     span { class: "badge badge-ghost badge-sm", "{format_bytes(project.bytes)}" }
-                                                    if let Some(on_clear_cache_repo) = on_clear_cache_repo.clone() {
+                                                    if let Some(on_clear_cache_repo) = on_clear_cache_repo {
                                                         button {
                                                             class: "btn btn-ghost btn-xs btn-square",
                                                             title: "Clear project cache",
                                                             aria_label: "Clear project cache",
-                                                            onclick: move |_| on_clear_cache_repo.call(project.repo.clone()),
+                                                            onclick: {
+                                                                let clear_repo = project.repo.clone();
+                                                                move |_| on_clear_cache_repo.call(clear_repo.clone())
+                                                            },
                                                             span { class: "icon-[lucide--eraser] size-4" }
                                                         }
                                                     }
