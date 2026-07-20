@@ -140,7 +140,7 @@ pub fn HomeScreen(
     };
 
     rsx! {
-        div { class: "min-h-screen bg-base-100 p-6", "data-theme": "zfirot-dark",
+        div { class: "min-h-screen bg-base-100 p-6",
             header { class: "mb-6",
                 h1 { class: "text-2xl font-bold", "Recent projects" }
                 p { class: "text-sm opacity-70",

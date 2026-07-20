@@ -5,7 +5,7 @@
 
 /* daisyUI component library (Tailwind v4 plugin). */
 @plugin "daisyui" {
-  themes: zfirot-dark --default;
+  themes: zfirot-dark --default, zfirot-light;
 }
 
 @plugin "daisyui/theme" {
@@ -42,6 +42,42 @@
 
   --color-error: oklch(70% 0.17 25);
   --color-error-content: oklch(20% 0.03 25);
+}
+
+@plugin "daisyui/theme" {
+  name: "zfirot-light";
+  default: false;
+  prefersdark: false;
+  color-scheme: light;
+
+  --color-base-100: oklch(98% 0.004 260);
+  --color-base-200: oklch(95% 0.006 260);
+  --color-base-300: oklch(90% 0.008 260);
+  --color-base-content: oklch(28% 0.02 260);
+
+  --color-primary: oklch(55% 0.16 250);
+  --color-primary-content: oklch(98% 0.01 250);
+
+  --color-secondary: oklch(56% 0.12 320);
+  --color-secondary-content: oklch(98% 0.01 320);
+
+  --color-accent: oklch(58% 0.14 180);
+  --color-accent-content: oklch(98% 0.01 180);
+
+  --color-neutral: oklch(45% 0.015 260);
+  --color-neutral-content: oklch(96% 0.01 260);
+
+  --color-info: oklch(58% 0.12 230);
+  --color-info-content: oklch(98% 0.01 230);
+
+  --color-success: oklch(58% 0.14 155);
+  --color-success-content: oklch(98% 0.01 155);
+
+  --color-warning: oklch(70% 0.14 85);
+  --color-warning-content: oklch(20% 0.03 85);
+
+  --color-error: oklch(58% 0.19 25);
+  --color-error-content: oklch(98% 0.01 25);
 }
 
 /* Iconify icons as utility classes, e.g. `icon-[lucide--layout-dashboard]`. */

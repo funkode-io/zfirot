@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use application::ProjectStorePort;
 use async_trait::async_trait;
-use domain::{AppAction, AppError, AppResult, Project, RepoRef};
+use domain::{AppAction, AppError, AppResult, Project, RepoRef, ThemePreference};
 
 /// The config sub-directory and files Zfirot uses for locally-owned project
 /// state: the last-opened project and the cached recent-projects list.
@@ -18,6 +18,7 @@ const CONFIG_DIR: &str = "zfirot";
 const LAST_OPENED_FILE: &str = "last_opened.json";
 const RECENT_PROJECTS_FILE: &str = "recent_projects.json";
 const TRACKED_REPOS_FILE: &str = "tracked_repos.json";
+const THEME_FILE: &str = "theme.json";
 
 /// A [`ProjectStorePort`] backed by a JSON file in the OS config directory.
 #[derive(Debug, Clone)]
@@ -52,6 +53,12 @@ impl FileProjectStore {
     /// config directory.
     fn tracked_repos_path(&self) -> PathBuf {
         self.path.with_file_name(TRACKED_REPOS_FILE)
+    }
+
+    /// The theme-preference file, alongside the last-opened file in the same
+    /// config directory.
+    fn theme_path(&self) -> PathBuf {
+        self.path.with_file_name(THEME_FILE)
     }
 }
 
@@ -213,6 +220,51 @@ impl ProjectStorePort for FileProjectStore {
                 .with_source(err)
         })
     }
+
+    async fn theme_preference(&self) -> AppResult<Option<ThemePreference>> {
+        let path = self.theme_path();
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(AppError::internal("Could not read the theme preference.")
+                    .with_operation("FileProjectStore::theme_preference")
+                    .with_context("path", path.display().to_string())
+                    .with_source(err))
+            }
+        };
+        let raw: Option<String> = serde_json::from_slice(&bytes).map_err(|err| {
+            AppError::internal("Could not read the theme preference.")
+                .with_operation("FileProjectStore::theme_preference")
+                .with_context("path", path.display().to_string())
+                .with_source(err)
+        })?;
+        Ok(raw.as_deref().and_then(ThemePreference::from_data_theme))
+    }
+
+    async fn remember_theme_preference(&self, theme: ThemePreference) -> AppAction {
+        let path = self.theme_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                AppError::internal("Could not create the config directory.")
+                    .with_operation("FileProjectStore::remember_theme_preference")
+                    .with_context("path", path.display().to_string())
+                    .with_source(err)
+            })?;
+        }
+        let bytes = serde_json::to_vec_pretty(theme.as_data_theme()).map_err(|err| {
+            AppError::internal("Could not encode the theme preference.")
+                .with_operation("FileProjectStore::remember_theme_preference")
+                .with_context("path", path.display().to_string())
+                .with_source(err)
+        })?;
+        std::fs::write(&path, bytes).map_err(|err| {
+            AppError::internal("Could not save the theme preference.")
+                .with_operation("FileProjectStore::remember_theme_preference")
+                .with_context("path", path.display().to_string())
+                .with_source(err)
+        })
+    }
 }
 
 /// An in-memory [`ProjectStorePort`] for tests.
@@ -221,6 +273,7 @@ pub struct FakeProjectStore {
     last_opened: Mutex<Option<RepoRef>>,
     cached_projects: Mutex<Option<Vec<Project>>>,
     tracked_repos: Mutex<Vec<RepoRef>>,
+    theme_preference: Mutex<Option<ThemePreference>>,
 }
 
 impl FakeProjectStore {
@@ -235,6 +288,7 @@ impl FakeProjectStore {
             last_opened: Mutex::new(Some(repo)),
             cached_projects: Mutex::new(None),
             tracked_repos: Mutex::new(Vec::new()),
+            theme_preference: Mutex::new(None),
         }
     }
 
@@ -244,6 +298,7 @@ impl FakeProjectStore {
             last_opened: Mutex::new(None),
             cached_projects: Mutex::new(None),
             tracked_repos: Mutex::new(repos),
+            theme_preference: Mutex::new(None),
         }
     }
 }
@@ -283,6 +338,15 @@ impl ProjectStorePort for FakeProjectStore {
     async fn untrack_repo(&self, repo: &RepoRef) -> AppAction {
         let mut repos = self.tracked_repos.lock().expect("lock poisoned");
         repos.retain(|r| r != repo);
+        Ok(())
+    }
+
+    async fn theme_preference(&self) -> AppResult<Option<ThemePreference>> {
+        Ok(*self.theme_preference.lock().expect("lock poisoned"))
+    }
+
+    async fn remember_theme_preference(&self, theme: ThemePreference) -> AppAction {
+        *self.theme_preference.lock().expect("lock poisoned") = Some(theme);
         Ok(())
     }
 }
