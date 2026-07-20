@@ -1,0 +1,32 @@
+name: PR body check
+
+# Fail a PR whose description still contains template guidance comments.
+# The template ships reminders tagged with a `pr-template` sentinel; they render
+# invisibly on the page but survive into the squash-merge commit message. A
+# finished body — human- or agent-written — should never contain them, so there
+# is no legitimate exception to whitelist. Removing them also forces the author
+# past the `Closes #` line. The sentinel (not a bare comment) is matched so that
+# prose legitimately mentioning HTML comments does not trip the check.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  body-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject leftover template comments
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$PR_BODY" | grep -qF 'pr-template'; then
+            echo "::error::The PR description still contains template guidance comments."
+            echo "Remove every pr-template comment before merging — they leak into the"
+            echo "squash-merge commit message. While editing, confirm the 'Closes #<issue>'"
+            echo "line is filled in."
+            exit 1
+          fi
+          echo "PR body is clean (no leftover template comments)."
