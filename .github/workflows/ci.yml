@@ -1,0 +1,56 @@
+name: CI
+
+# Runs the full quality gate (`make check` = fmt + clippy + test) on every PR and
+# on pushes to main. This is the safety net the local pre-push hook cannot give:
+# the hook only checks a branch in isolation, so two PRs that are each green alone
+# can still break `main` when merged (a build break, or — worse — a silent revert
+# of a sibling feature that still compiles). Requiring THIS job on an up-to-date
+# branch forces every PR to compile + test against the actual merge result.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Dioxus 0.7 desktop (wry/tao) needs the system WebKitGTK stack to compile
+      # the presentation crate, which `cargo test` at the workspace root builds.
+      - name: Install desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The generated stylesheet is untracked (built by dx/tailwind locally), but
+      # the `asset!("/assets/tailwind.css")` macro needs it to exist at build
+      # time. Generate it before the Rust build.
+      - name: Build stylesheet
+        run: make css
+
+      - name: make check (fmt + clippy + test)
+        run: make check
