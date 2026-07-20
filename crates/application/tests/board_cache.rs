@@ -2,7 +2,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use application::{BoardCachePort, BoardOpen, BoardRefresh, CachedBoardService, GitHubPort};
+use application::{
+    BoardCachePort, BoardCacheUsage, BoardOpen, BoardRefresh, CachedBoardService, GitHubPort,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{AppAction, AppResult, Project, RawIssue, RepoRef};
@@ -40,6 +42,23 @@ impl BoardCachePort for CountingBoardCache {
             .lock()
             .expect("lock poisoned")
             .insert(repo.to_string(), snapshot.clone());
+        Ok(())
+    }
+
+    async fn cache_usage(&self) -> AppResult<BoardCacheUsage> {
+        Ok(BoardCacheUsage::default())
+    }
+
+    async fn clear_board(&self, repo: &RepoRef) -> AppAction {
+        self.snapshots
+            .lock()
+            .expect("lock poisoned")
+            .remove(&repo.to_string());
+        Ok(())
+    }
+
+    async fn clear_all(&self) -> AppAction {
+        self.snapshots.lock().expect("lock poisoned").clear();
         Ok(())
     }
 }
@@ -302,4 +321,42 @@ async fn unchanged_refresh_advances_cached_fetched_at() {
         cached.fetched_at, advanced.fetched_at,
         "unchanged refresh must persist the advanced snapshot to the cache",
     );
+}
+
+#[tokio::test]
+async fn clearing_a_repo_cache_forces_a_cold_reopen_and_reseed() {
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        SequencePort::new(
+            vec![vec![open_issue(40, "Seed")], vec![open_issue(40, "Reload")]],
+            vec![],
+        ),
+        cache.clone(),
+    );
+
+    let _ = service.open(&repo).await.expect("first open should seed");
+    match service
+        .open(&repo)
+        .await
+        .expect("warm open should use cache")
+    {
+        BoardOpen::Cached(_) => {}
+        BoardOpen::Cold(_) => panic!("second open should use warm cache"),
+    }
+
+    cache
+        .clear_board(&repo)
+        .await
+        .expect("clear board should succeed");
+
+    match service.open(&repo).await.expect("reopen should succeed") {
+        BoardOpen::Cold(loaded) => {
+            assert_eq!(
+                loaded.board.slices[0].title, "Reload",
+                "after clear, open should fetch from source and reseed",
+            );
+        }
+        BoardOpen::Cached(_) => panic!("after clear, reopen must be a cold load"),
+    }
 }
