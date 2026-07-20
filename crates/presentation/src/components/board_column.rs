@@ -29,7 +29,7 @@ pub fn BoardColumn(
                 span { class: "badge badge-sm badge-ghost", "{slices.len()}" }
             }
             // Bordered, theme-surfaced container for the cards
-            div { class: "border border-base-300 bg-base-100 rounded-box p-2 flex flex-col gap-2",
+            div { class: "border border-base-300 bg-base-200 rounded-box p-2 flex flex-col gap-2",
                 for slice in slices {
                     SliceCard {
                         key: "{slice.number}",

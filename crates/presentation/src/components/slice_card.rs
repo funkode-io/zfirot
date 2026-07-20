@@ -33,9 +33,9 @@ pub fn SliceCard(
     };
 
     let card_class = if is_highlighted {
-        "card card-sm bg-base-100 shadow-sm ring-2 ring-primary py-1.5 px-3"
+        "card card-sm bg-base-300 shadow-sm ring-2 ring-primary py-1.5 px-3"
     } else {
-        "card card-sm bg-base-100 shadow-sm py-1.5 px-3"
+        "card card-sm bg-base-300 shadow-sm py-1.5 px-3"
     };
 
     rsx! {
