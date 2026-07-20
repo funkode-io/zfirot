@@ -13,7 +13,7 @@ use application::{
 use dioxus::prelude::*;
 use domain::{
     group_into_lanes, AppErrorKind, BoardSummary, GitHubToken, IssueClassification, PollInterval,
-    Project, RepoRef, Slice,
+    Project, ReconcileInterval, RepoRef, Slice,
 };
 
 use crate::components::{
@@ -21,9 +21,10 @@ use crate::components::{
 };
 use crate::state::{
     assign_self, cached_projects, confirm_classification, last_opened, open_and_track_project,
-    open_board, open_project, refresh_board, refresh_projects, refresh_recent_projects,
-    secure_store, tracked_repos, untrack_repo,
+    open_board, open_project, reconcile_board, refresh_board, refresh_projects,
+    refresh_recent_projects, secure_store, tracked_repos, untrack_repo,
 };
+use tracing::warn;
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
 /// `dx serve` / `dx bundle` (Dioxus 0.7) auto-generate it from
@@ -240,6 +241,38 @@ pub fn App() -> Element {
                         Ok(BoardRefresh::Unchanged(snapshot)) => {
                             board_snapshot.set(Some(snapshot));
                         }
+                        Err(error) => {
+                            warn!(repo = %repo, error = ?error, "background reconcile failed");
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Slow background reconcile: full-load occasionally to heal any drift that
+    // delta refreshes cannot observe (for example, hard-deleted or transferred
+    // issues). Silent and non-blocking: repaint only on a real diff.
+    use_future(move || async move {
+        let interval = ReconcileInterval::default().as_duration();
+        loop {
+            tokio::time::sleep(interval).await;
+            if let Some(View::Board { repo, .. }) = &*view.peek() {
+                let repo = repo.clone();
+                if let Some(snapshot) = board_snapshot() {
+                    match reconcile_board(&repo, &snapshot).await {
+                        Ok(BoardRefresh::Changed(loaded)) => {
+                            board_snapshot.set(Some(loaded.snapshot.clone()));
+                            prefetched_board.set(Some(View::Board {
+                                repo,
+                                board: loaded.board,
+                                loaded_at: now_hms(),
+                                snapshot: loaded.snapshot,
+                                from_cache: false,
+                            }));
+                            reload += 1;
+                        }
+                        Ok(BoardRefresh::Unchanged(_)) => {}
                         Err(_) => {}
                     }
                 }

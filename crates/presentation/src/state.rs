@@ -186,6 +186,17 @@ pub async fn refresh_board(repo: &RepoRef, snapshot: &BoardSnapshot) -> AppResul
         .await
 }
 
+/// Reconcile the open board with a full load against its retained snapshot and
+/// report if it changed. Reads the stored token and wires the live adapter for
+/// `repo`.
+pub async fn reconcile_board(repo: &RepoRef, snapshot: &BoardSnapshot) -> AppResult<BoardRefresh> {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
+    CachedBoardService::new(port, board_cache()?)
+        .reconcile_cached(repo, snapshot)
+        .await
+}
+
 /// Assign the authenticated user to a Ready Slice's issue, claiming it on
 /// GitHub. Reads the stored token, wires the live adapter scoped to `repo`, and
 /// runs the assign-self use-case; the board is re-polled by the caller on

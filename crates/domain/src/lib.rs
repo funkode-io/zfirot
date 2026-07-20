@@ -19,7 +19,7 @@ pub use classification::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
 };
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
-pub use freshness::PollInterval;
+pub use freshness::{PollInterval, ReconcileInterval};
 pub use home_filter::{filter_home, visible_tracked_repos, HomeFilter};
 pub use lane::{group_into_lanes, PrdLane};
 pub use prd::{Prd, PrdRef};

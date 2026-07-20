@@ -303,3 +303,91 @@ async fn unchanged_refresh_advances_cached_fetched_at() {
         "unchanged refresh must persist the advanced snapshot to the cache",
     );
 }
+
+#[tokio::test]
+async fn reconcile_full_load_noops_when_cache_is_aligned() {
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        SequencePort::new(
+            vec![
+                vec![open_issue(40, "Aligned")],
+                vec![open_issue(40, "Aligned")],
+            ],
+            vec![],
+        ),
+        cache.clone(),
+    );
+
+    let snapshot = match service.open(&repo).await.expect("cold open should seed") {
+        BoardOpen::Cold(loaded) => loaded.snapshot,
+        BoardOpen::Cached(_) => panic!("first open is cold"),
+    };
+    assert_eq!(cache.writes(), 1, "seed should write exactly once");
+
+    let reconcile = service
+        .reconcile_cached(&repo, &snapshot)
+        .await
+        .expect("reconcile should succeed");
+
+    match reconcile {
+        BoardRefresh::Unchanged(returned) => {
+            assert_eq!(
+                returned, snapshot,
+                "aligned reconcile should keep the cached snapshot"
+            );
+        }
+        BoardRefresh::Changed(_) => panic!("aligned reconcile should be a no-op"),
+    }
+
+    assert_eq!(
+        cache.writes(),
+        1,
+        "aligned reconcile should not rewrite the cache"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_full_load_drops_ghost_issue_from_cache() {
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        SequencePort::new(
+            vec![
+                vec![open_issue(50, "Real"), open_issue(51, "Ghost")],
+                vec![open_issue(50, "Real")],
+            ],
+            vec![],
+        ),
+        cache.clone(),
+    );
+
+    let snapshot = match service.open(&repo).await.expect("cold open should seed") {
+        BoardOpen::Cold(loaded) => loaded.snapshot,
+        BoardOpen::Cached(_) => panic!("first open is cold"),
+    };
+    assert_eq!(cache.writes(), 1, "seed should write exactly once");
+
+    let reconcile = service
+        .reconcile_cached(&repo, &snapshot)
+        .await
+        .expect("reconcile should succeed");
+
+    match reconcile {
+        BoardRefresh::Changed(loaded) => {
+            assert_eq!(
+                loaded.board.slices.len(),
+                1,
+                "full reconcile should drop a cached ghost issue"
+            );
+            assert_eq!(loaded.board.slices[0].number, 50);
+        }
+        BoardRefresh::Unchanged(_) => panic!("ghost removal must be a changed reconcile"),
+    }
+
+    assert_eq!(
+        cache.writes(),
+        2,
+        "changed reconcile should rewrite the cache with the full-load snapshot"
+    );
+}
