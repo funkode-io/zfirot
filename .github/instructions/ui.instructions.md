@@ -31,3 +31,44 @@ applyTo: "crates/presentation/**/*.rs"
 - Reusable `components` are **callback-only**: no API calls; take callbacks as
   props so they can be previewed and tested without GitHub. Desktop-specific
   components/pages live under `presentation/desktop/`.
+
+## Signals across `.await` (borrow-safety)
+
+**Never hold a Dioxus signal/resource read or write guard across an `.await`.**
+A guard from `.read()`, `.write()`, `.peek()`, or `&*signal` keeps the signal's
+internal `RefCell` borrowed; if the code awaits while it is held, a concurrent
+re-resolve of the same signal (another effect, a background loop, or a `reload`
+bump) re-borrows it and the app **panics with `AlreadyBorrowed`** — a real race
+that crashed the board when Refresh was clicked quickly (#116 / #118).
+
+The trap is easy to miss because an `if let` / `match` **scrutinee temporary
+lives for the whole block**:
+
+```rust
+// WRONG — the peek() guard is held across the await below
+if let Some(View::Board { repo, .. }) = &*view.peek() {
+    let repo = repo.clone();
+    do_network(&repo).await; // panics if `view` re-resolves meanwhile
+}
+
+// RIGHT — extract owned data in a tight scope, drop the guard, then await
+let repo = match &*view.peek() {
+    Some(View::Board { repo, .. }) => Some(repo.clone()),
+    _ => None,
+};
+if let Some(repo) = repo {
+    do_network(&repo).await;
+}
+```
+
+Rules:
+
+- Clone/copy the owned values you need out of a signal, in a `let`/`match` scope
+  that ends **before** any `.await`. Never `.await` inside an `if let`/`match`
+  whose scrutinee borrows a signal.
+- Set in-flight/debounce guards (e.g. `board_refreshing`) **synchronously
+  before** `spawn`, not inside the spawned task — otherwise fast repeat events
+  slip through the check-then-set gap.
+- This is enforced: `clippy.toml` lists the guard types in
+  `await-holding-invalid-types`, so `clippy -D warnings` (CI) fails the build if
+  a guard is held across an await. Do not silence it — restructure the code.

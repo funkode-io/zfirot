@@ -1,0 +1,9 @@
+# Dioxus signal/resource read guards must never be held across an `.await`: a
+# guard kept alive across an await point (very easily via an `if let`/`match`
+# scrutinee whose temporary lives for the whole block) races a concurrent
+# re-resolve of the same signal and panics with `AlreadyBorrowed`. Extract the
+# owned data you need in a tight scope, drop the guard, then await.
+await-holding-invalid-types = [
+  "generational_box::GenerationalRef",
+  "generational_box::GenerationalRefMut",
+]

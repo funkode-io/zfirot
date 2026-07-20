@@ -257,10 +257,16 @@ pub fn App() -> Element {
             // desktop-only `cfg` (or swap to a wasm-portable timer like
             // `futures-timer`) when we gate server/web/desktop.
             tokio::time::sleep(interval).await;
-            // `peek` reads the latest view without subscribing, so this loop is
-            // never restarted by its own re-resolves.
-            if let Some(View::Board { repo, .. }) = &*view.peek() {
-                let repo = repo.clone();
+            // Extract the open repo in a tight scope so the `view` borrow is
+            // dropped before the `.await` below. Holding a `peek()` guard across
+            // the await lets a concurrent re-resolve of the resource (e.g. a
+            // manual refresh bumping `reload`) double-borrow it and panic with
+            // `AlreadyBorrowed`. `peek` also avoids subscribing this loop.
+            let open_repo = match &*view.peek() {
+                Some(View::Board { repo, .. }) => Some(repo.clone()),
+                _ => None,
+            };
+            if let Some(repo) = open_repo {
                 if let Some(snapshot) = board_snapshot() {
                     match refresh_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
@@ -297,8 +303,14 @@ pub fn App() -> Element {
         let interval = ReconcileInterval::default().as_duration();
         loop {
             tokio::time::sleep(interval).await;
-            if let Some(View::Board { repo, .. }) = &*view.peek() {
-                let repo = repo.clone();
+            // Drop the `view` borrow before awaiting (see the poll loop above):
+            // a held `peek()` guard across the await races a resource re-resolve
+            // and panics with `AlreadyBorrowed`.
+            let open_repo = match &*view.peek() {
+                Some(View::Board { repo, .. }) => Some(repo.clone()),
+                _ => None,
+            };
+            if let Some(repo) = open_repo {
                 if let Some(snapshot) = board_snapshot() {
                     match reconcile_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
@@ -328,8 +340,11 @@ pub fn App() -> Element {
         if let Some(View::Board { repo, .. }) = view.read_unchecked().as_ref() {
             let repo = repo.clone();
             if let Some(snapshot) = board_snapshot() {
+                // Set the in-flight guard synchronously (before the spawn) so
+                // rapid clicks cannot start a second refresh between the check
+                // above and the flag being set inside the task.
+                board_refreshing.set(true);
                 spawn(async move {
-                    board_refreshing.set(true);
                     match refresh_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
                             // Repaint from the fetched board rather than reloading,
