@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use application::{BoardService, GitHubPort};
 use async_trait::async_trait;
-use domain::{AgentRef, AppAction, AppError, AppErrorKind, AppResult, Project, RawIssue, RepoRef};
+use domain::{AppAction, AppError, AppErrorKind, AppResult, Project, RawIssue, RepoRef};
 
 /// A fake that records which issue it was asked to assign, so the test can
 /// assert the use-case forwarded the right number to the port.
@@ -31,21 +31,8 @@ impl GitHubPort for RecordingPort {
         Ok(())
     }
 
-    async fn assign_agent(
-        &self,
-        _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
-    ) -> AppAction {
-        Ok(())
-    }
-
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Ok(())
-    }
-
-    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        Ok(vec![])
     }
 }
 
@@ -69,23 +56,10 @@ impl GitHubPort for FailingPort {
         ))
     }
 
-    async fn assign_agent(
-        &self,
-        _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
-    ) -> AppAction {
-        Ok(())
-    }
-
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Err(AppError::forbidden(
             "The token lacks permission to label this issue",
         ))
-    }
-
-    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        Ok(vec![])
     }
 }
 
