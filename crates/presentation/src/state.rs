@@ -12,7 +12,9 @@ use application::{
     LoadedBoard, ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
     TrackedProjectsService,
 };
-use domain::{AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
+use domain::{
+    AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef, ThemePreference,
+};
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
 use infrastructure::{FileProjectStore, GitHubClient, KeyringSecureStore};
@@ -156,6 +158,16 @@ pub async fn last_opened() -> AppResult<Option<RepoRef>> {
 /// A local store write only: no token or network involved.
 pub async fn open_project(repo: &RepoRef) -> AppAction {
     last_opened_service()?.open_project(repo).await
+}
+
+/// The persisted theme preference, or `None` when unset.
+pub async fn theme_preference() -> AppResult<Option<ThemePreference>> {
+    project_store()?.theme_preference().await
+}
+
+/// Persist the selected app theme so the next launch restores it.
+pub async fn remember_theme_preference(theme: ThemePreference) -> AppAction {
+    project_store()?.remember_theme_preference(theme).await
 }
 
 /// Open a project via the go-to (typed-repo) action: try to load the board to
