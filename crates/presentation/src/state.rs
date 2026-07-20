@@ -12,7 +12,7 @@ use application::{
     CachedBoardService, GitHubPort, LastOpenedService, LoadedBoard, ProjectStorePort,
     ProjectsRefresh, RecentProjectsService, SecureStorePort, TrackedProjectsService,
 };
-use domain::{AgentRef, AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
+use domain::{AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
 use infrastructure::{FileBoardCache, FileProjectStore, GitHubClient, KeyringSecureStore};
@@ -85,15 +85,6 @@ impl AppState {
     pub async fn assign_self(&self, issue_number: u64) -> AppAction {
         BoardService::new(self.port.clone())
             .assign_self(&self.repo, issue_number)
-            .await
-    }
-
-    /// Delegate a Ready Slice's issue to `agent`, starting an Agent coding
-    /// session on GitHub. The caller re-polls the board on success so the now-
-    /// assigned Slice leaves the Ready column.
-    pub async fn assign_agent(&self, issue_number: u64, agent: &AgentRef) -> AppAction {
-        BoardService::new(self.port.clone())
-            .assign_agent(&self.repo, issue_number, agent)
             .await
     }
 
@@ -203,17 +194,6 @@ pub async fn assign_self(repo: &RepoRef, issue_number: u64) -> AppAction {
     let token = AuthService::new(secure_store()).require_token().await?;
     AppState::from_token(&token, repo.clone())?
         .assign_self(issue_number)
-        .await
-}
-
-/// Delegate a Ready Slice's issue to `agent`, starting an Agent coding session
-/// on GitHub. Reads the stored token, wires the live adapter scoped to `repo`,
-/// and runs the assign-agent use-case; the board is re-polled by the caller on
-/// success and left unchanged on failure.
-pub async fn assign_agent(repo: &RepoRef, issue_number: u64, agent: &AgentRef) -> AppAction {
-    let token = AuthService::new(secure_store()).require_token().await?;
-    AppState::from_token(&token, repo.clone())?
-        .assign_agent(issue_number, agent)
         .await
 }
 

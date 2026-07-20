@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use application::{BoardCachePort, BoardOpen, BoardRefresh, CachedBoardService, GitHubPort};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use domain::{AgentRef, AppAction, AppResult, Project, RawIssue, RepoRef};
+use domain::{AppAction, AppResult, Project, RawIssue, RepoRef};
 
 #[derive(Default)]
 struct CountingBoardCache {
@@ -47,19 +47,13 @@ impl BoardCachePort for CountingBoardCache {
 struct SequencePort {
     issues: Mutex<VecDeque<Vec<RawIssue>>>,
     deltas: Mutex<VecDeque<Vec<RawIssue>>>,
-    agents: Mutex<VecDeque<Vec<AgentRef>>>,
 }
 
 impl SequencePort {
-    fn new(
-        issues: Vec<Vec<RawIssue>>,
-        deltas: Vec<Vec<RawIssue>>,
-        agents: Vec<Vec<AgentRef>>,
-    ) -> Self {
+    fn new(issues: Vec<Vec<RawIssue>>, deltas: Vec<Vec<RawIssue>>) -> Self {
         Self {
             issues: Mutex::new(VecDeque::from(issues)),
             deltas: Mutex::new(VecDeque::from(deltas)),
-            agents: Mutex::new(VecDeque::from(agents)),
         }
     }
 }
@@ -96,26 +90,8 @@ impl GitHubPort for SequencePort {
         Ok(())
     }
 
-    async fn assign_agent(
-        &self,
-        _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
-    ) -> AppAction {
-        Ok(())
-    }
-
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Ok(())
-    }
-
-    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        Ok(self
-            .agents
-            .lock()
-            .expect("lock poisoned")
-            .pop_front()
-            .expect("agents sequence should have a value"))
     }
 }
 
@@ -130,6 +106,7 @@ fn open_issue(number: u64, title: &str) -> RawIssue {
         native_parent: None,
         native_blockers: vec![],
         assignee: None,
+        assignee_avatar_url: None,
         linked_prs: vec![],
         is_native_child_of_prd: false,
     }
@@ -140,11 +117,7 @@ async fn cold_cache_falls_back_to_load_and_seeds_cache() {
     let repo = RepoRef::new("funkode-io", "zfirot");
     let cache = Arc::new(CountingBoardCache::default());
     let service = CachedBoardService::new(
-        SequencePort::new(
-            vec![vec![open_issue(10, "Cold")]],
-            vec![vec![]],
-            vec![vec![]],
-        ),
+        SequencePort::new(vec![vec![open_issue(10, "Cold")]], vec![vec![]]),
         cache.clone(),
     );
 
@@ -183,7 +156,6 @@ async fn seeded_open_uses_cache_then_refreshes_and_rewrites_cache() {
                 closed: true,
                 ..open_issue(20, "Seed")
             }]],
-            vec![vec![], vec![]],
         ),
         cache.clone(),
     );
@@ -245,7 +217,6 @@ async fn cache_is_scoped_per_repo_for_switch_and_reopen() {
         SequencePort::new(
             vec![vec![open_issue(1, "A")], vec![open_issue(2, "B")]],
             vec![vec![]],
-            vec![vec![], vec![]],
         ),
         cache.clone(),
     );
@@ -296,7 +267,6 @@ async fn unchanged_refresh_advances_cached_fetched_at() {
         SequencePort::new(
             vec![vec![open_issue(30, "Stable")]],
             // Empty delta => the board facts are unchanged on refresh.
-            vec![vec![]],
             vec![vec![]],
         ),
         cache.clone(),

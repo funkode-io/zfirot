@@ -7,7 +7,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AgentRef, AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
+use domain::{AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
 
 mod board_cache;
 mod github;
@@ -15,9 +15,7 @@ mod project_store;
 mod secure_store;
 
 pub use board_cache::{FakeBoardCache, FileBoardCache};
-pub use github::{
-    parse_issues_response, parse_projects_response, parse_suggested_actors_response, GitHubClient,
-};
+pub use github::{parse_issues_response, parse_projects_response, GitHubClient};
 pub use project_store::{FakeProjectStore, FileProjectStore};
 pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
 
@@ -39,15 +37,6 @@ impl GitHubPort for FakeGitHubPort {
         Ok(())
     }
 
-    async fn assign_agent(
-        &self,
-        _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
-    ) -> domain::AppAction {
-        Ok(())
-    }
-
     async fn add_label(
         &self,
         _repo: &RepoRef,
@@ -55,10 +44,6 @@ impl GitHubPort for FakeGitHubPort {
         _label: &str,
     ) -> domain::AppAction {
         Ok(())
-    }
-
-    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        Ok(vec![])
     }
 }
 
@@ -105,6 +90,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![],
             assignee: None,
+            assignee_avatar_url: None,
             linked_prs: vec![],
             is_native_child_of_prd: false,
         },
@@ -124,6 +110,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: Some(1),
             native_blockers: vec![2],
             assignee: Some("carlos-verdes".to_string()),
+            assignee_avatar_url: Some("https://avatars.githubusercontent.com/u/1?v=4".to_string()),
             linked_prs: vec![LinkedPrRef {
                 number: 12,
                 author: Some("carlos-verdes".to_string()),
@@ -149,6 +136,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![3, 2],
             assignee: None,
+            assignee_avatar_url: None,
             linked_prs: vec![],
             is_native_child_of_prd: false,
         },
@@ -167,6 +155,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![],
             assignee: None,
+            assignee_avatar_url: None,
             linked_prs: vec![],
             is_native_child_of_prd: false,
         },
@@ -185,6 +174,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![],
             assignee: None,
+            assignee_avatar_url: None,
             linked_prs: vec![],
             is_native_child_of_prd: false,
         },
@@ -199,6 +189,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: None,
             native_blockers: vec![],
             assignee: None,
+            assignee_avatar_url: None,
             linked_prs: vec![],
             is_native_child_of_prd: false,
         },
@@ -213,6 +204,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_parent: Some(1),
             native_blockers: vec![],
             assignee: Some("carlos-verdes".to_string()),
+            assignee_avatar_url: Some("https://avatars.githubusercontent.com/u/1?v=4".to_string()),
             linked_prs: vec![],
             is_native_child_of_prd: true,
         },

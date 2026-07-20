@@ -1,5 +1,12 @@
 # Agents are a provider-neutral, live-discovered set
 
+> **Status: Superseded.** In-app Agent assignment was removed: the GitHub
+> delegate mutation proved unreliable in practice, and Agent hand-off now happens
+> outside the app via a dedicated PR-creation skill that comments to the agent.
+> The board no longer discovers or carries an Assignable-Agent set, and the
+> `assign_agent` / `suggested_agents` ports and the card's delegate control were
+> removed. This record is retained for history.
+
 Delegating a Ready Slice to a non-human worker is modelled around a
 provider-neutral **Agent** role rather than around Copilot specifically. The
 board read model carries the set of Assignable Agents (zero or more) discovered

@@ -4,7 +4,45 @@
 @source "./src/**/*.rs";
 
 /* daisyUI component library (Tailwind v4 plugin). */
-@plugin "daisyui";
+@plugin "daisyui" {
+  themes: zfirot-dark --default;
+}
+
+@plugin "daisyui/theme" {
+  name: "zfirot-dark";
+  default: true;
+  prefersdark: false;
+  color-scheme: dark;
+
+  --color-base-100: oklch(25% 0.015 260);
+  --color-base-200: oklch(29% 0.015 260);
+  --color-base-300: oklch(35% 0.015 260);
+  --color-base-content: oklch(94% 0.01 260);
+
+  --color-primary: oklch(72% 0.16 250);
+  --color-primary-content: oklch(18% 0.03 250);
+
+  --color-secondary: oklch(72% 0.12 320);
+  --color-secondary-content: oklch(18% 0.03 320);
+
+  --color-accent: oklch(76% 0.14 180);
+  --color-accent-content: oklch(20% 0.03 180);
+
+  --color-neutral: oklch(40% 0.015 260);
+  --color-neutral-content: oklch(92% 0.01 260);
+
+  --color-info: oklch(74% 0.12 230);
+  --color-info-content: oklch(20% 0.03 230);
+
+  --color-success: oklch(76% 0.14 155);
+  --color-success-content: oklch(20% 0.03 155);
+
+  --color-warning: oklch(82% 0.14 85);
+  --color-warning-content: oklch(22% 0.03 85);
+
+  --color-error: oklch(70% 0.17 25);
+  --color-error-content: oklch(20% 0.03 25);
+}
 
 /* Iconify icons as utility classes, e.g. `icon-[lucide--layout-dashboard]`. */
 @plugin "@iconify/tailwind4";

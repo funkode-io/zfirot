@@ -4,25 +4,19 @@ use std::sync::Mutex;
 use application::{classify, BoardRefresh, BoardService, GitHubPort};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use domain::{AgentRef, AppAction, AppResult, Project, RawIssue, RepoRef, SliceState};
+use domain::{AppAction, AppResult, Project, RawIssue, RepoRef, SliceState};
 use infrastructure::sample_raw_issues;
 
 struct SequencePort {
     issues: Mutex<VecDeque<Vec<RawIssue>>>,
     deltas: Mutex<VecDeque<Vec<RawIssue>>>,
-    agents: Mutex<VecDeque<Vec<AgentRef>>>,
 }
 
 impl SequencePort {
-    fn new(
-        issues: Vec<Vec<RawIssue>>,
-        deltas: Vec<Vec<RawIssue>>,
-        agents: Vec<Vec<AgentRef>>,
-    ) -> Self {
+    fn new(issues: Vec<Vec<RawIssue>>, deltas: Vec<Vec<RawIssue>>) -> Self {
         Self {
             issues: Mutex::new(VecDeque::from(issues)),
             deltas: Mutex::new(VecDeque::from(deltas)),
-            agents: Mutex::new(VecDeque::from(agents)),
         }
     }
 }
@@ -59,54 +53,28 @@ impl GitHubPort for SequencePort {
         Ok(())
     }
 
-    async fn assign_agent(
-        &self,
-        _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
-    ) -> AppAction {
-        Ok(())
-    }
-
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Ok(())
-    }
-
-    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        Ok(self
-            .agents
-            .lock()
-            .expect("lock poisoned")
-            .pop_front()
-            .expect("agents sequence should have a value"))
     }
 }
 
 #[test]
-fn classify_is_a_pure_projection_over_raw_issues_and_agents() {
+fn classify_is_a_pure_projection_over_raw_issues() {
     let raw_issues = sample_raw_issues();
-    let agents = vec![AgentRef {
-        name: "copilot".to_string(),
-        node_id: "BOT_NODE_1".to_string(),
-    }];
 
-    let board = classify(&raw_issues, &agents);
-    let board_again = classify(&raw_issues, &agents);
+    let board = classify(&raw_issues);
+    let board_again = classify(&raw_issues);
 
     assert_eq!(
         board, board_again,
-        "same raw issue set and agents must classify to the same board",
+        "same raw issue set must classify to the same board",
     );
 }
 
 #[tokio::test]
 async fn refresh_reports_unchanged_when_snapshot_facts_match() {
     let issues = sample_raw_issues();
-    let agents = vec![AgentRef {
-        name: "copilot".to_string(),
-        node_id: "BOT_NODE_1".to_string(),
-    }];
-    let service = BoardService::new(SequencePort::new(vec![issues], vec![vec![]], vec![agents]));
+    let service = BoardService::new(SequencePort::new(vec![issues], vec![vec![]]));
     let repo = RepoRef::new("funkode-io", "zfirot");
 
     let loaded = service.load(&repo).await.expect("load should succeed");
@@ -122,9 +90,7 @@ async fn refresh_reports_unchanged_when_snapshot_facts_match() {
                 "unchanged refresh must advance fetched_at so the next delta `since` window moves forward",
             );
         }
-        BoardRefresh::Changed(_) => {
-            panic!("equal raw issues + equal agents must not trigger repaint")
-        }
+        BoardRefresh::Changed(_) => panic!("equal raw issues must not trigger repaint"),
     }
 }
 
@@ -141,14 +107,11 @@ async fn refresh_reports_changed_when_snapshot_facts_differ() {
         native_parent: Some(1),
         native_blockers: vec![],
         assignee: None,
+        assignee_avatar_url: None,
         linked_prs: vec![],
         is_native_child_of_prd: true,
     };
-    let service = BoardService::new(SequencePort::new(
-        vec![initial],
-        vec![vec![closed_three]],
-        vec![vec![]],
-    ));
+    let service = BoardService::new(SequencePort::new(vec![initial], vec![vec![closed_three]]));
     let repo = RepoRef::new("funkode-io", "zfirot");
 
     let loaded = service.load(&repo).await.expect("load should succeed");
@@ -183,6 +146,7 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
         native_parent: None,
         native_blockers: vec![],
         assignee: None,
+        assignee_avatar_url: None,
         linked_prs: vec![],
         is_native_child_of_prd: false,
     };
@@ -196,6 +160,7 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
         native_parent: None,
         native_blockers: vec![42],
         assignee: None,
+        assignee_avatar_url: None,
         linked_prs: vec![],
         is_native_child_of_prd: false,
     };
@@ -207,7 +172,6 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
     let service = BoardService::new(SequencePort::new(
         vec![vec![blocker, blocked.clone()]],
         vec![vec![closed_blocker]],
-        vec![vec![]],
     ));
 
     let loaded = service.load(&repo).await.expect("load should succeed");
@@ -243,11 +207,7 @@ async fn refresh_is_idempotent_when_since_overlap_refetches_same_issue() {
         .find(|issue| issue.number == 3)
         .expect("fixture should include issue 3")
         .clone();
-    let service = BoardService::new(SequencePort::new(
-        vec![initial],
-        vec![vec![refetched]],
-        vec![vec![]],
-    ));
+    let service = BoardService::new(SequencePort::new(vec![initial], vec![vec![refetched]]));
 
     let loaded = service.load(&repo).await.expect("load should succeed");
     let refresh = service

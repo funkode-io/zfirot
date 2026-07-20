@@ -12,17 +12,17 @@ use application::{
 };
 use dioxus::prelude::*;
 use domain::{
-    group_into_lanes, AgentRef, AppErrorKind, BoardSummary, GitHubToken, IssueClassification,
-    PollInterval, Project, RepoRef, Slice,
+    group_into_lanes, AppErrorKind, BoardSummary, GitHubToken, IssueClassification, PollInterval,
+    Project, RepoRef, Slice,
 };
 
 use crate::components::{
     ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner, TokenScreen,
 };
 use crate::state::{
-    assign_agent, assign_self, cached_projects, confirm_classification, last_opened,
-    open_and_track_project, open_board, open_project, refresh_board, refresh_projects,
-    refresh_recent_projects, secure_store, tracked_repos, untrack_repo,
+    assign_self, cached_projects, confirm_classification, last_opened, open_and_track_project,
+    open_board, open_project, refresh_board, refresh_projects, refresh_recent_projects,
+    secure_store, tracked_repos, untrack_repo,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -87,9 +87,6 @@ pub fn App() -> Element {
     // above the board; cleared on a successful assignment. The delegate (Agent)
     // action reuses this same banner.
     let mut assign_error = use_signal(|| Option::<String>::None);
-    // The issue number whose delegate (Agent assignment) is currently in flight,
-    // so its card shows a spinner and disables its actions; `None` when idle.
-    let mut delegating = use_signal(|| Option::<u64>::None);
     // Set to a client-safe message when confirming a suggested classification
     // fails, shown above the board; cleared on a successful confirm.
     let mut confirm_error = use_signal(|| Option::<String>::None);
@@ -431,36 +428,6 @@ pub fn App() -> Element {
                         }
                     });
                 };
-                // Delegate the Slice to the chosen Agent, then re-poll so the
-                // now-assigned Slice derives Wip and leaves Ready, showing the
-                // Agent as its assignee. While it runs the card is marked
-                // `delegating`; failure surfaces via the same assign error banner
-                // and leaves the board unchanged.
-                let delegate_repo = repo.clone();
-                let on_assign_agent = move |(number, agent): (u64, AgentRef)| {
-                    // `delegating` tracks a single in-flight delegate. Ignore a
-                    // second one while one is active: starting it would overwrite
-                    // the marker and clear it out-of-order, re-enabling actions
-                    // while a mutation is still running.
-                    if delegating().is_some() {
-                        return;
-                    }
-                    let repo = delegate_repo.clone();
-                    spawn(async move {
-                        delegating.set(Some(number));
-                        match assign_agent(&repo, number, &agent).await {
-                            Ok(()) => {
-                                assign_error.set(None);
-                                delegating.set(None);
-                                reload += 1;
-                            }
-                            Err(error) => {
-                                assign_error.set(Some(error.to_string()));
-                                delegating.set(None);
-                            }
-                        }
-                    });
-                };
                 // Confirm a suggested classification: add its prd/slice label,
                 // then re-poll so the now-labelled issue classifies tier-1 and
                 // leaves "other open issues". On failure the issue is left
@@ -495,10 +462,7 @@ pub fn App() -> Element {
                         BoardSummaryBar { summary }
                         Board {
                             slices: board.slices.clone(),
-                            agents: board.agents.clone(),
                             on_assign,
-                            on_assign_agent,
-                            delegating: delegating(),
                         }
                         if !board.other.is_empty() {
                             OtherIssues { issues: board.other.clone(), on_confirm }
@@ -681,7 +645,7 @@ fn BoardShell(
     #[props(default)] last_updated: Option<String>,
 ) -> Element {
     rsx! {
-        div { class: "min-h-screen bg-base-200 p-6",
+        div { class: "min-h-screen bg-base-100 p-6", "data-theme": "zfirot-dark",
             header { class: "flex items-center gap-2 mb-6",
                 ZfirotLogo {}
                 h1 { class: "text-2xl font-bold", "Zfirot" }
@@ -770,13 +734,7 @@ fn ZfirotLogo() -> Element {
 }
 
 #[component]
-fn Board(
-    slices: Vec<Slice>,
-    agents: Vec<AgentRef>,
-    on_assign: EventHandler<u64>,
-    on_assign_agent: EventHandler<(u64, AgentRef)>,
-    delegating: Option<u64>,
-) -> Element {
+fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
     let lanes = group_into_lanes(slices);
     // The board-wide "highlighted issue", shared across lanes so a dependency
     // badge can highlight its referenced card in any column. `None` when nothing
@@ -796,10 +754,7 @@ fn Board(
                     key: "{lane.prd.as_ref().map(|prd| prd.number).unwrap_or(0)}",
                     prd: lane.prd,
                     slices: lane.slices,
-                    agents: agents.clone(),
                     on_assign,
-                    on_assign_agent,
-                    delegating,
                     highlighted: highlighted(),
                     on_highlight,
                 }
@@ -824,7 +779,7 @@ fn OtherIssues(
     let count = issues.len();
     rsx! {
         section { class: "mt-6",
-            div { class: "collapse collapse-arrow bg-base-100 border border-base-300",
+            div { class: "collapse collapse-arrow bg-base-200 border border-base-300",
                 input { r#type: "checkbox" }
                 div { class: "collapse-title text-lg font-semibold flex items-center gap-2",
                     "Other open issues"
