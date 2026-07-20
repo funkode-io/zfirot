@@ -11,6 +11,7 @@ use domain::{
     AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef, Project,
     RawIssue, RawSlice, RepoRef, Slice,
 };
+use serde::{Deserialize, Serialize};
 
 /// The seam between the application and any GitHub backend (real or fake).
 ///
@@ -119,7 +120,7 @@ pub struct ClassifiedBoard {
 
 /// A retained fetch snapshot of a board, used to decide whether a refresh would
 /// repaint anything.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardSnapshot {
     raw_issues: Vec<RawIssue>,
     /// The UTC timestamp captured at fetch start.
@@ -144,8 +145,11 @@ pub struct LoadedBoard {
 pub enum BoardRefresh {
     /// The fetched facts differ from the retained snapshot: repaint with `view`.
     Changed(LoadedBoard),
-    /// The fetched facts match the retained snapshot: keep current UI as-is.
-    Unchanged,
+    /// The fetched facts match the retained snapshot: keep the current UI as-is,
+    /// but adopt this snapshot so its advanced `fetched_at` moves the next delta
+    /// `since` window forward (in memory and on disk) instead of re-fetching the
+    /// same growing window every time.
+    Unchanged(BoardSnapshot),
 }
 
 fn merge_issues(retained: &[RawIssue], delta: &[RawIssue]) -> Vec<RawIssue> {
@@ -392,6 +396,31 @@ impl<S: ProjectStorePort + ?Sized> ProjectStorePort for Arc<S> {
     }
 }
 
+/// The seam between the application and the per-project board snapshot cache.
+///
+/// `infrastructure` implements this against local files (one snapshot per
+/// `owner/repo`); use-cases run against an in-memory fake in tests.
+#[async_trait]
+pub trait BoardCachePort: Send + Sync {
+    /// The cached snapshot for `repo`, or `None` when no cache exists yet.
+    async fn cached_board(&self, repo: &RepoRef) -> AppResult<Option<BoardSnapshot>>;
+    /// Replace `repo`'s cached snapshot.
+    async fn cache_board(&self, repo: &RepoRef, snapshot: &BoardSnapshot) -> AppAction;
+}
+
+/// Shared caches are caches too, so the composition root can hand an
+/// `Arc<dyn BoardCachePort>` to use-cases.
+#[async_trait]
+impl<C: BoardCachePort + ?Sized> BoardCachePort for Arc<C> {
+    async fn cached_board(&self, repo: &RepoRef) -> AppResult<Option<BoardSnapshot>> {
+        (**self).cached_board(repo).await
+    }
+
+    async fn cache_board(&self, repo: &RepoRef, snapshot: &BoardSnapshot) -> AppAction {
+        (**self).cache_board(repo, snapshot).await
+    }
+}
+
 /// Use-cases for the project board.
 pub struct BoardService<P: GitHubPort> {
     port: P,
@@ -492,7 +521,7 @@ impl<P: GitHubPort> BoardService<P> {
             },
         };
         if loaded.snapshot.same_facts_as(snapshot) {
-            return Ok(BoardRefresh::Unchanged);
+            return Ok(BoardRefresh::Unchanged(loaded.snapshot));
         }
         Ok(BoardRefresh::Changed(loaded))
     }
@@ -501,6 +530,73 @@ impl<P: GitHubPort> BoardService<P> {
     /// view (compatibility wrapper over [`BoardService::load`]).
     pub async fn classify_board(&self, repo: &RepoRef) -> AppResult<ClassifiedBoard> {
         Ok(self.load(repo).await?.board)
+    }
+}
+
+/// The first-paint source when opening a board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardOpen {
+    /// Warm cache: loaded instantly from local storage.
+    Cached(LoadedBoard),
+    /// Cold cache: loaded from GitHub and seeded locally.
+    Cold(LoadedBoard),
+}
+
+/// Use-cases for opening and refreshing a board with a per-project local cache.
+pub struct CachedBoardService<G: GitHubPort, C: BoardCachePort> {
+    board: BoardService<G>,
+    cache: C,
+}
+
+impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
+    pub fn new(github: G, cache: C) -> Self {
+        Self {
+            board: BoardService::new(github),
+            cache,
+        }
+    }
+
+    /// Open a board with stale-while-revalidate semantics:
+    /// - warm cache => instant local paint;
+    /// - cold cache => full load and cache seed.
+    pub async fn open(&self, repo: &RepoRef) -> AppResult<BoardOpen> {
+        if let Some(snapshot) = self
+            .cache
+            .cached_board(repo)
+            .await
+            .map_err(|err| err.with_operation("CachedBoardService::open"))?
+        {
+            return Ok(BoardOpen::Cached(LoadedBoard {
+                board: classify(&snapshot.raw_issues),
+                snapshot,
+            }));
+        }
+
+        let loaded = self.board.load(repo).await?;
+        self.cache
+            .cache_board(repo, &loaded.snapshot)
+            .await
+            .map_err(|err| err.with_operation("CachedBoardService::open"))?;
+        Ok(BoardOpen::Cold(loaded))
+    }
+
+    /// Refresh a retained snapshot and rewrite the cache after a successful
+    /// refresh.
+    pub async fn refresh_cached(
+        &self,
+        repo: &RepoRef,
+        snapshot: &BoardSnapshot,
+    ) -> AppResult<BoardRefresh> {
+        let refresh = self.board.refresh(repo, snapshot).await?;
+        let snapshot_to_cache = match &refresh {
+            BoardRefresh::Changed(loaded) => &loaded.snapshot,
+            BoardRefresh::Unchanged(snapshot) => snapshot,
+        };
+        self.cache
+            .cache_board(repo, snapshot_to_cache)
+            .await
+            .map_err(|err| err.with_operation("CachedBoardService::refresh_cached"))?;
+        Ok(refresh)
     }
 }
 

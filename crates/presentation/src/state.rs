@@ -8,14 +8,14 @@
 use std::sync::Arc;
 
 use application::{
-    AuthService, BoardRefresh, BoardService, BoardSnapshot, GitHubPort, LastOpenedService,
-    LoadedBoard, ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
-    TrackedProjectsService,
+    AuthService, BoardCachePort, BoardOpen, BoardRefresh, BoardService, BoardSnapshot,
+    CachedBoardService, GitHubPort, LastOpenedService, LoadedBoard, ProjectStorePort,
+    ProjectsRefresh, RecentProjectsService, SecureStorePort, TrackedProjectsService,
 };
 use domain::{AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
-use infrastructure::{FileProjectStore, GitHubClient, KeyringSecureStore};
+use infrastructure::{FileBoardCache, FileProjectStore, GitHubClient, KeyringSecureStore};
 
 /// The secure store the running app authenticates against.
 ///
@@ -34,6 +34,11 @@ pub fn secure_store() -> Arc<dyn SecureStorePort> {
 /// The on-device store remembering which project was last opened.
 pub fn project_store() -> AppResult<Arc<dyn ProjectStorePort>> {
     Ok(Arc::new(FileProjectStore::new()?))
+}
+
+/// The on-device board cache storing one snapshot per project.
+pub fn board_cache() -> AppResult<Arc<dyn BoardCachePort>> {
+    Ok(Arc::new(FileBoardCache::new()?))
 }
 
 /// The projects use-case with stale-while-revalidate caching, wired from a
@@ -73,19 +78,6 @@ impl AppState {
     /// Build a state around an arbitrary port, for previews and tests.
     pub fn with_port(repo: RepoRef, port: Arc<dyn GitHubPort>) -> Self {
         Self { repo, port }
-    }
-
-    /// Load and classify the board for the wired project, returning the
-    /// retained snapshot used by refresh.
-    pub async fn load_board(&self) -> AppResult<LoadedBoard> {
-        BoardService::new(self.port.clone()).load(&self.repo).await
-    }
-
-    /// Refresh the board against a retained snapshot.
-    pub async fn refresh_board(&self, snapshot: &BoardSnapshot) -> AppResult<BoardRefresh> {
-        BoardService::new(self.port.clone())
-            .refresh(&self.repo, snapshot)
-            .await
     }
 
     /// Assign the authenticated user to a Ready Slice's issue, claiming it on
@@ -167,8 +159,20 @@ pub async fn open_project(repo: &RepoRef) -> AppAction {
 /// live adapter and store into it.
 pub async fn open_and_track_project(token: &GitHubToken, repo: &RepoRef) -> AppResult<LoadedBoard> {
     let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
-    TrackedProjectsService::new(port, project_store()?)
+    let loaded = TrackedProjectsService::new(port.clone(), project_store()?)
         .open_and_track(repo)
+        .await?;
+    board_cache()?.cache_board(repo, &loaded.snapshot).await?;
+    Ok(loaded)
+}
+
+/// Open a board with stale-while-revalidate cache semantics: warm cache paints
+/// instantly, cold cache falls back to a full load and seeds the cache.
+pub async fn open_board(repo: &RepoRef) -> AppResult<BoardOpen> {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
+    CachedBoardService::new(port, board_cache()?)
+        .open(repo)
         .await
 }
 
@@ -176,8 +180,9 @@ pub async fn open_and_track_project(token: &GitHubToken, repo: &RepoRef) -> AppR
 /// changed. Reads the stored token and wires the live adapter for `repo`.
 pub async fn refresh_board(repo: &RepoRef, snapshot: &BoardSnapshot) -> AppResult<BoardRefresh> {
     let token = AuthService::new(secure_store()).require_token().await?;
-    AppState::from_token(&token, repo.clone())?
-        .refresh_board(snapshot)
+    let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
+    CachedBoardService::new(port, board_cache()?)
+        .refresh_cached(repo, snapshot)
         .await
 }
 

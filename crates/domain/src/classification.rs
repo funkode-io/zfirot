@@ -49,7 +49,7 @@ impl IssueClassification {
 /// An adapter projects GitHub API data into this type. The pure
 /// [`classify_issue`] function and the prose-fallback parsing utilities
 /// (`parse_parent_from_body`, `parse_blockers_from_body`) then operate on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawIssue {
     /// The GitHub issue number.
     pub number: u64,

@@ -9,3 +9,7 @@ domain.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

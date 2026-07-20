@@ -83,11 +83,15 @@ async fn refresh_reports_unchanged_when_snapshot_facts_match() {
         .await
         .expect("refresh should succeed");
 
-    assert_eq!(
-        refresh,
-        BoardRefresh::Unchanged,
-        "equal raw issues must not trigger repaint",
-    );
+    match refresh {
+        BoardRefresh::Unchanged(snapshot) => {
+            assert!(
+                snapshot.fetched_at > loaded.snapshot.fetched_at,
+                "unchanged refresh must advance fetched_at so the next delta `since` window moves forward",
+            );
+        }
+        BoardRefresh::Changed(_) => panic!("equal raw issues must not trigger repaint"),
+    }
 }
 
 #[tokio::test]
@@ -123,7 +127,7 @@ async fn refresh_reports_changed_when_snapshot_facts_differ() {
                 "changed view should reflect newly fetched issue set",
             );
         }
-        BoardRefresh::Unchanged => {
+        BoardRefresh::Unchanged(_) => {
             panic!("refresh should report changed when the issue set differs")
         }
     }
@@ -178,7 +182,7 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
 
     let updated = match refresh {
         BoardRefresh::Changed(updated) => updated,
-        BoardRefresh::Unchanged => panic!("closed blocker should change board state"),
+        BoardRefresh::Unchanged(_) => panic!("closed blocker should change board state"),
     };
 
     let refreshed_blocked = updated
@@ -211,9 +215,15 @@ async fn refresh_is_idempotent_when_since_overlap_refetches_same_issue() {
         .await
         .expect("refresh should succeed");
 
-    assert_eq!(
-        refresh,
-        BoardRefresh::Unchanged,
-        "overlap deltas that refetch unchanged issues should be idempotent",
-    );
+    match refresh {
+        BoardRefresh::Unchanged(snapshot) => {
+            assert!(
+                snapshot.fetched_at > loaded.snapshot.fetched_at,
+                "idempotent refresh must still advance fetched_at so `since` does not grow unbounded",
+            );
+        }
+        BoardRefresh::Changed(_) => {
+            panic!("overlap deltas that refetch unchanged issues should be idempotent")
+        }
+    }
 }
