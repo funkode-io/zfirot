@@ -17,6 +17,7 @@ dioxus = { version = "0.7", features = ["desktop"] }
 # only (no `wasm32`), so revisit this when gating server/web/desktop — see the
 # poll loop in src/app.rs.
 tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
 tracing-subscriber = { workspace = true }
 chrono = "0.4"
 # Decodes the bundled PNG window icon into RGBA at startup. Only the `png`

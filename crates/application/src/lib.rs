@@ -630,6 +630,27 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             .map_err(|err| err.with_operation("CachedBoardService::refresh_cached"))?;
         Ok(refresh)
     }
+
+    /// Full-load reconcile against a retained snapshot.
+    ///
+    /// Runs a complete board load (not delta) to heal cache drift that deltas
+    /// cannot observe (for example, hard-deleted or transferred issues). Repaints
+    /// and rewrites cache only when facts differ; aligned snapshots are a no-op.
+    pub async fn reconcile_cached(
+        &self,
+        repo: &RepoRef,
+        snapshot: &BoardSnapshot,
+    ) -> AppResult<BoardRefresh> {
+        let loaded = self.board.load(repo).await?;
+        if loaded.snapshot.same_facts_as(snapshot) {
+            return Ok(BoardRefresh::Unchanged(snapshot.clone()));
+        }
+        self.cache
+            .cache_board(repo, &loaded.snapshot)
+            .await
+            .map_err(|err| err.with_operation("CachedBoardService::reconcile_cached"))?;
+        Ok(BoardRefresh::Changed(loaded))
+    }
 }
 
 /// Use-cases for Personal Access Token authentication, backed by a
