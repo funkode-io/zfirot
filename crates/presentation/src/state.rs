@@ -8,9 +8,10 @@
 use std::sync::Arc;
 
 use application::{
-    AuthService, BoardCachePort, BoardOpen, BoardRefresh, BoardService, BoardSnapshot,
-    CachedBoardService, GitHubPort, LastOpenedService, LoadedBoard, ProjectStorePort,
-    ProjectsRefresh, RecentProjectsService, SecureStorePort, TrackedProjectsService,
+    AuthService, BoardCachePort, BoardCacheUsage, BoardOpen, BoardRefresh, BoardService,
+    BoardSnapshot, CachedBoardService, GitHubPort, LastOpenedService, LoadedBoard,
+    ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
+    TrackedProjectsService,
 };
 use domain::{AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef};
 #[cfg(debug_assertions)]
@@ -184,6 +185,21 @@ pub async fn refresh_board(repo: &RepoRef, snapshot: &BoardSnapshot) -> AppResul
     CachedBoardService::new(port, board_cache()?)
         .refresh_cached(repo, snapshot)
         .await
+}
+
+/// The local board cache usage grouped per project with a global byte total.
+pub async fn cache_usage() -> AppResult<BoardCacheUsage> {
+    board_cache()?.cache_usage().await
+}
+
+/// Remove one project's cached board snapshot.
+pub async fn clear_board_cache(repo: &RepoRef) -> AppAction {
+    board_cache()?.clear_board(repo).await
+}
+
+/// Remove every cached board snapshot.
+pub async fn clear_all_board_cache() -> AppAction {
+    board_cache()?.clear_all().await
 }
 
 /// Reconcile the open board with a full load against its retained snapshot and

@@ -57,6 +57,84 @@ async fn fake_board_cache_round_trips_per_repo() {
 }
 
 #[tokio::test]
+async fn fake_board_cache_reports_usage_and_supports_clear_one_and_all() {
+    let cache = FakeBoardCache::empty();
+    let repo_a = RepoRef::new("funkode-io", "zfirot");
+    let repo_b = RepoRef::new("funkode-io", "replay");
+    let snapshot_a = snapshot_for(&repo_a).await;
+    let snapshot_b = snapshot_for(&repo_b).await;
+
+    cache
+        .cache_board(&repo_a, &snapshot_a)
+        .await
+        .expect("cache write should succeed");
+    cache
+        .cache_board(&repo_b, &snapshot_b)
+        .await
+        .expect("cache write should succeed");
+
+    let usage = cache
+        .cache_usage()
+        .await
+        .expect("cache usage should succeed");
+    assert_eq!(usage.projects.len(), 2, "both repos should be reported");
+    assert_eq!(
+        usage.total_bytes,
+        usage
+            .projects
+            .iter()
+            .map(|project| project.bytes)
+            .sum::<u64>(),
+        "total bytes should equal the per-project sum",
+    );
+    assert!(
+        usage
+            .projects
+            .iter()
+            .any(|project| project.repo == repo_a && project.bytes > 0),
+        "repo A usage should be reported with non-zero size",
+    );
+    assert!(
+        usage
+            .projects
+            .iter()
+            .any(|project| project.repo == repo_b && project.bytes > 0),
+        "repo B usage should be reported with non-zero size",
+    );
+
+    cache
+        .clear_board(&repo_a)
+        .await
+        .expect("clear one should succeed");
+    assert!(
+        cache
+            .cached_board(&repo_a)
+            .await
+            .expect("cache read should succeed")
+            .is_none(),
+        "clearing repo A should remove only repo A",
+    );
+    assert!(
+        cache
+            .cached_board(&repo_b)
+            .await
+            .expect("cache read should succeed")
+            .is_some(),
+        "clearing repo A should keep repo B",
+    );
+
+    cache.clear_all().await.expect("clear all should succeed");
+    assert!(
+        cache
+            .cached_board(&repo_b)
+            .await
+            .expect("cache read should succeed")
+            .is_none(),
+        "clear all should empty the cache",
+    );
+}
+
+#[tokio::test]
 async fn file_board_cache_round_trips_per_repo() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

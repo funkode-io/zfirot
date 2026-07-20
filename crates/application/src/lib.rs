@@ -133,6 +133,20 @@ impl BoardSnapshot {
     }
 }
 
+/// Cache usage for one project snapshot file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedProjectUsage {
+    pub repo: RepoRef,
+    pub bytes: u64,
+}
+
+/// The board cache footprint grouped by project, plus the summed total.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BoardCacheUsage {
+    pub projects: Vec<CachedProjectUsage>,
+    pub total_bytes: u64,
+}
+
 /// The loaded board view plus its retained snapshot for refresh decisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedBoard {
@@ -406,6 +420,12 @@ pub trait BoardCachePort: Send + Sync {
     async fn cached_board(&self, repo: &RepoRef) -> AppResult<Option<BoardSnapshot>>;
     /// Replace `repo`'s cached snapshot.
     async fn cache_board(&self, repo: &RepoRef, snapshot: &BoardSnapshot) -> AppAction;
+    /// Cache footprint grouped by project and summed across all projects.
+    async fn cache_usage(&self) -> AppResult<BoardCacheUsage>;
+    /// Remove the cached snapshot for one project.
+    async fn clear_board(&self, repo: &RepoRef) -> AppAction;
+    /// Remove every cached board snapshot.
+    async fn clear_all(&self) -> AppAction;
 }
 
 /// Shared caches are caches too, so the composition root can hand an
@@ -418,6 +438,18 @@ impl<C: BoardCachePort + ?Sized> BoardCachePort for Arc<C> {
 
     async fn cache_board(&self, repo: &RepoRef, snapshot: &BoardSnapshot) -> AppAction {
         (**self).cache_board(repo, snapshot).await
+    }
+
+    async fn cache_usage(&self) -> AppResult<BoardCacheUsage> {
+        (**self).cache_usage().await
+    }
+
+    async fn clear_board(&self, repo: &RepoRef) -> AppAction {
+        (**self).clear_board(repo).await
+    }
+
+    async fn clear_all(&self) -> AppAction {
+        (**self).clear_all().await
     }
 }
 

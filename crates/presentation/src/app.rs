@@ -7,8 +7,8 @@
 //! new one, with the reason shown inline.
 
 use application::{
-    AuthService, BoardOpen, BoardRefresh, BoardSnapshot, ClassifiedBoard, OtherIssue,
-    ProjectsRefresh, SecureStorePort,
+    AuthService, BoardCacheUsage, BoardOpen, BoardRefresh, BoardSnapshot, ClassifiedBoard,
+    OtherIssue, ProjectsRefresh, SecureStorePort,
 };
 use dioxus::prelude::*;
 use domain::{
@@ -20,9 +20,10 @@ use crate::components::{
     ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner, TokenScreen,
 };
 use crate::state::{
-    assign_self, cached_projects, confirm_classification, last_opened, open_and_track_project,
-    open_board, open_project, reconcile_board, refresh_board, refresh_projects,
-    refresh_recent_projects, secure_store, tracked_repos, untrack_repo,
+    assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
+    confirm_classification, last_opened, open_and_track_project, open_board, open_project,
+    reconcile_board, refresh_board, refresh_projects, refresh_recent_projects, secure_store,
+    tracked_repos, untrack_repo,
 };
 use tracing::warn;
 
@@ -115,6 +116,8 @@ pub fn App() -> Element {
     // A board view fetched by a `Changed` refresh, handed to the next `view`
     // resolution so it repaints the fresh board without a second network fetch.
     let mut prefetched_board = use_signal(|| Option::<View>::None);
+    // Global board-cache usage shown in the top bar.
+    let mut cache_stats = use_signal(BoardCacheUsage::default);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -132,6 +135,16 @@ pub fn App() -> Element {
     use_effect(move || match view.read().as_ref() {
         Some(View::Board { snapshot, .. }) => board_snapshot.set(Some(snapshot.clone())),
         _ => board_snapshot.set(None),
+    });
+
+    // Keep the top-bar cache indicator in sync with local cache writes/clears.
+    use_effect(move || {
+        let _ = reload();
+        spawn(async move {
+            if let Ok(usage) = cache_usage().await {
+                cache_stats.set(usage);
+            }
+        });
     });
 
     // Stale-while-revalidate: once the home screen has painted *from the cache*,
@@ -366,6 +379,24 @@ pub fn App() -> Element {
         });
     });
 
+    let on_clear_cache_all = move |_| {
+        spawn(async move {
+            let _ = clear_all_board_cache().await;
+            if let Ok(usage) = cache_usage().await {
+                cache_stats.set(usage);
+            }
+        });
+    };
+
+    let on_clear_cache_repo = use_callback(move |repo: RepoRef| {
+        spawn(async move {
+            let _ = clear_board_cache(&repo).await;
+            if let Ok(usage) = cache_usage().await {
+                cache_stats.set(usage);
+            }
+        });
+    });
+
     // Back to the project picker. Persistence is untouched, so the next launch
     // still reopens the last project; this only changes the current session.
     // Reset the revalidate guard so returning to Home refreshes the list again.
@@ -413,7 +444,12 @@ pub fn App() -> Element {
             // that is merely self-refreshing keeps `board_loading` false and so
             // falls through to the populated `View::Board` arm below.
             (_, true, Nav::Project(repo) | Nav::GoTo(repo)) => rsx! {
-                BoardShell { repo: repo.to_string(), on_home,
+                BoardShell {
+                    repo: repo.to_string(),
+                    on_home,
+                    cache_usage: cache_stats(),
+                    on_clear_cache_all,
+                    on_clear_cache_repo,
                     div { class: "flex justify-center py-16",
                         Spinner { label: "Loading board…" }
                     }
@@ -486,6 +522,9 @@ pub fn App() -> Element {
                         on_refresh,
                         refreshing,
                         last_updated: loaded_at.clone(),
+                        cache_usage: cache_stats(),
+                        on_clear_cache_all,
+                        on_clear_cache_repo,
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
                         }
@@ -504,7 +543,12 @@ pub fn App() -> Element {
                 }
             }
             (Some(View::Error(message)), ..) => rsx! {
-                BoardShell { on_home, on_refresh,
+                BoardShell {
+                    on_home,
+                    on_refresh,
+                    cache_usage: cache_stats(),
+                    on_clear_cache_all,
+                    on_clear_cache_repo,
                     ErrorBanner { message: message.clone() }
                 }
             },
@@ -676,7 +720,11 @@ fn BoardShell(
     #[props(default)] on_refresh: Option<EventHandler<()>>,
     #[props(default)] refreshing: bool,
     #[props(default)] last_updated: Option<String>,
+    #[props(default)] cache_usage: BoardCacheUsage,
+    #[props(default)] on_clear_cache_all: Option<EventHandler<()>>,
+    #[props(default)] on_clear_cache_repo: Option<EventHandler<RepoRef>>,
 ) -> Element {
+    let total_cache = format_bytes(cache_usage.total_bytes);
     rsx! {
         div { class: "min-h-screen bg-base-100 p-6", "data-theme": "zfirot-dark",
             header { class: "flex items-center gap-2 mb-6",
@@ -696,6 +744,58 @@ fn BoardShell(
                 }
                 // Freshness controls, pushed to the right.
                 div { class: "ml-auto flex items-center gap-3",
+                    div { class: "flex items-center gap-1",
+                        div { class: "dropdown dropdown-end",
+                            button {
+                                class: "btn btn-ghost btn-sm gap-2",
+                                title: "Board cache usage",
+                                span { class: "icon-[lucide--database] size-4" }
+                                span { class: "text-xs font-medium", "{total_cache}" }
+                            }
+                            ul { class: "dropdown-content menu p-2 shadow bg-base-200 rounded-box w-80 mt-1 z-10",
+                                li { class: "menu-title text-xs", span { "Cache usage" } }
+                                if cache_usage.projects.is_empty() {
+                                    li { span { class: "text-xs opacity-70", "No cached projects" } }
+                                } else {
+                                    for project in cache_usage.projects.iter().cloned() {
+                                        li {
+                                            div { class: "flex items-center gap-2 justify-between",
+                                                span {
+                                                    class: "text-xs truncate",
+                                                    title: "{project.repo}",
+                                                    "{project.repo}"
+                                                }
+                                                div { class: "flex items-center gap-2 shrink-0",
+                                                    span { class: "badge badge-ghost badge-sm", "{format_bytes(project.bytes)}" }
+                                                    if let Some(on_clear_cache_repo) = on_clear_cache_repo {
+                                                        button {
+                                                            class: "btn btn-ghost btn-xs btn-square",
+                                                            title: "Clear project cache",
+                                                            aria_label: "Clear project cache",
+                                                            onclick: {
+                                                                let clear_repo = project.repo.clone();
+                                                                move |_| on_clear_cache_repo.call(clear_repo.clone())
+                                                            },
+                                                            span { class: "icon-[lucide--eraser] size-4" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(on_clear_cache_all) = on_clear_cache_all {
+                            button {
+                                class: "btn btn-ghost btn-sm btn-square",
+                                title: "Clear all cache",
+                                aria_label: "Clear all cache",
+                                onclick: move |_| on_clear_cache_all.call(()),
+                                span { class: "icon-[lucide--eraser] size-5" }
+                            }
+                        }
+                    }
                     if let Some(updated) = last_updated {
                         span { class: "text-xs opacity-60", "Updated {updated}" }
                     }
@@ -717,6 +817,19 @@ fn BoardShell(
             }
             {children}
         }
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+
+    if bytes as f64 >= MB {
+        format!("{:.1} MB", bytes as f64 / MB)
+    } else if bytes as f64 >= KB {
+        format!("{:.1} KB", bytes as f64 / KB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
