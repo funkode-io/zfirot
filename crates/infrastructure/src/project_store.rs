@@ -233,7 +233,12 @@ impl ProjectStorePort for FileProjectStore {
                     .with_source(err))
             }
         };
-        let raw: Option<String> = serde_json::from_slice(&bytes).ok();
+        let raw: Option<String> = serde_json::from_slice(&bytes).map_err(|err| {
+            AppError::internal("Could not read the theme preference.")
+                .with_operation("FileProjectStore::theme_preference")
+                .with_context("path", path.display().to_string())
+                .with_source(err)
+        })?;
         Ok(raw.as_deref().and_then(ThemePreference::from_data_theme))
     }
 
