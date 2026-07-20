@@ -360,3 +360,43 @@ async fn clearing_a_repo_cache_forces_a_cold_reopen_and_reseed() {
         BoardOpen::Cached(_) => panic!("after clear, reopen must be a cold load"),
     }
 }
+
+#[tokio::test]
+async fn clearing_all_cache_forces_cold_reopen_and_reseed() {
+    let repo_a = RepoRef::new("funkode-io", "zfirot");
+    let repo_b = RepoRef::new("funkode-io", "replay");
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        SequencePort::new(
+            vec![
+                vec![open_issue(50, "A-Seed")],
+                vec![open_issue(60, "B-Seed")],
+                vec![open_issue(50, "A-Reload")],
+                vec![open_issue(60, "B-Reload")],
+            ],
+            vec![],
+        ),
+        cache.clone(),
+    );
+
+    let _ = service.open(&repo_a).await.expect("first open should seed repo a");
+    let _ = service.open(&repo_b).await.expect("first open should seed repo b");
+    cache.clear_all().await.expect("clear all should succeed");
+
+    match service
+        .open(&repo_a)
+        .await
+        .expect("reopen repo a should succeed")
+    {
+        BoardOpen::Cold(loaded) => assert_eq!(loaded.board.slices[0].title, "A-Reload"),
+        BoardOpen::Cached(_) => panic!("after clear all, repo a reopen must be a cold load"),
+    }
+    match service
+        .open(&repo_b)
+        .await
+        .expect("reopen repo b should succeed")
+    {
+        BoardOpen::Cold(loaded) => assert_eq!(loaded.board.slices[0].title, "B-Reload"),
+        BoardOpen::Cached(_) => panic!("after clear all, repo b reopen must be a cold load"),
+    }
+}
