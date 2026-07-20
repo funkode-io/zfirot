@@ -1,6 +1,6 @@
 use application::{GitHubPort, ProjectStorePort, TrackedProjectsService};
 use async_trait::async_trait;
-use domain::{AgentRef, AppAction, AppError, AppResult, Project, RawIssue, RepoRef};
+use domain::{AppAction, AppError, AppResult, Project, RawIssue, RepoRef};
 use infrastructure::FakeProjectStore;
 use std::sync::Arc;
 
@@ -95,21 +95,8 @@ impl GitHubPort for StubGitHubPort {
         Ok(())
     }
 
-    async fn assign_agent(
-        &self,
-        _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
-    ) -> AppAction {
-        Ok(())
-    }
-
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Ok(())
-    }
-
-    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        Ok(vec![])
     }
 }
 

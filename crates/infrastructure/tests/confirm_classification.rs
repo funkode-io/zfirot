@@ -9,8 +9,7 @@ use std::sync::{Arc, Mutex};
 use application::{BoardService, GitHubPort};
 use async_trait::async_trait;
 use domain::{
-    AgentRef, AppAction, AppError, AppErrorKind, AppResult, IssueClassification, Project, RawIssue,
-    RepoRef,
+    AppAction, AppError, AppErrorKind, AppResult, IssueClassification, Project, RawIssue, RepoRef,
 };
 
 /// A fake that records each `(issue_number, label)` it was asked to label, so
@@ -34,25 +33,12 @@ impl GitHubPort for RecordingPort {
         Ok(())
     }
 
-    async fn assign_agent(
-        &self,
-        _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
-    ) -> AppAction {
-        Ok(())
-    }
-
     async fn add_label(&self, _repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
         self.labelled
             .lock()
             .unwrap()
             .push((issue_number, label.to_string()));
         Ok(())
-    }
-
-    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        Ok(vec![])
     }
 }
 
@@ -74,23 +60,10 @@ impl GitHubPort for FailingPort {
         Ok(())
     }
 
-    async fn assign_agent(
-        &self,
-        _repo: &RepoRef,
-        _issue_number: u64,
-        _agent: &AgentRef,
-    ) -> AppAction {
-        Ok(())
-    }
-
     async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
         Err(AppError::forbidden(
             "The token lacks permission to label this issue",
         ))
-    }
-
-    async fn suggested_agents(&self, _repo: &RepoRef) -> AppResult<Vec<AgentRef>> {
-        Ok(vec![])
     }
 }
 
