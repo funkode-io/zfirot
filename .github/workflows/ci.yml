@@ -40,7 +40,17 @@ jobs:
       - name: Install Rust toolchain
         run: rustup component add rustfmt clippy
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - uses: Swatinem/rust-cache@v2
+
+      # The generated stylesheet is untracked (built by dx/tailwind locally), but
+      # the `asset!("/assets/tailwind.css")` macro needs it to exist at build
+      # time. Generate it before the Rust build.
+      - name: Build stylesheet
+        run: make css
 
       - name: make check (fmt + clippy + test)
         run: make check
