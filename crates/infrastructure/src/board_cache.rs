@@ -132,14 +132,14 @@ impl BoardCachePort for FileBoardCache {
                     Some(name) => name.to_string(),
                     None => continue,
                 };
-                let bytes = file_entry.metadata().map_err(|err| {
+                let metadata = file_entry.metadata().map_err(|err| {
                     AppError::internal("Could not read the board cache usage.")
                         .with_operation("FileBoardCache::cache_usage")
                         .with_source(err)
                 })?;
                 projects.push(CachedProjectUsage {
                     repo: RepoRef::new(owner.clone(), name),
-                    bytes: bytes.len(),
+                    bytes: metadata.len(),
                 });
             }
         }
@@ -208,20 +208,23 @@ impl BoardCachePort for FakeBoardCache {
     }
 
     async fn cache_usage(&self) -> AppResult<BoardCacheUsage> {
-        let mut projects: Vec<CachedProjectUsage> = self
-            .snapshots
-            .lock()
-            .expect("lock poisoned")
-            .values()
-            .filter_map(|(repo, snapshot)| {
-                serde_json::to_vec(snapshot)
-                    .ok()
-                    .map(|bytes| CachedProjectUsage {
-                        repo: repo.clone(),
-                        bytes: bytes.len() as u64,
-                    })
-            })
-            .collect();
+        let snapshots = self.snapshots.lock().expect("lock poisoned");
+        let mut projects: Vec<CachedProjectUsage> = Vec::with_capacity(snapshots.len());
+        for (repo, snapshot) in snapshots.values() {
+            // Mirror the file adapter, which measures the pretty-printed JSON it
+            // writes to disk; propagate encode failures instead of masking them.
+            let bytes = serde_json::to_vec_pretty(snapshot).map_err(|err| {
+                AppError::internal("Could not read the board cache usage.")
+                    .with_operation("FakeBoardCache::cache_usage")
+                    .with_context("repo", repo)
+                    .with_source(err)
+            })?;
+            projects.push(CachedProjectUsage {
+                repo: repo.clone(),
+                bytes: bytes.len() as u64,
+            });
+        }
+        drop(snapshots);
         projects.sort_by_key(|a| a.repo.to_string());
         let total_bytes = projects.iter().map(|project| project.bytes).sum();
         Ok(BoardCacheUsage {
