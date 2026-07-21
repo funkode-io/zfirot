@@ -14,7 +14,8 @@ use application::{
     TrackedProjectsService,
 };
 use domain::{
-    AppAction, AppResult, GitHubToken, IssueClassification, Project, RepoRef, ThemePreference,
+    AppAction, AppResult, BoardViewMode, GitHubToken, IssueClassification, Project, RepoRef,
+    ThemePreference,
 };
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
@@ -161,6 +162,16 @@ pub async fn theme_preference() -> AppResult<Option<ThemePreference>> {
 /// Persist the selected app theme so the next launch restores it.
 pub async fn remember_theme_preference(theme: ThemePreference) -> AppAction {
     project_store()?.remember_theme_preference(theme).await
+}
+
+/// The persisted board view mode, or `None` when unset (default: columns).
+pub async fn view_mode() -> AppResult<Option<BoardViewMode>> {
+    project_store()?.view_mode().await
+}
+
+/// Persist the selected board view mode.
+pub async fn remember_view_mode(mode: BoardViewMode) -> AppAction {
+    project_store()?.remember_view_mode(mode).await
 }
 
 /// Open a project via the go-to (typed-repo) action: try to load the board to

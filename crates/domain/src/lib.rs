@@ -15,6 +15,7 @@ mod repo;
 mod slice;
 mod theme;
 mod token;
+mod view_mode;
 
 pub use classification::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
@@ -22,7 +23,7 @@ pub use classification::{
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
 pub use freshness::{PollInterval, ReconcileInterval};
 pub use home_filter::{filter_home, visible_tracked_repos, HomeFilter};
-pub use lane::{group_into_lanes, PrdLane};
+pub use lane::{derive_lane_graph, group_into_lanes, LaneGraph, LaneGraphEdge, PrdLane};
 pub use prd::{Prd, PrdRef};
 pub use project::Project;
 pub use prose::{parse_prose, ProseLinks};
@@ -32,3 +33,4 @@ pub use slice::{
 };
 pub use theme::ThemePreference;
 pub use token::GitHubToken;
+pub use view_mode::BoardViewMode;

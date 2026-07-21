@@ -11,6 +11,24 @@ pub struct PrdLane {
     pub slices: Vec<Slice>,
 }
 
+/// A directed dependency edge between two Slices in the same [`PrdLane`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaneGraphEdge {
+    /// Upstream blocker issue number.
+    pub blocker: u64,
+    /// Downstream blocked issue number.
+    pub blocked: u64,
+}
+
+/// A left-to-right dependency layout of one [`PrdLane`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneGraph {
+    /// Ordered columns by dependency depth, left (`0`) to right.
+    pub columns: Vec<Vec<Slice>>,
+    /// Intra-lane blocker edges only; cross-lane blockers are excluded.
+    pub edges: Vec<LaneGraphEdge>,
+}
+
 /// Group Slices into one lane per PRD, in first-seen order, with a trailing
 /// "No PRD" lane for Slices with no parent PRD.
 ///
@@ -64,9 +82,103 @@ pub fn group_into_lanes(slices: impl IntoIterator<Item = Slice>) -> Vec<PrdLane>
     lanes
 }
 
+/// Project one lane into a left-to-right dependency graph.
+///
+/// Rules:
+/// - A Slice with no same-lane blocker sits in the leftmost column.
+/// - Any other Slice sits strictly to the right of every same-lane blocker.
+/// - `edges` contains only same-lane blocker links (`blocker -> blocked`).
+/// - Cross-lane blockers are ignored for layout and edge rendering.
+pub fn derive_lane_graph(lane: &PrdLane) -> LaneGraph {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    let slice_numbers: HashSet<u64> = lane.slices.iter().map(|slice| slice.number).collect();
+    let blockers_by_slice: HashMap<u64, Vec<u64>> = lane
+        .slices
+        .iter()
+        .map(|slice| {
+            let blockers = slice
+                .blockers
+                .iter()
+                .filter_map(|blocker| {
+                    slice_numbers
+                        .contains(&blocker.number)
+                        .then_some(blocker.number)
+                })
+                .collect();
+            (slice.number, blockers)
+        })
+        .collect();
+
+    let mut edges = Vec::new();
+    for slice in &lane.slices {
+        if let Some(blockers) = blockers_by_slice.get(&slice.number) {
+            for blocker in blockers {
+                edges.push(LaneGraphEdge {
+                    blocker: *blocker,
+                    blocked: slice.number,
+                });
+            }
+        }
+    }
+
+    fn dependency_depth(
+        number: u64,
+        blockers_by_slice: &HashMap<u64, Vec<u64>>,
+        cache: &mut HashMap<u64, usize>,
+        visiting: &mut HashSet<u64>,
+    ) -> usize {
+        if let Some(depth) = cache.get(&number) {
+            return *depth;
+        }
+        if visiting.contains(&number) {
+            // Defensive cycle guard: treat the cycle entry as a root.
+            return 0;
+        }
+
+        visiting.insert(number);
+        let depth = blockers_by_slice
+            .get(&number)
+            .map(|blockers| {
+                blockers
+                    .iter()
+                    .map(|blocker| {
+                        dependency_depth(*blocker, blockers_by_slice, cache, visiting) + 1
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        visiting.remove(&number);
+        cache.insert(number, depth);
+        depth
+    }
+
+    let mut cache = HashMap::new();
+    let mut columns_by_depth: BTreeMap<usize, Vec<Slice>> = BTreeMap::new();
+    for slice in &lane.slices {
+        let depth = dependency_depth(
+            slice.number,
+            &blockers_by_slice,
+            &mut cache,
+            &mut HashSet::new(),
+        );
+        columns_by_depth
+            .entry(depth)
+            .or_default()
+            .push(slice.clone());
+    }
+
+    LaneGraph {
+        columns: columns_by_depth.into_values().collect(),
+        edges,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DependencyRef;
 
     fn prd(number: u64) -> PrdRef {
         PrdRef {
@@ -86,6 +198,29 @@ mod tests {
             assignee_avatar_url: None,
             state,
             blockers: vec![],
+            unblocks: vec![],
+            linked_prs: vec![],
+        }
+    }
+
+    fn blocker(number: u64) -> DependencyRef {
+        DependencyRef {
+            number,
+            title: format!("Slice {number}"),
+            url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+        }
+    }
+
+    fn ready_slice(number: u64, blockers: Vec<DependencyRef>) -> Slice {
+        Slice {
+            number,
+            title: format!("Slice {number}"),
+            url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+            prd: Some(prd(1)),
+            assignee: None,
+            assignee_avatar_url: None,
+            state: SliceState::Ready,
+            blockers,
             unblocks: vec![],
             linked_prs: vec![],
         }
@@ -139,5 +274,82 @@ mod tests {
             slice(2, Some(prd(1)), SliceState::Done),
         ];
         assert!(group_into_lanes(input).is_empty());
+    }
+
+    #[test]
+    fn derive_lane_graph_layouts_and_edges_are_pure() {
+        struct Case {
+            name: &'static str,
+            slices: Vec<Slice>,
+            expected_columns: Vec<Vec<u64>>,
+            expected_edges: Vec<(u64, u64)>,
+        }
+
+        let cases = vec![
+            Case {
+                name: "linear chain",
+                slices: vec![
+                    ready_slice(1, vec![]),
+                    ready_slice(2, vec![blocker(1)]),
+                    ready_slice(3, vec![blocker(2)]),
+                ],
+                expected_columns: vec![vec![1], vec![2], vec![3]],
+                expected_edges: vec![(1, 2), (2, 3)],
+            },
+            Case {
+                name: "fan out and diamond",
+                slices: vec![
+                    ready_slice(10, vec![]),
+                    ready_slice(11, vec![blocker(10)]),
+                    ready_slice(12, vec![blocker(10)]),
+                    ready_slice(13, vec![blocker(11), blocker(12)]),
+                ],
+                expected_columns: vec![vec![10], vec![11, 12], vec![13]],
+                expected_edges: vec![(10, 11), (10, 12), (11, 13), (12, 13)],
+            },
+            Case {
+                name: "isolated node",
+                slices: vec![ready_slice(20, vec![])],
+                expected_columns: vec![vec![20]],
+                expected_edges: vec![],
+            },
+            Case {
+                name: "cross lane blocker excluded",
+                slices: vec![
+                    ready_slice(30, vec![blocker(999)]),
+                    ready_slice(31, vec![blocker(30), blocker(1000)]),
+                ],
+                expected_columns: vec![vec![30], vec![31]],
+                expected_edges: vec![(30, 31)],
+            },
+            Case {
+                name: "empty lane",
+                slices: vec![],
+                expected_columns: vec![],
+                expected_edges: vec![],
+            },
+        ];
+
+        for case in cases {
+            let lane = PrdLane {
+                prd: Some(prd(1)),
+                slices: case.slices,
+            };
+            let graph = derive_lane_graph(&lane);
+
+            let columns: Vec<Vec<u64>> = graph
+                .columns
+                .iter()
+                .map(|column| column.iter().map(|slice| slice.number).collect())
+                .collect();
+            let edges: Vec<(u64, u64)> = graph
+                .edges
+                .iter()
+                .map(|edge| (edge.blocker, edge.blocked))
+                .collect();
+
+            assert_eq!(columns, case.expected_columns, "{}", case.name);
+            assert_eq!(edges, case.expected_edges, "{}", case.name);
+        }
     }
 }
