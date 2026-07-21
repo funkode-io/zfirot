@@ -113,6 +113,10 @@ pub fn App() -> Element {
     let mut board_snapshot = use_signal(|| Option::<BoardSnapshot>::None);
     // True while a manual board refresh is in flight.
     let mut board_refreshing = use_signal(|| false);
+    // True while a full-load reconcile is in flight — either the background loop
+    // or the authoritative follow-up a manual refresh kicks off — so the two
+    // never stack into overlapping full loads.
+    let mut reconciling = use_signal(|| false);
     // A board view fetched by a `Changed` refresh, handed to the next `view`
     // resolution so it repaints the fresh board without a second network fetch.
     let mut prefetched_board = use_signal(|| Option::<View>::None);
@@ -312,6 +316,12 @@ pub fn App() -> Element {
             };
             if let Some(repo) = open_repo {
                 if let Some(snapshot) = board_snapshot() {
+                    // Skip this tick if a reconcile (background or manual-
+                    // triggered) is already running, so full loads never stack.
+                    if reconciling() {
+                        continue;
+                    }
+                    reconciling.set(true);
                     match reconcile_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
                             board_snapshot.set(Some(loaded.snapshot.clone()));
@@ -327,46 +337,79 @@ pub fn App() -> Element {
                         Ok(BoardRefresh::Unchanged(_)) => {}
                         Err(_) => {}
                     }
+                    reconciling.set(false);
                 }
             }
         }
     });
 
-    // Manual refresh: run snapshot refresh and repaint only if changed.
+    // Manual refresh: a fast delta for instant feedback, then a silent,
+    // authoritative reconcile to heal anything the delta cannot see (e.g. an
+    // issue closed by a merged PR, whose close event may fall outside the delta
+    // `since` window). The delta paints first and clears the spinner; the
+    // reconcile runs full-load and repaints only on a real difference.
     let on_refresh = move |_| {
         if board_refreshing() {
             return;
         }
-        if let Some(View::Board { repo, .. }) = view.read_unchecked().as_ref() {
-            let repo = repo.clone();
+        let open_repo = match view.read_unchecked().as_ref() {
+            Some(View::Board { repo, .. }) => Some(repo.clone()),
+            _ => None,
+        };
+        if let Some(repo) = open_repo {
             if let Some(snapshot) = board_snapshot() {
                 // Set the in-flight guard synchronously (before the spawn) so
                 // rapid clicks cannot start a second refresh between the check
                 // above and the flag being set inside the task.
                 board_refreshing.set(true);
                 spawn(async move {
-                    match refresh_board(&repo, &snapshot).await {
+                    // Fast path: delta refresh, repaint from the fetched board.
+                    let base = match refresh_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
-                            // Repaint from the fetched board rather than reloading,
-                            // which would fetch the same board again.
                             board_snapshot.set(Some(loaded.snapshot.clone()));
                             prefetched_board.set(Some(View::Board {
-                                repo,
+                                repo: repo.clone(),
                                 board: loaded.board,
                                 loaded_at: now_hms(),
-                                snapshot: loaded.snapshot,
+                                snapshot: loaded.snapshot.clone(),
                                 from_cache: false,
                             }));
                             reload += 1;
+                            Some(loaded.snapshot)
                         }
-                        // Facts unchanged: don't repaint, but adopt the snapshot so
-                        // its advanced `fetched_at` moves the next delta window on.
+                        // Facts unchanged: adopt the snapshot so its advanced
+                        // `fetched_at` moves the next delta window on.
                         Ok(BoardRefresh::Unchanged(snapshot)) => {
-                            board_snapshot.set(Some(snapshot));
+                            board_snapshot.set(Some(snapshot.clone()));
+                            Some(snapshot)
                         }
-                        Err(_) => {}
-                    }
+                        Err(_) => None,
+                    };
+                    // Spinner clears after the fast delta paint.
                     board_refreshing.set(false);
+
+                    // Authoritative slow path: a silent one-shot reconcile heals
+                    // what the delta cannot observe. Skipped when a reconcile is
+                    // already running; repaints only on a real difference.
+                    if let Some(base) = base {
+                        if !reconciling() {
+                            reconciling.set(true);
+                            if let Ok(BoardRefresh::Changed(loaded)) =
+                                reconcile_board(&repo, &base).await
+                            {
+                                board_snapshot.set(Some(loaded.snapshot.clone()));
+                                prefetched_board.set(Some(View::Board {
+                                    repo,
+                                    board: loaded.board,
+                                    loaded_at: now_hms(),
+                                    snapshot: loaded.snapshot,
+                                    from_cache: false,
+                                }));
+                                reload += 1;
+                            }
+                            reconciling.set(false);
+                        }
+                    }
                 });
                 return;
             }
