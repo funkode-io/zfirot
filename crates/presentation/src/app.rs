@@ -503,6 +503,50 @@ pub fn App() -> Element {
         });
     });
 
+    // Stable board-action handlers. Defined once (not re-minted inside the
+    // `View::Board` render arm) so a card's event never invokes a dropped
+    // generational box (`ValueDroppedError`) after the board re-renders — the
+    // same rule the `Board` component documents for `on_highlight`. Each reads
+    // the currently open repo from `view` at call time (borrow dropped before
+    // the await).
+    let on_assign = use_callback(move |number: u64| {
+        let open_repo = match view.read_unchecked().as_ref() {
+            Some(View::Board { repo, .. }) => Some(repo.clone()),
+            _ => None,
+        };
+        if let Some(repo) = open_repo {
+            spawn(async move {
+                match assign_self(&repo, number).await {
+                    Ok(()) => {
+                        assign_error.set(None);
+                        reload += 1;
+                    }
+                    Err(error) => assign_error.set(Some(error.to_string())),
+                }
+            });
+        }
+    });
+
+    let on_confirm = use_callback(
+        move |(number, classification): (u64, IssueClassification)| {
+            let open_repo = match view.read_unchecked().as_ref() {
+                Some(View::Board { repo, .. }) => Some(repo.clone()),
+                _ => None,
+            };
+            if let Some(repo) = open_repo {
+                spawn(async move {
+                    match confirm_classification(&repo, number, &classification).await {
+                        Ok(()) => {
+                            confirm_error.set(None);
+                            reload += 1;
+                        }
+                        Err(error) => confirm_error.set(Some(error.to_string())),
+                    }
+                });
+            }
+        },
+    );
+
     // Back to the project picker. Persistence is untouched, so the next launch
     // still reopens the last project; this only changes the current session.
     // Reset the revalidate guard so returning to Home refreshes the list again.
@@ -602,39 +646,6 @@ pub fn App() -> Element {
                 loaded_at,
                 ..
             }), ..) => {
-                // Claim the Slice on GitHub, then re-poll so the now-assigned
-                // Slice derives Wip and leaves Ready. On failure the board is
-                // left unchanged and the error is surfaced above it.
-                let assign_repo = repo.clone();
-                let on_assign = move |number: u64| {
-                    let repo = assign_repo.clone();
-                    spawn(async move {
-                        match assign_self(&repo, number).await {
-                            Ok(()) => {
-                                assign_error.set(None);
-                                reload += 1;
-                            }
-                            Err(error) => assign_error.set(Some(error.to_string())),
-                        }
-                    });
-                };
-                // Confirm a suggested classification: add its prd/slice label,
-                // then re-poll so the now-labelled issue classifies tier-1 and
-                // leaves "other open issues". On failure the issue is left
-                // unchanged and the error is surfaced above the board.
-                let confirm_repo = repo.clone();
-                let on_confirm = move |(number, classification): (u64, IssueClassification)| {
-                    let repo = confirm_repo.clone();
-                    spawn(async move {
-                        match confirm_classification(&repo, number, &classification).await {
-                            Ok(()) => {
-                                confirm_error.set(None);
-                                reload += 1;
-                            }
-                            Err(error) => confirm_error.set(Some(error.to_string())),
-                        }
-                    });
-                };
                 let summary = BoardSummary::from_slices(&board.slices);
                 let on_toggle_graph = move |_| {
                     let next = !graph_view();
