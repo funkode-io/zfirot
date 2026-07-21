@@ -121,6 +121,8 @@ pub fn App() -> Element {
     // The currently active theme for the toggle UI. When no preference is stored,
     // this is initialised from the OS `prefers-color-scheme`.
     let mut theme = use_signal(|| ThemePreference::Light);
+    // Session-only board mode: false = columns (default), true = graph.
+    let mut graph_view = use_signal(|| false);
     // Runs theme initialisation exactly once.
     let mut theme_initialized = use_signal(|| false);
 
@@ -572,12 +574,15 @@ pub fn App() -> Element {
                     });
                 };
                 let summary = BoardSummary::from_slices(&board.slices);
+                let on_toggle_graph = move |_| graph_view.set(!graph_view());
                 rsx! {
                     BoardShell {
                         repo: repo.to_string(),
                         on_home,
                         theme: theme(),
                         on_toggle_theme,
+                        graph_view: graph_view(),
+                        on_toggle_graph,
                         on_refresh,
                         refreshing,
                         last_updated: loaded_at.clone(),
@@ -593,6 +598,7 @@ pub fn App() -> Element {
                         BoardSummaryBar { summary }
                         Board {
                             slices: board.slices.clone(),
+                            graph_view: graph_view(),
                             on_assign,
                         }
                         if !board.other.is_empty() {
@@ -808,6 +814,8 @@ fn BoardShell(
     #[props(default)] cache_usage: BoardCacheUsage,
     #[props(default)] on_clear_cache_all: Option<EventHandler<()>>,
     #[props(default)] on_clear_cache_repo: Option<EventHandler<RepoRef>>,
+    #[props(default)] graph_view: bool,
+    #[props(default)] on_toggle_graph: Option<EventHandler<()>>,
 ) -> Element {
     let total_cache = format_bytes(cache_usage.total_bytes);
     rsx! {
@@ -896,6 +904,19 @@ fn BoardShell(
                             span { class: "icon-[lucide--sun] size-5" }
                         }
                     }
+                    if let Some(on_toggle_graph) = on_toggle_graph {
+                        button {
+                            class: "btn btn-ghost btn-sm btn-square",
+                            title: if graph_view { "Switch to columns view" } else { "Switch to graph view" },
+                            aria_label: if graph_view { "Switch to columns view" } else { "Switch to graph view" },
+                            onclick: move |_| on_toggle_graph.call(()),
+                            if graph_view {
+                                span { class: "icon-[lucide--layout-dashboard] size-5" }
+                            } else {
+                                span { class: "icon-[lucide--workflow] size-5" }
+                            }
+                        }
+                    }
                     if let Some(updated) = last_updated {
                         span { class: "text-xs opacity-60", "Updated {updated}" }
                     }
@@ -980,7 +1001,7 @@ fn ZfirotLogo() -> Element {
 }
 
 #[component]
-fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
+fn Board(slices: Vec<Slice>, graph_view: bool, on_assign: EventHandler<u64>) -> Element {
     let lanes = group_into_lanes(slices);
     // The board-wide "highlighted issue", shared across lanes so a dependency
     // badge can highlight its referenced card in any column. `None` when nothing
@@ -1000,6 +1021,7 @@ fn Board(slices: Vec<Slice>, on_assign: EventHandler<u64>) -> Element {
                     key: "{lane.prd.as_ref().map(|prd| prd.number).unwrap_or(0)}",
                     prd: lane.prd,
                     slices: lane.slices,
+                    graph_view,
                     on_assign,
                     highlighted: highlighted(),
                     on_highlight,
