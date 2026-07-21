@@ -6,10 +6,13 @@ ready to be picked up, in progress, or blocked.
 
 ## Language
 
-**PRD**:
+**PRD** (alias: **Spec**):
 A product requirements document describing a feature. Represented as a GitHub
-Issue carrying the `prd` label.
-_Avoid_: spec, epic, story
+Issue carrying the `prd` (or `spec`) label. **PRD** is the canonical term; the
+`to-spec` skill (which replaced `to-prd`) calls the same artifact a **Spec** —
+treat the two as synonyms. An issue is classified as a PRD if it carries
+*either* label, so a lane is still captured if the tooling ever emits `spec`.
+_Avoid_: epic, story ("spec" is now an accepted alias, not forbidden)
 
 **Slice**:
 A thin vertical tracer-bullet unit of work that cuts end-to-end through every
@@ -83,6 +86,15 @@ Each lane has a header linking to its PRD Issue and contains the Ready / WIP /
 Blocked columns for that PRD's Slices. Slices with no parent PRD collect in a
 trailing "No PRD" lane.
 _Avoid_: row, group, section
+
+**Graph view** (vs **Columns view**):
+Two ways to render a Lane. **Columns view** (the default) lays a PRD's Slices
+out in Ready / WIP / Blocked columns. **Graph view** draws them as a
+left-to-right **Blocked by** graph — dependency roots on the left, so a stacked
+chain reads as `first → next → last`. A single global toggle switches the whole
+board between the two and the choice is remembered across launches. Both render
+the same Slices with the same states; only the arrangement differs.
+_Avoid_: DAG view, tree view, pipeline, flow
 
 **Tracked repo**:
 An `owner/repo` the user summoned by name on the home screen — rather than
