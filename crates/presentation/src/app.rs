@@ -12,8 +12,8 @@ use application::{
 };
 use dioxus::prelude::*;
 use domain::{
-    group_into_lanes, AppErrorKind, BoardSummary, GitHubToken, IssueClassification, PollInterval,
-    Project, ReconcileInterval, RepoRef, Slice, ThemePreference,
+    group_into_lanes, AppErrorKind, BoardSummary, BoardViewMode, GitHubToken, IssueClassification,
+    PollInterval, Project, ReconcileInterval, RepoRef, Slice, ThemePreference,
 };
 
 use crate::components::{
@@ -23,7 +23,8 @@ use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
     confirm_classification, last_opened, open_and_track_project, open_board, open_project,
     reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
-    remember_theme_preference, secure_store, theme_preference, tracked_repos, untrack_repo,
+    remember_theme_preference, remember_view_mode, secure_store, theme_preference, tracked_repos,
+    untrack_repo, view_mode,
 };
 use tracing::warn;
 
@@ -121,10 +122,13 @@ pub fn App() -> Element {
     // The currently active theme for the toggle UI. When no preference is stored,
     // this is initialised from the OS `prefers-color-scheme`.
     let mut theme = use_signal(|| ThemePreference::Light);
-    // Session-only board mode: false = columns (default), true = graph.
+    // Session board mode: false = columns (default), true = graph. Initialised
+    // once from the persisted view mode on launch.
     let mut graph_view = use_signal(|| false);
     // Runs theme initialisation exactly once.
     let mut theme_initialized = use_signal(|| false);
+    // Runs board view-mode initialisation exactly once.
+    let mut view_mode_initialized = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -172,6 +176,21 @@ pub fn App() -> Element {
                     apply_data_theme(system);
                     theme.set(system);
                 }
+            }
+        });
+    });
+
+    // Resolve the persisted board view mode once on launch. With no stored
+    // preference the board opens in columns view (the default); a stored Graph
+    // mode reopens the graph.
+    use_effect(move || {
+        if view_mode_initialized() {
+            return;
+        }
+        view_mode_initialized.set(true);
+        spawn(async move {
+            if let Ok(Some(BoardViewMode::Graph)) = view_mode().await {
+                graph_view.set(true);
             }
         });
     });
@@ -574,7 +593,18 @@ pub fn App() -> Element {
                     });
                 };
                 let summary = BoardSummary::from_slices(&board.slices);
-                let on_toggle_graph = move |_| graph_view.set(!graph_view());
+                let on_toggle_graph = move |_| {
+                    let next = !graph_view();
+                    graph_view.set(next);
+                    let mode = if next {
+                        BoardViewMode::Graph
+                    } else {
+                        BoardViewMode::Columns
+                    };
+                    spawn(async move {
+                        let _ = remember_view_mode(mode).await;
+                    });
+                };
                 rsx! {
                     BoardShell {
                         repo: repo.to_string(),

@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AppAction,
-    AppError, AppResult, DependencyRef, GitHubToken, IssueClassification, Prd, PrdRef, Project,
-    RawIssue, RawSlice, RepoRef, Slice, ThemePreference,
+    AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken, IssueClassification, Prd,
+    PrdRef, Project, RawIssue, RawSlice, RepoRef, Slice, ThemePreference,
 };
 use serde::{Deserialize, Serialize};
 
@@ -379,6 +379,10 @@ pub trait ProjectStorePort: Send + Sync {
     async fn theme_preference(&self) -> AppResult<Option<ThemePreference>>;
     /// Persist the selected theme preference.
     async fn remember_theme_preference(&self, theme: ThemePreference) -> AppAction;
+    /// The persisted board view mode, or `None` when unset (default: columns).
+    async fn view_mode(&self) -> AppResult<Option<BoardViewMode>>;
+    /// Persist the selected board view mode.
+    async fn remember_view_mode(&self, mode: BoardViewMode) -> AppAction;
 }
 
 /// Shared stores are stores too, so the composition root can hand the same
@@ -419,6 +423,14 @@ impl<S: ProjectStorePort + ?Sized> ProjectStorePort for Arc<S> {
 
     async fn remember_theme_preference(&self, theme: ThemePreference) -> AppAction {
         (**self).remember_theme_preference(theme).await
+    }
+
+    async fn view_mode(&self) -> AppResult<Option<BoardViewMode>> {
+        (**self).view_mode().await
+    }
+
+    async fn remember_view_mode(&self, mode: BoardViewMode) -> AppAction {
+        (**self).remember_view_mode(mode).await
     }
 }
 

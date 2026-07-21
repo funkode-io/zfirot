@@ -15,6 +15,7 @@ mod repo;
 mod slice;
 mod theme;
 mod token;
+mod view_mode;
 
 pub use classification::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
@@ -32,3 +33,4 @@ pub use slice::{
 };
 pub use theme::ThemePreference;
 pub use token::GitHubToken;
+pub use view_mode::BoardViewMode;

@@ -7,7 +7,7 @@ use application::{
     RecentProjectsService,
 };
 use async_trait::async_trait;
-use domain::{AppAction, AppResult, Project, RawIssue, RepoRef, ThemePreference};
+use domain::{AppAction, AppResult, BoardViewMode, Project, RawIssue, RepoRef, ThemePreference};
 use infrastructure::FakeProjectStore;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -74,6 +74,14 @@ impl ProjectStorePort for CountingProjectStore {
     }
 
     async fn remember_theme_preference(&self, _theme: ThemePreference) -> AppAction {
+        Ok(())
+    }
+
+    async fn view_mode(&self) -> AppResult<Option<BoardViewMode>> {
+        Ok(None)
+    }
+
+    async fn remember_view_mode(&self, _mode: BoardViewMode) -> AppAction {
         Ok(())
     }
 }
@@ -200,6 +208,26 @@ async fn theme_preference_round_trips_through_the_store() {
         store.theme_preference().await.expect("store should read"),
         Some(ThemePreference::Dark),
         "the saved theme preference reads back unchanged"
+    );
+}
+
+#[tokio::test]
+async fn view_mode_round_trips_through_the_store() {
+    let store = FakeProjectStore::empty();
+    assert_eq!(
+        store.view_mode().await.expect("store should read"),
+        None,
+        "no board view mode is stored initially"
+    );
+
+    store
+        .remember_view_mode(BoardViewMode::Graph)
+        .await
+        .expect("store should save");
+    assert_eq!(
+        store.view_mode().await.expect("store should read"),
+        Some(BoardViewMode::Graph),
+        "the saved board view mode reads back unchanged"
     );
 }
 
