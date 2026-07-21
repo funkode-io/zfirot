@@ -63,7 +63,7 @@ pub fn PrdLane(
                             onclick: move |e: Event<MouseData>| e.stop_propagation(),
                             "#{prd.number} {prd.title}"
                         }
-                        span { class: "badge badge-sm badge-outline badge-neutral shrink-0", "{slices_pill_label(total_slices)}" }
+                        span { class: "badge badge-sm badge-neutral shrink-0", "{slices_pill_label(total_slices)}" }
                     },
                     None => rsx! {
                         span { class: "font-semibold opacity-70", "No PRD" }
