@@ -1,7 +1,9 @@
 use dioxus::prelude::*;
-use domain::{PrdRef, Slice, SliceState};
+use domain::{
+    derive_lane_graph, LaneGraphEdge, PrdLane as DomainPrdLane, PrdRef, Slice, SliceState,
+};
 
-use super::{state_badge_class, state_label, BoardColumn};
+use super::{state_badge_class, state_label, BoardColumn, SliceCard};
 
 /// One swimlane: a collapsible PRD header above the Ready / WIP / Blocked
 /// columns holding that PRD's Slices. A lane with no PRD (`prd` is `None`)
@@ -19,11 +21,18 @@ use super::{state_badge_class, state_label, BoardColumn};
 pub fn PrdLane(
     prd: Option<PrdRef>,
     slices: Vec<Slice>,
+    graph_view: bool,
     on_assign: EventHandler<u64>,
     highlighted: Option<u64>,
     on_highlight: EventHandler<Option<u64>>,
 ) -> Element {
     let total_slices = slices.len();
+    let graph = graph_view.then(|| {
+        derive_lane_graph(&DomainPrdLane {
+            prd: prd.clone(),
+            slices: slices.clone(),
+        })
+    });
 
     // Bucket each Slice into its board column exactly once, so a Slice is cloned
     // at most once per render regardless of how many columns there are.
@@ -31,9 +40,9 @@ pub fn PrdLane(
         .iter()
         .map(|&state| (state, Vec::new()))
         .collect();
-    for slice in slices {
+    for slice in &slices {
         if let Some((_, bucket)) = buckets.iter_mut().find(|(state, _)| *state == slice.state) {
-            bucket.push(slice);
+            bucket.push(slice.clone());
         }
     }
 
@@ -80,15 +89,25 @@ pub fn PrdLane(
                 }
             }
             div { class: "collapse-content",
-                div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
-                    for (state , bucket) in buckets {
-                        BoardColumn {
-                            state,
-                            label: state_label(state).to_string(),
-                            slices: bucket,
-                            on_assign,
-                            highlighted,
-                            on_highlight,
+                if let Some(graph) = graph {
+                    GraphLane {
+                        columns: graph.columns,
+                        edges: graph.edges,
+                        on_assign,
+                        highlighted,
+                        on_highlight,
+                    }
+                } else {
+                    div { class: "grid grid-cols-1 md:grid-cols-3 gap-4",
+                        for (state , bucket) in buckets {
+                            BoardColumn {
+                                state,
+                                label: state_label(state).to_string(),
+                                slices: bucket,
+                                on_assign,
+                                highlighted,
+                                on_highlight,
+                            }
                         }
                     }
                 }
@@ -102,5 +121,128 @@ fn slices_pill_label(total_slices: usize) -> String {
         "1 slice".to_string()
     } else {
         format!("{total_slices} slices")
+    }
+}
+
+#[component]
+fn GraphLane(
+    columns: Vec<Vec<Slice>>,
+    edges: Vec<LaneGraphEdge>,
+    on_assign: EventHandler<u64>,
+    highlighted: Option<u64>,
+    on_highlight: EventHandler<Option<u64>>,
+) -> Element {
+    use std::collections::HashMap;
+
+    const NODE_WIDTH: usize = 320;
+    const COLUMN_GAP: usize = 56;
+    const ROW_GAP: usize = 20;
+
+    // Real, measured geometry of each rendered node, in viewport pixels:
+    // number -> (x, y, width, height). Edges are drawn from these anchors so an
+    // arrow tracks the card's actual height instead of a guessed constant — a
+    // straight same-row edge then lands exactly on both card centres and stays
+    // visible in the gap, and taller cards never overlap.
+    let mut node_rects = use_signal(HashMap::<u64, (f64, f64, f64, f64)>::new);
+    // The graph container's own origin (viewport px), so node rects can be
+    // re-expressed relative to the SVG overlay that fills it.
+    let mut origin = use_signal(|| None::<(f64, f64)>);
+
+    if columns.is_empty() {
+        return rsx! {
+            div { class: "text-sm opacity-60", "No active Slices" }
+        };
+    }
+
+    let rects = node_rects.read().clone();
+    let origin_val = origin();
+
+    rsx! {
+        div { class: "overflow-x-auto",
+            div {
+                class: "relative inline-flex items-start",
+                style: "gap: {COLUMN_GAP}px;",
+                onmounted: move |evt| {
+                    spawn(async move {
+                        if let Ok(r) = evt.get_client_rect().await {
+                            origin.set(Some((r.origin.x, r.origin.y)));
+                        }
+                    });
+                },
+                // Edge overlay: fills the row of columns; drawn from measured
+                // anchors so it lines up with the real cards.
+                svg {
+                    class: "absolute inset-0 w-full h-full pointer-events-none overflow-visible",
+                    defs {
+                        marker {
+                            id: "lane-arrow",
+                            marker_width: "9",
+                            marker_height: "7",
+                            ref_x: "8",
+                            ref_y: "3.5",
+                            orient: "auto",
+                            marker_units: "userSpaceOnUse",
+                            polygon { class: "fill-base-content/60", points: "0 0, 9 3.5, 0 7" }
+                        }
+                    }
+                    if let Some((ox, oy)) = origin_val {
+                        for edge in edges.iter() {
+                            if let (Some(&(bx, by, bw, bh)), Some(&(tx, ty, _tw, th))) =
+                                (rects.get(&edge.blocker), rects.get(&edge.blocked))
+                            {
+                                {
+                                    let from_x = bx + bw - ox;
+                                    let from_y = by + bh / 2.0 - oy;
+                                    let to_x = tx - ox;
+                                    let to_y = ty + th / 2.0 - oy;
+                                    let dx = ((to_x - from_x) / 2.0).max(20.0);
+                                    let c1x = from_x + dx;
+                                    let c2x = to_x - dx;
+                                    rsx! {
+                                        path {
+                                            d: "M {from_x} {from_y} C {c1x} {from_y}, {c2x} {to_y}, {to_x} {to_y}",
+                                            class: "stroke-base-content/50",
+                                            "stroke-width": "2",
+                                            fill: "none",
+                                            marker_end: "url(#lane-arrow)",
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                for column in columns.iter() {
+                    div {
+                        class: "flex flex-col shrink-0",
+                        style: "width: {NODE_WIDTH}px; gap: {ROW_GAP}px;",
+                        for slice in column.iter() {
+                            div {
+                                key: "{slice.number}",
+                                onmounted: {
+                                    let number = slice.number;
+                                    move |evt: Event<MountedData>| {
+                                        spawn(async move {
+                                            if let Ok(r) = evt.get_client_rect().await {
+                                                node_rects.write().insert(
+                                                    number,
+                                                    (r.origin.x, r.origin.y, r.size.width, r.size.height),
+                                                );
+                                            }
+                                        });
+                                    }
+                                },
+                                SliceCard {
+                                    slice: slice.clone(),
+                                    on_assign,
+                                    highlighted,
+                                    on_highlight,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
