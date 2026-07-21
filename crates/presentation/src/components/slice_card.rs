@@ -33,7 +33,7 @@ pub fn SliceCard(
     };
 
     let card_class = if is_highlighted {
-        "card card-sm bg-base-300 shadow-sm ring-2 ring-primary py-1.5 px-3"
+        "card card-sm bg-base-300 shadow-sm ring-2 ring-inset ring-primary py-1.5 px-3"
     } else {
         "card card-sm bg-base-300 shadow-sm py-1.5 px-3"
     };
@@ -95,8 +95,8 @@ pub fn SliceCard(
                     for pr in slice.linked_prs.iter() {
                         a {
                             key: "{pr.number}",
-                            class: "tooltip tooltip-top badge badge-sm badge-outline link link-hover no-underline hover:underline",
-                            "data-tip": "{pr.title}",
+                            class: "badge badge-sm badge-outline link link-hover no-underline hover:underline",
+                            title: "{pr.title}",
                             href: "{pr.url}",
                             if is_blocked {
                                 span { class: "icon-[lucide--triangle-alert] text-warning size-3" }
@@ -118,8 +118,8 @@ pub fn SliceCard(
                     for dep in deps {
                         a {
                             key: "{dep.number}",
-                            class: "tooltip tooltip-top badge badge-sm badge-outline link link-hover no-underline hover:underline",
-                            "data-tip": "{dep.title}",
+                            class: "badge badge-sm badge-outline link link-hover no-underline hover:underline",
+                            title: "{dep.title}",
                             href: "{dep.url}",
                             onmouseenter: {
                                 let n = dep.number;
