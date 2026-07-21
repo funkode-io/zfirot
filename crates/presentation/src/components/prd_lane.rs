@@ -135,69 +135,73 @@ fn GraphLane(
     use std::collections::HashMap;
 
     const NODE_WIDTH: usize = 320;
-    const NODE_HEIGHT: usize = 96;
-    const COLUMN_GAP: usize = 40;
-    const ROW_GAP: usize = 24;
-    const PADDING: usize = 16;
+    const COLUMN_GAP: usize = 56;
+    const ROW_GAP: usize = 20;
 
-    let max_rows = columns.iter().map(Vec::len).max().unwrap_or(0);
-    let canvas_width =
-        columns.len() * NODE_WIDTH + columns.len().saturating_sub(1) * COLUMN_GAP + PADDING * 2;
-    let canvas_height = max_rows * NODE_HEIGHT + max_rows.saturating_sub(1) * ROW_GAP + PADDING * 2;
+    // Real, measured geometry of each rendered node, in viewport pixels:
+    // number -> (x, y, width, height). Edges are drawn from these anchors so an
+    // arrow tracks the card's actual height instead of a guessed constant — a
+    // straight same-row edge then lands exactly on both card centres and stays
+    // visible in the gap, and taller cards never overlap.
+    let mut node_rects = use_signal(HashMap::<u64, (f64, f64, f64, f64)>::new);
+    // The graph container's own origin (viewport px), so node rects can be
+    // re-expressed relative to the SVG overlay that fills it.
+    let mut origin = use_signal(|| None::<(f64, f64)>);
 
-    let mut positions: HashMap<u64, (usize, usize)> = HashMap::new();
-    for (col_idx, column) in columns.iter().enumerate() {
-        for (row_idx, slice) in column.iter().enumerate() {
-            positions.insert(slice.number, (col_idx, row_idx));
-        }
+    if columns.is_empty() {
+        return rsx! {
+            div { class: "text-sm opacity-60", "No active Slices" }
+        };
     }
+
+    let rects = node_rects.read().clone();
+    let origin_val = origin();
 
     rsx! {
         div { class: "overflow-x-auto",
-            if columns.is_empty() {
-                div { class: "text-sm opacity-60", "No active Slices" }
-            } else {
-                div {
-                    class: "relative",
-                    style: "width: {canvas_width}px; height: {canvas_height}px;",
-                    svg {
-                        class: "absolute inset-0 pointer-events-none",
-                        width: "{canvas_width}",
-                        height: "{canvas_height}",
-                        view_box: "0 0 {canvas_width} {canvas_height}",
-                        defs {
-                            marker {
-                                id: "lane-arrow",
-                                marker_width: "10",
-                                marker_height: "7",
-                                ref_x: "10",
-                                ref_y: "3.5",
-                                orient: "auto",
-                                polygon {
-                                    class: "fill-base-content/50",
-                                    points: "0 0, 10 3.5, 0 7",
-                                }
-                            }
+            div {
+                class: "relative inline-flex items-start",
+                style: "gap: {COLUMN_GAP}px;",
+                onmounted: move |evt| {
+                    spawn(async move {
+                        if let Ok(r) = evt.get_client_rect().await {
+                            origin.set(Some((r.origin.x, r.origin.y)));
                         }
-                        for edge in edges {
-                            if let (Some(&(from_col, from_row)), Some(&(to_col, to_row))) =
-                                (positions.get(&edge.blocker), positions.get(&edge.blocked))
+                    });
+                },
+                // Edge overlay: fills the row of columns; drawn from measured
+                // anchors so it lines up with the real cards.
+                svg {
+                    class: "absolute inset-0 w-full h-full pointer-events-none overflow-visible",
+                    defs {
+                        marker {
+                            id: "lane-arrow",
+                            marker_width: "9",
+                            marker_height: "7",
+                            ref_x: "8",
+                            ref_y: "3.5",
+                            orient: "auto",
+                            marker_units: "userSpaceOnUse",
+                            polygon { class: "fill-base-content/60", points: "0 0, 9 3.5, 0 7" }
+                        }
+                    }
+                    if let Some((ox, oy)) = origin_val {
+                        for edge in edges.iter() {
+                            if let (Some(&(bx, by, bw, bh)), Some(&(tx, ty, _tw, th))) =
+                                (rects.get(&edge.blocker), rects.get(&edge.blocked))
                             {
                                 {
-                                    let from_x =
-                                        PADDING + (from_col * (NODE_WIDTH + COLUMN_GAP)) + NODE_WIDTH;
-                                    let from_y = PADDING
-                                        + (from_row * (NODE_HEIGHT + ROW_GAP))
-                                        + (NODE_HEIGHT / 2);
-                                    let to_x = PADDING + (to_col * (NODE_WIDTH + COLUMN_GAP));
-                                    let to_y = PADDING
-                                        + (to_row * (NODE_HEIGHT + ROW_GAP))
-                                        + (NODE_HEIGHT / 2);
-                                    let mid_x = from_x + ((to_x - from_x) / 2);
+                                    let from_x = bx + bw - ox;
+                                    let from_y = by + bh / 2.0 - oy;
+                                    let to_x = tx - ox;
+                                    let to_y = ty + th / 2.0 - oy;
+                                    let dx = ((to_x - from_x) / 2.0).max(20.0);
+                                    let c1x = from_x + dx;
+                                    let c2x = to_x - dx;
                                     rsx! {
                                         path {
-                                            d: "M {from_x} {from_y} C {mid_x} {from_y}, {mid_x} {to_y}, {to_x} {to_y}",
-                                            class: "stroke-base-content/40",
+                                            d: "M {from_x} {from_y} C {c1x} {from_y}, {c2x} {to_y}, {to_x} {to_y}",
+                                            class: "stroke-base-content/50",
                                             "stroke-width": "2",
                                             fill: "none",
                                             marker_end: "url(#lane-arrow)",
@@ -207,12 +211,27 @@ fn GraphLane(
                             }
                         }
                     }
-                    for (col_idx , column) in columns.iter().enumerate() {
-                        for (row_idx , slice) in column.iter().enumerate() {
+                }
+                for column in columns.iter() {
+                    div {
+                        class: "flex flex-col shrink-0",
+                        style: "width: {NODE_WIDTH}px; gap: {ROW_GAP}px;",
+                        for slice in column.iter() {
                             div {
                                 key: "{slice.number}",
-                                class: "absolute",
-                                style: "left: {PADDING + (col_idx * (NODE_WIDTH + COLUMN_GAP))}px; top: {PADDING + (row_idx * (NODE_HEIGHT + ROW_GAP))}px; width: {NODE_WIDTH}px;",
+                                onmounted: {
+                                    let number = slice.number;
+                                    move |evt: Event<MountedData>| {
+                                        spawn(async move {
+                                            if let Ok(r) = evt.get_client_rect().await {
+                                                node_rects.write().insert(
+                                                    number,
+                                                    (r.origin.x, r.origin.y, r.size.width, r.size.height),
+                                                );
+                                            }
+                                        });
+                                    }
+                                },
                                 SliceCard {
                                     slice: slice.clone(),
                                     on_assign,
