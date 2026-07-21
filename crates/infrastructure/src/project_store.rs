@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use application::ProjectStorePort;
 use async_trait::async_trait;
-use domain::{AppAction, AppError, AppResult, Project, RepoRef, ThemePreference};
+use domain::{AppAction, AppError, AppResult, BoardViewMode, Project, RepoRef, ThemePreference};
 
 /// The config sub-directory and files Zfirot uses for locally-owned project
 /// state: the last-opened project and the cached recent-projects list.
@@ -19,6 +19,7 @@ const LAST_OPENED_FILE: &str = "last_opened.json";
 const RECENT_PROJECTS_FILE: &str = "recent_projects.json";
 const TRACKED_REPOS_FILE: &str = "tracked_repos.json";
 const THEME_FILE: &str = "theme.json";
+const VIEW_MODE_FILE: &str = "view_mode.json";
 
 /// A [`ProjectStorePort`] backed by a JSON file in the OS config directory.
 #[derive(Debug, Clone)]
@@ -59,6 +60,12 @@ impl FileProjectStore {
     /// config directory.
     fn theme_path(&self) -> PathBuf {
         self.path.with_file_name(THEME_FILE)
+    }
+
+    /// The board view-mode file, alongside the last-opened file in the same
+    /// config directory.
+    fn view_mode_path(&self) -> PathBuf {
+        self.path.with_file_name(VIEW_MODE_FILE)
     }
 }
 
@@ -265,6 +272,51 @@ impl ProjectStorePort for FileProjectStore {
                 .with_source(err)
         })
     }
+
+    async fn view_mode(&self) -> AppResult<Option<BoardViewMode>> {
+        let path = self.view_mode_path();
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(AppError::internal("Could not read the board view mode.")
+                    .with_operation("FileProjectStore::view_mode")
+                    .with_context("path", path.display().to_string())
+                    .with_source(err))
+            }
+        };
+        let raw: Option<String> = serde_json::from_slice(&bytes).map_err(|err| {
+            AppError::internal("Could not read the board view mode.")
+                .with_operation("FileProjectStore::view_mode")
+                .with_context("path", path.display().to_string())
+                .with_source(err)
+        })?;
+        Ok(raw.as_deref().and_then(BoardViewMode::from_stored))
+    }
+
+    async fn remember_view_mode(&self, mode: BoardViewMode) -> AppAction {
+        let path = self.view_mode_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                AppError::internal("Could not create the config directory.")
+                    .with_operation("FileProjectStore::remember_view_mode")
+                    .with_context("path", path.display().to_string())
+                    .with_source(err)
+            })?;
+        }
+        let bytes = serde_json::to_vec_pretty(mode.as_str()).map_err(|err| {
+            AppError::internal("Could not encode the board view mode.")
+                .with_operation("FileProjectStore::remember_view_mode")
+                .with_context("path", path.display().to_string())
+                .with_source(err)
+        })?;
+        std::fs::write(&path, bytes).map_err(|err| {
+            AppError::internal("Could not save the board view mode.")
+                .with_operation("FileProjectStore::remember_view_mode")
+                .with_context("path", path.display().to_string())
+                .with_source(err)
+        })
+    }
 }
 
 /// An in-memory [`ProjectStorePort`] for tests.
@@ -274,6 +326,7 @@ pub struct FakeProjectStore {
     cached_projects: Mutex<Option<Vec<Project>>>,
     tracked_repos: Mutex<Vec<RepoRef>>,
     theme_preference: Mutex<Option<ThemePreference>>,
+    view_mode: Mutex<Option<BoardViewMode>>,
 }
 
 impl FakeProjectStore {
@@ -289,6 +342,7 @@ impl FakeProjectStore {
             cached_projects: Mutex::new(None),
             tracked_repos: Mutex::new(Vec::new()),
             theme_preference: Mutex::new(None),
+            view_mode: Mutex::new(None),
         }
     }
 
@@ -299,6 +353,7 @@ impl FakeProjectStore {
             cached_projects: Mutex::new(None),
             tracked_repos: Mutex::new(repos),
             theme_preference: Mutex::new(None),
+            view_mode: Mutex::new(None),
         }
     }
 }
@@ -347,6 +402,15 @@ impl ProjectStorePort for FakeProjectStore {
 
     async fn remember_theme_preference(&self, theme: ThemePreference) -> AppAction {
         *self.theme_preference.lock().expect("lock poisoned") = Some(theme);
+        Ok(())
+    }
+
+    async fn view_mode(&self) -> AppResult<Option<BoardViewMode>> {
+        Ok(*self.view_mode.lock().expect("lock poisoned"))
+    }
+
+    async fn remember_view_mode(&self, mode: BoardViewMode) -> AppAction {
+        *self.view_mode.lock().expect("lock poisoned") = Some(mode);
         Ok(())
     }
 }
