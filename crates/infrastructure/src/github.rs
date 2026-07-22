@@ -29,7 +29,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable } }
       }
     }
   }
@@ -59,7 +59,7 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
         assignees(first: 1) { nodes { login } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable } }
       }
     }
   }
@@ -937,6 +937,7 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
                 pr.is_draft,
                 review_decision(pr.review_decision.as_deref()),
             ),
+            conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
         })
         .collect();
 
@@ -1072,6 +1073,7 @@ struct LinkedPrNode {
     #[serde(default)]
     is_draft: bool,
     review_decision: Option<String>,
+    mergeable: Option<String>,
 }
 
 #[derive(Deserialize)]

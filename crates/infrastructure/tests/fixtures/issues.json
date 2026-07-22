@@ -80,7 +80,8 @@
                     "login": "carlos-verdes"
                   },
                   "isDraft": false,
-                  "reviewDecision": "APPROVED"
+                  "reviewDecision": "APPROVED",
+                  "mergeable": "MERGEABLE"
                 },
                 {
                   "number": 13,
@@ -88,7 +89,8 @@
                   "title": "Follow-up tweak",
                   "author": null,
                   "isDraft": true,
-                  "reviewDecision": null
+                  "reviewDecision": null,
+                  "mergeable": "CONFLICTING"
                 }
               ]
             }

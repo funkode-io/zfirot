@@ -97,6 +97,13 @@ pub fn SliceCard(
                 div { class: "flex items-center gap-1.5 mt-1.5 {pr_status_color(pr.pr_status)}",
                     span { class: "{pr_status_icon_class(pr.pr_status)} size-4 shrink-0" }
                     span { class: "text-xs font-medium", "{pr_status_label(pr.pr_status)}" }
+                    // Merge-health Decorations ride on top of the status, orthogonally.
+                    if pr.conflicts {
+                        span {
+                            class: "icon-[octicon--alert-16] text-warning size-4 shrink-0",
+                            title: "Conflicts with base branch — needs a merge",
+                        }
+                    }
                 }
             }
 

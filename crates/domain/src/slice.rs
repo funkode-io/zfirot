@@ -101,6 +101,10 @@ pub struct LinkedPrRef {
     /// GitHub's draft flag and review decision. Drives the Slice's WIP headline
     /// (via its Best PR); merge-health Decorations ride on top of it.
     pub pr_status: crate::PrStatus,
+    /// `true` when the PR conflicts with its base branch and needs a manual
+    /// conflict merge (GitHub `mergeable = CONFLICTING`). A branch merely behind
+    /// its base (auto-updatable) is deliberately not flagged.
+    pub conflicts: bool,
 }
 
 /// A read model of a GitHub issue that is a Slice of a PRD.
@@ -263,6 +267,7 @@ mod tests {
             title: "Implement the Slice".to_string(),
             url: "https://github.com/funkode-io/zfirot/pull/200".to_string(),
             pr_status: crate::PrStatus::AwaitingReview,
+            conflicts: false,
         }
     }
 

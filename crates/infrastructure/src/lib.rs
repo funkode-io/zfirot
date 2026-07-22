@@ -117,6 +117,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
                 title: "Derive SliceState as a pure domain function".to_string(),
                 url: "https://github.com/funkode-io/zfirot/pull/12".to_string(),
                 pr_status: domain::PrStatus::AwaitingReview,
+                conflicts: false,
             }],
             is_native_child_of_prd: true,
         },
