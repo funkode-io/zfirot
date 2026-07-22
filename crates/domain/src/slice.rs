@@ -150,6 +150,16 @@ pub struct Slice {
     pub linked_prs: Vec<LinkedPrRef>,
 }
 
+impl Slice {
+    /// The **Best PR** — the open Linked PR with the highest [`PrStatus`], whose
+    /// status and Decorations drive the Slice's WIP headline. `None` when the
+    /// Slice has no open PR. On a tie the later PR in input order wins, which is
+    /// display-immaterial since the statuses are equal.
+    pub fn best_pr(&self) -> Option<&LinkedPrRef> {
+        self.linked_prs.iter().max_by_key(|pr| pr.pr_status)
+    }
+}
+
 /// Raw, GitHub-shaped facts about a single issue, before its [`SliceState`] is
 /// derived. An adapter projects this from GitHub (still fake for this slice);
 /// the pure derivation lives in the domain so it stays testable and offline.
@@ -354,6 +364,44 @@ mod tests {
             };
             assert_eq!(pr.is_ready_to_merge(), case.expected, "{}", case.name);
         }
+    }
+
+    fn pr_with_status(number: u64, status: crate::PrStatus) -> LinkedPrRef {
+        LinkedPrRef {
+            number,
+            pr_status: status,
+            ..linked_pr()
+        }
+    }
+
+    #[test]
+    fn best_pr_is_the_highest_status_open_pr() {
+        use crate::PrStatus;
+        let make = |prs| {
+            RawSlice {
+                linked_prs: prs,
+                ..ready_raw()
+            }
+            .into_slice()
+        };
+
+        // No open PR -> no Best PR.
+        assert!(make(vec![]).best_pr().is_none());
+
+        // A single PR is trivially the Best PR.
+        let single = make(vec![pr_with_status(1, PrStatus::Draft)]);
+        assert_eq!(single.best_pr().map(|pr| pr.number), Some(1));
+
+        // With several, the highest status wins regardless of input order.
+        let many = make(vec![
+            pr_with_status(1, PrStatus::Draft),
+            pr_with_status(2, PrStatus::Approved),
+            pr_with_status(3, PrStatus::AwaitingReview),
+        ]);
+        assert_eq!(
+            many.best_pr().map(|pr| (pr.number, pr.pr_status)),
+            Some((2, PrStatus::Approved))
+        );
     }
 
     /// `n` distinct open blocker references, for exercising state derivation.

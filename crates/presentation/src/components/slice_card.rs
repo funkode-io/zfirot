@@ -24,6 +24,9 @@ pub fn SliceCard(
     let number = slice.number;
     let is_ready = slice.state == SliceState::Ready;
     let is_blocked = slice.state == SliceState::Blocked;
+    // With more than one open PR, each badge shows its own status + Decorations
+    // so it is obvious which redundant PR to close; a lone PR badge stays plain.
+    let has_multiple_prs = slice.linked_prs.len() > 1;
     let is_highlighted = highlighted == Some(number);
 
     // Blocked cards surface their blockers; every other card surfaces what it
@@ -93,7 +96,7 @@ pub fn SliceCard(
 
             // --- PR status headline: the Slice's WIP substate (its PR's review
             // stage). Single-PR case; multi-PR Best PR selection is a later Slice.
-            if let Some(pr) = slice.linked_prs.first() {
+            if let Some(pr) = slice.best_pr() {
                 div { class: "flex items-center gap-1.5 mt-1.5 {pr_headline_color(pr)}",
                     span { class: "{pr_headline_icon_class(pr)} size-4 shrink-0" }
                     span { class: "text-xs font-medium", "{pr_headline_label(pr)}" }
@@ -132,10 +135,33 @@ pub fn SliceCard(
                             if is_blocked {
                                 span { class: "icon-[lucide--triangle-alert] text-warning size-3" }
                             }
+                            if has_multiple_prs {
+                                span { class: "{pr_headline_icon_class(pr)} size-3.5 shrink-0" }
+                            }
                             if let Some(author) = &pr.author {
                                 "pr #{pr.number} @{author}"
                             } else {
                                 "pr #{pr.number}"
+                            }
+                            if has_multiple_prs {
+                                if pr.conflicts {
+                                    span {
+                                        class: "icon-[octicon--alert-16] text-warning size-3.5 shrink-0",
+                                        title: "Conflicts with base branch — needs a merge",
+                                    }
+                                }
+                                if pr.ci_failing {
+                                    span {
+                                        class: "icon-[octicon--x-circle-fill-16] text-error size-3.5 shrink-0",
+                                        title: "CI failing",
+                                    }
+                                }
+                                if pr.unresolved_comment_count > 0 {
+                                    span {
+                                        class: "icon-[octicon--comment-discussion-16] size-3.5 shrink-0",
+                                        title: "{pr.unresolved_comment_count} unresolved comments",
+                                    }
+                                }
                             }
                         }
                     }
