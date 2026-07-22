@@ -78,13 +78,17 @@
                   "title": "Implement SliceState derivation",
                   "author": {
                     "login": "carlos-verdes"
-                  }
+                  },
+                  "isDraft": false,
+                  "reviewDecision": "APPROVED"
                 },
                 {
                   "number": 13,
                   "url": "https://github.com/funkode-io/zfirot/pull/13",
                   "title": "Follow-up tweak",
-                  "author": null
+                  "author": null,
+                  "isDraft": true,
+                  "reviewDecision": null
                 }
               ]
             }

@@ -97,6 +97,10 @@ pub struct LinkedPrRef {
     pub title: String,
     /// The PR's URL on GitHub, for opening it in a browser.
     pub url: String,
+    /// The review-lifecycle stage of this PR (Draft ... Approved), derived from
+    /// GitHub's draft flag and review decision. Drives the Slice's WIP headline
+    /// (via its Best PR); merge-health Decorations ride on top of it.
+    pub pr_status: crate::PrStatus,
 }
 
 /// A read model of a GitHub issue that is a Slice of a PRD.
@@ -258,6 +262,7 @@ mod tests {
             author: Some("hubot".to_string()),
             title: "Implement the Slice".to_string(),
             url: "https://github.com/funkode-io/zfirot/pull/200".to_string(),
+            pr_status: crate::PrStatus::AwaitingReview,
         }
     }
 

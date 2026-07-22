@@ -3,7 +3,10 @@
 use application::GitHubPort;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use domain::{AppAction, AppError, AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
+use domain::{
+    AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RepoRef,
+    ReviewDecision,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 
@@ -26,7 +29,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision } }
       }
     }
   }
@@ -56,7 +59,7 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
         assignees(first: 1) { nodes { login } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision } }
       }
     }
   }
@@ -900,6 +903,18 @@ fn node_into_project(node: RepositoryNode) -> Project {
     }
 }
 
+/// Map GitHub's `reviewDecision` string to the domain [`ReviewDecision`]. A null
+/// decision (review not required, or none reached) or any unrecognised value
+/// maps to `None`, which [`PrStatus::derive`] reads as "awaiting review".
+fn review_decision(raw: Option<&str>) -> Option<ReviewDecision> {
+    match raw {
+        Some("APPROVED") => Some(ReviewDecision::Approved),
+        Some("CHANGES_REQUESTED") => Some(ReviewDecision::ChangesRequested),
+        Some("REVIEW_REQUIRED") => Some(ReviewDecision::ReviewRequired),
+        _ => None,
+    }
+}
+
 /// Project one GraphQL issue node into a [`RawIssue`] for the two-tier
 /// classifier: open/closed, labels, native parent number (and whether it is a
 /// `prd`-labelled parent), native blockers (open and closed), assignee, and
@@ -918,6 +933,10 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
             author: pr.author.map(|author| author.login),
             title: pr.title,
             url: pr.url,
+            pr_status: PrStatus::derive(
+                pr.is_draft,
+                review_decision(pr.review_decision.as_deref()),
+            ),
         })
         .collect();
 
@@ -1044,11 +1063,15 @@ struct LinkedPrConnection {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LinkedPrNode {
     number: u64,
     url: String,
     title: String,
     author: Option<AuthorNode>,
+    #[serde(default)]
+    is_draft: bool,
+    review_decision: Option<String>,
 }
 
 #[derive(Deserialize)]

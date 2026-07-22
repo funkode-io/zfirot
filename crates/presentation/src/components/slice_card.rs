@@ -1,7 +1,9 @@
 use dioxus::prelude::*;
 use domain::{Slice, SliceState};
 
-use super::{state_badge_class, state_label};
+use super::{
+    pr_status_color, pr_status_icon_class, pr_status_label, state_badge_class, state_label,
+};
 
 /// A card for a single Slice. Emits `on_assign` with the issue number when the
 /// user clicks "Assign me" (only shown for Ready Slices).
@@ -86,6 +88,15 @@ pub fn SliceCard(
                             }
                         }
                     }
+                }
+            }
+
+            // --- PR status headline: the Slice's WIP substate (its PR's review
+            // stage). Single-PR case; multi-PR Best PR selection is a later Slice.
+            if let Some(pr) = slice.linked_prs.first() {
+                div { class: "flex items-center gap-1.5 mt-1.5 {pr_status_color(pr.pr_status)}",
+                    span { class: "{pr_status_icon_class(pr.pr_status)} size-4 shrink-0" }
+                    span { class: "text-xs font-medium", "{pr_status_label(pr.pr_status)}" }
                 }
             }
 

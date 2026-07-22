@@ -22,7 +22,7 @@ pub use slice_card::SliceCard;
 pub use spinner::{LoadingScreen, Spinner};
 pub use token_screen::TokenScreen;
 
-use domain::SliceState;
+use domain::{PrStatus, SliceState};
 
 /// Human-readable column/badge label for a state.
 pub fn state_label(state: SliceState) -> &'static str {
@@ -51,5 +51,36 @@ pub fn state_dot_color(state: SliceState) -> &'static str {
         SliceState::Wip => "bg-warning",
         SliceState::Blocked => "bg-error",
         SliceState::Done => "bg-neutral",
+    }
+}
+
+/// Human label for a PR review-lifecycle stage, shown on a WIP Slice's headline.
+pub fn pr_status_label(status: PrStatus) -> &'static str {
+    match status {
+        PrStatus::Draft => "Draft",
+        PrStatus::AwaitingReview => "Awaiting review",
+        PrStatus::ChangesRequested => "Changes requested",
+        PrStatus::Approved => "Approved",
+    }
+}
+
+/// GitHub Octicon utility class for a PR review-lifecycle stage — the exact
+/// glyphs GitHub uses, for instant recognisability.
+pub fn pr_status_icon_class(status: PrStatus) -> &'static str {
+    match status {
+        PrStatus::Draft => "icon-[octicon--git-pull-request-draft-16]",
+        PrStatus::AwaitingReview => "icon-[octicon--git-pull-request-16]",
+        PrStatus::ChangesRequested => "icon-[octicon--file-diff-16]",
+        PrStatus::Approved => "icon-[octicon--check-circle-16]",
+    }
+}
+
+/// daisyUI text color for a PR review-lifecycle stage headline.
+pub fn pr_status_color(status: PrStatus) -> &'static str {
+    match status {
+        PrStatus::Draft => "text-base-content/50",
+        PrStatus::AwaitingReview => "text-info",
+        PrStatus::ChangesRequested => "text-error",
+        PrStatus::Approved => "text-success",
     }
 }

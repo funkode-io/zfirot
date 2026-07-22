@@ -8,6 +8,7 @@
   },
   "devDependencies": {
     "@iconify-json/lucide": "^1.2.0",
+    "@iconify-json/octicon": "^1.2.0",
     "@iconify/tailwind4": "^1.0.0",
     "@tailwindcss/cli": "^4.1.0",
     "daisyui": "^5.0.0",
