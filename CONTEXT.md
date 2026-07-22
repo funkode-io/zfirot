@@ -38,7 +38,7 @@ an agent to pick up.
 _Avoid_: open, available, todo
 
 **WIP**:
-A Slice with an open Pull Request linked to it (via the PR's closing reference).
+A Slice with an open Pull Request linked to it (via the PR's closing reference). Its finer substate is its Best PR's PR status, decorated with any of that PR's Decorations.
 _Avoid_: in progress, active, doing
 
 **Linked PR**:
@@ -52,6 +52,36 @@ title. When the Slice is **Blocked**, each PR badge carries a warning marker,
 since the PR is being worked on while the Slice still has an open dependency
 that should land first.
 _Avoid_: closing PR, the PR (a Slice may have more than one open)
+
+## Pull request status
+
+**PR status**:
+The review-lifecycle stage of an open Linked PR, a single ordered axis: **Draft** (author still working) -> **Awaiting review** (waiting on a reviewer) -> **Changes requested** (reviewer bounced it back) -> **Approved**. Purely the review dimension, derived from GitHub's draft flag and `reviewDecision`; merge-health signals are Decorations that ride on top, not stages of this axis.
+_Avoid_: PR state, merge state, review state
+
+**Best PR**:
+When a Slice has more than one open Linked PR, the one with the highest PR status — it represents the real work and drives the Slice's WIP substate. The others are redundant and should be closed; seeing a lower-status badge (e.g. a Draft next to an Approved) is what tells you which to close.
+_Avoid_: primary PR, main PR
+
+**Decoration**:
+An orthogonal attention marker on a Linked PR, shown as a small hover icon that fires independently of (and on top of) its PR status. Three exist: **Conflicts**, **Unresolved comments**, **CI failing**.
+_Avoid_: flag, badge (a badge is the `pr #n @u` element itself)
+
+**Conflicts**:
+A Linked PR that needs a manual conflict merge — GitHub `mergeable = CONFLICTING`. Merely being behind the base branch (auto-updatable, `BEHIND`) is not flagged.
+_Avoid_: out of date, behind
+
+**Unresolved comments**:
+The count of a Linked PR's review threads still open (`isResolved = false`). Non-blocking — you can merge without addressing them — but surfaced so you know they exist (e.g. an agent's follow-up notes).
+_Avoid_: open comments, review comments
+
+**CI failing**:
+A Linked PR whose check rollup is failing or errored (`statusCheckRollup = FAILURE | ERROR`). Pending checks are transient and not flagged.
+_Avoid_: build broken, checks red
+
+**Ready to merge**:
+Not a stored state — the plain-English reading of an **Approved** PR carrying no red Decorations (no Conflicts, CI not failing). Unresolved comments do not disqualify it, since they do not block a merge.
+_Avoid_: mergeable (that is one GitHub field, not this synthesis)
 
 **Blocked**:
 A Slice with at least one open "blocked by" dependency.
