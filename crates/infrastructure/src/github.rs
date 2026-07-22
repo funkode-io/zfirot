@@ -29,7 +29,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }
       }
     }
   }
@@ -59,7 +59,7 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
         assignees(first: 1) { nodes { login } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }
       }
     }
   }
@@ -938,6 +938,13 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
                 review_decision(pr.review_decision.as_deref()),
             ),
             conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
+            ci_failing: pr
+                .commits
+                .nodes
+                .first()
+                .and_then(|node| node.commit.status_check_rollup.as_ref())
+                .map(|rollup| matches!(rollup.state.as_str(), "FAILURE" | "ERROR"))
+                .unwrap_or(false),
         })
         .collect();
 
@@ -1074,6 +1081,31 @@ struct LinkedPrNode {
     is_draft: bool,
     review_decision: Option<String>,
     mergeable: Option<String>,
+    #[serde(default)]
+    commits: CommitConnection,
+}
+
+/// The PR's last commit (via `commits(last: 1)`), carrying the aggregated CI
+/// check rollup used for the CI-failing Decoration.
+#[derive(Deserialize, Default)]
+struct CommitConnection {
+    nodes: Vec<PullRequestCommitNode>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestCommitNode {
+    commit: CommitNode,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitNode {
+    status_check_rollup: Option<StatusCheckRollup>,
+}
+
+#[derive(Deserialize)]
+struct StatusCheckRollup {
+    state: String,
 }
 
 #[derive(Deserialize)]

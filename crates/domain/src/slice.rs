@@ -105,6 +105,10 @@ pub struct LinkedPrRef {
     /// conflict merge (GitHub `mergeable = CONFLICTING`). A branch merely behind
     /// its base (auto-updatable) is deliberately not flagged.
     pub conflicts: bool,
+    /// `true` when the PR's checks have settled on a failure (GitHub
+    /// `statusCheckRollup = FAILURE | ERROR`). Pending checks are transient and
+    /// not flagged.
+    pub ci_failing: bool,
 }
 
 /// A read model of a GitHub issue that is a Slice of a PRD.
@@ -268,6 +272,7 @@ mod tests {
             url: "https://github.com/funkode-io/zfirot/pull/200".to_string(),
             pr_status: crate::PrStatus::AwaitingReview,
             conflicts: false,
+            ci_failing: false,
         }
     }
 

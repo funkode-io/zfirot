@@ -57,12 +57,16 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     assert_eq!(child.linked_prs[0].pr_status, domain::PrStatus::Approved);
     // MERGEABLE -> no Conflicts decoration.
     assert!(!child.linked_prs[0].conflicts);
+    // statusCheckRollup=SUCCESS -> no CI-failing decoration.
+    assert!(!child.linked_prs[0].ci_failing);
     assert_eq!(child.linked_prs[1].number, 13);
     assert_eq!(child.linked_prs[1].author, None);
     // The draft follow-up PR (isDraft=true) derives Draft regardless of review.
     assert_eq!(child.linked_prs[1].pr_status, domain::PrStatus::Draft);
     // CONFLICTING -> Conflicts decoration is set.
     assert!(child.linked_prs[1].conflicts);
+    // statusCheckRollup=FAILURE -> CI-failing decoration is set.
+    assert!(child.linked_prs[1].ci_failing);
     assert_eq!(child.assignee.as_deref(), Some("carlos-verdes"));
     assert_eq!(
         child.assignee_avatar_url.as_deref(),

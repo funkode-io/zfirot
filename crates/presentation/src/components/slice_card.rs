@@ -104,6 +104,12 @@ pub fn SliceCard(
                             title: "Conflicts with base branch — needs a merge",
                         }
                     }
+                    if pr.ci_failing {
+                        span {
+                            class: "icon-[octicon--x-circle-fill-16] text-error size-4 shrink-0",
+                            title: "CI failing",
+                        }
+                    }
                 }
             }
 

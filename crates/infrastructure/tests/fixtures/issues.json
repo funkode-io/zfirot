@@ -81,7 +81,18 @@
                   },
                   "isDraft": false,
                   "reviewDecision": "APPROVED",
-                  "mergeable": "MERGEABLE"
+                  "mergeable": "MERGEABLE",
+                  "commits": {
+                    "nodes": [
+                      {
+                        "commit": {
+                          "statusCheckRollup": {
+                            "state": "SUCCESS"
+                          }
+                        }
+                      }
+                    ]
+                  }
                 },
                 {
                   "number": 13,
@@ -90,7 +101,18 @@
                   "author": null,
                   "isDraft": true,
                   "reviewDecision": null,
-                  "mergeable": "CONFLICTING"
+                  "mergeable": "CONFLICTING",
+                  "commits": {
+                    "nodes": [
+                      {
+                        "commit": {
+                          "statusCheckRollup": {
+                            "state": "FAILURE"
+                          }
+                        }
+                      }
+                    ]
+                  }
                 }
               ]
             }
