@@ -119,6 +119,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
                 pr_status: domain::PrStatus::AwaitingReview,
                 conflicts: false,
                 ci_failing: false,
+                unresolved_comment_count: 0,
             }],
             is_native_child_of_prd: true,
         },

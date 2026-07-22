@@ -29,7 +29,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
       }
     }
   }
@@ -59,7 +59,7 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
         assignees(first: 1) { nodes { login } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
       }
     }
   }
@@ -945,6 +945,12 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
                 .and_then(|node| node.commit.status_check_rollup.as_ref())
                 .map(|rollup| matches!(rollup.state.as_str(), "FAILURE" | "ERROR"))
                 .unwrap_or(false),
+            unresolved_comment_count: pr
+                .review_threads
+                .nodes
+                .iter()
+                .filter(|thread| !thread.is_resolved)
+                .count() as u32,
         })
         .collect();
 
@@ -1083,6 +1089,8 @@ struct LinkedPrNode {
     mergeable: Option<String>,
     #[serde(default)]
     commits: CommitConnection,
+    #[serde(default)]
+    review_threads: ReviewThreadConnection,
 }
 
 /// The PR's last commit (via `commits(last: 1)`), carrying the aggregated CI
@@ -1106,6 +1114,20 @@ struct CommitNode {
 #[derive(Deserialize)]
 struct StatusCheckRollup {
     state: String,
+}
+
+/// The PR's review threads, for counting the unresolved ones (the
+/// Unresolved-comments Decoration).
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadConnection {
+    nodes: Vec<ReviewThreadNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadNode {
+    is_resolved: bool,
 }
 
 #[derive(Deserialize)]

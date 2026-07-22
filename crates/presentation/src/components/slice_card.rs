@@ -110,6 +110,13 @@ pub fn SliceCard(
                             title: "CI failing",
                         }
                     }
+                    if pr.unresolved_comment_count > 0 {
+                        span { class: "flex items-center gap-0.5 text-base-content/60 shrink-0",
+                            title: "{pr.unresolved_comment_count} unresolved comments",
+                            span { class: "icon-[octicon--comment-discussion-16] size-4" }
+                            span { class: "text-xs", "{pr.unresolved_comment_count}" }
+                        }
+                    }
                 }
             }
 

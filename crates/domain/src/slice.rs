@@ -109,6 +109,10 @@ pub struct LinkedPrRef {
     /// `statusCheckRollup = FAILURE | ERROR`). Pending checks are transient and
     /// not flagged.
     pub ci_failing: bool,
+    /// Count of the PR's review threads still open (`isResolved = false`).
+    /// Non-blocking — surfaced so follow-up notes are visible — and does not
+    /// affect whether the PR reads as ready to merge.
+    pub unresolved_comment_count: u32,
 }
 
 /// A read model of a GitHub issue that is a Slice of a PRD.
@@ -273,6 +277,7 @@ mod tests {
             pr_status: crate::PrStatus::AwaitingReview,
             conflicts: false,
             ci_failing: false,
+            unresolved_comment_count: 0,
         }
     }
 
