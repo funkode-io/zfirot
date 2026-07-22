@@ -115,6 +115,16 @@ pub struct LinkedPrRef {
     pub unresolved_comment_count: u32,
 }
 
+impl LinkedPrRef {
+    /// Whether this PR reads as **ready to merge** — Approved with no blocking
+    /// Decorations (not conflicting, CI not failing). Unresolved comments do
+    /// **not** disqualify it, since they do not block a merge. Derived at read
+    /// time and never stored (see ADR 0004).
+    pub fn is_ready_to_merge(&self) -> bool {
+        self.pr_status == crate::PrStatus::Approved && !self.conflicts && !self.ci_failing
+    }
+}
+
 /// A read model of a GitHub issue that is a Slice of a PRD.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slice {
@@ -278,6 +288,71 @@ mod tests {
             conflicts: false,
             ci_failing: false,
             unresolved_comment_count: 0,
+        }
+    }
+
+    #[test]
+    fn ready_to_merge_is_approved_with_no_blocking_decorations() {
+        use crate::PrStatus;
+        struct Case {
+            name: &'static str,
+            status: PrStatus,
+            conflicts: bool,
+            ci_failing: bool,
+            unresolved: u32,
+            expected: bool,
+        }
+        let cases = [
+            Case {
+                name: "approved, clean -> ready",
+                status: PrStatus::Approved,
+                conflicts: false,
+                ci_failing: false,
+                unresolved: 0,
+                expected: true,
+            },
+            Case {
+                name: "approved with unresolved comments -> still ready (non-blocking)",
+                status: PrStatus::Approved,
+                conflicts: false,
+                ci_failing: false,
+                unresolved: 3,
+                expected: true,
+            },
+            Case {
+                name: "approved but conflicting -> not ready",
+                status: PrStatus::Approved,
+                conflicts: true,
+                ci_failing: false,
+                unresolved: 0,
+                expected: false,
+            },
+            Case {
+                name: "approved but CI failing -> not ready",
+                status: PrStatus::Approved,
+                conflicts: false,
+                ci_failing: true,
+                unresolved: 0,
+                expected: false,
+            },
+            Case {
+                name: "not yet approved -> not ready",
+                status: PrStatus::ChangesRequested,
+                conflicts: false,
+                ci_failing: false,
+                unresolved: 0,
+                expected: false,
+            },
+        ];
+        for case in cases {
+            let pr = LinkedPrRef {
+                pr_status: case.status,
+                conflicts: case.conflicts,
+                ci_failing: case.ci_failing,
+                unresolved_comment_count: case.unresolved,
+                ..linked_pr()
+            };
+            assert_eq!(pr.is_ready_to_merge(), case.expected, "{}", case.name);
         }
     }
 

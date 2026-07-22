@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use domain::{Slice, SliceState};
 
 use super::{
-    pr_status_color, pr_status_icon_class, pr_status_label, state_badge_class, state_label,
+    pr_headline_color, pr_headline_icon_class, pr_headline_label, state_badge_class, state_label,
 };
 
 /// A card for a single Slice. Emits `on_assign` with the issue number when the
@@ -94,9 +94,9 @@ pub fn SliceCard(
             // --- PR status headline: the Slice's WIP substate (its PR's review
             // stage). Single-PR case; multi-PR Best PR selection is a later Slice.
             if let Some(pr) = slice.linked_prs.first() {
-                div { class: "flex items-center gap-1.5 mt-1.5 {pr_status_color(pr.pr_status)}",
-                    span { class: "{pr_status_icon_class(pr.pr_status)} size-4 shrink-0" }
-                    span { class: "text-xs font-medium", "{pr_status_label(pr.pr_status)}" }
+                div { class: "flex items-center gap-1.5 mt-1.5 {pr_headline_color(pr)}",
+                    span { class: "{pr_headline_icon_class(pr)} size-4 shrink-0" }
+                    span { class: "text-xs font-medium", "{pr_headline_label(pr)}" }
                     // Merge-health Decorations ride on top of the status, orthogonally.
                     if pr.conflicts {
                         span {

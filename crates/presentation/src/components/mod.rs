@@ -22,7 +22,7 @@ pub use slice_card::SliceCard;
 pub use spinner::{LoadingScreen, Spinner};
 pub use token_screen::TokenScreen;
 
-use domain::{PrStatus, SliceState};
+use domain::{LinkedPrRef, PrStatus, SliceState};
 
 /// Human-readable column/badge label for a state.
 pub fn state_label(state: SliceState) -> &'static str {
@@ -82,5 +82,36 @@ pub fn pr_status_color(status: PrStatus) -> &'static str {
         PrStatus::AwaitingReview => "text-info",
         PrStatus::ChangesRequested => "text-error",
         PrStatus::Approved => "text-success",
+    }
+}
+
+// A Slice's PR headline reads "Ready to merge" (Approved with no blocking
+// Decorations) when the PR is ready, otherwise its review-lifecycle stage.
+// "Ready to merge" is a derived reading, never a stored status (see ADR 0004).
+
+/// Headline label for a Slice's PR.
+pub fn pr_headline_label(pr: &LinkedPrRef) -> &'static str {
+    if pr.is_ready_to_merge() {
+        "Ready to merge"
+    } else {
+        pr_status_label(pr.pr_status)
+    }
+}
+
+/// Headline Octicon class for a Slice's PR.
+pub fn pr_headline_icon_class(pr: &LinkedPrRef) -> &'static str {
+    if pr.is_ready_to_merge() {
+        "icon-[octicon--git-merge-16]"
+    } else {
+        pr_status_icon_class(pr.pr_status)
+    }
+}
+
+/// Headline color for a Slice's PR.
+pub fn pr_headline_color(pr: &LinkedPrRef) -> &'static str {
+    if pr.is_ready_to_merge() {
+        "text-success"
+    } else {
+        pr_status_color(pr.pr_status)
     }
 }
