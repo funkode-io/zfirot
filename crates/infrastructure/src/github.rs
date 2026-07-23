@@ -579,6 +579,23 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
             .with_source(err)
     })?;
 
+    // GitHub returns partial data alongside field-level errors — e.g. a
+    // FORBIDDEN on `statusCheckRollup` when the token cannot read a repo's CI
+    // checks. When the repository data is present, use it (a forbidden optional
+    // field simply comes back null) rather than failing the whole board on a
+    // partial error. Only when there is no usable repository do the errors
+    // become fatal.
+    if let Some(repository) = response.data.and_then(|data| data.repository) {
+        let issues = repository.issues;
+        let raw = issues.nodes.into_iter().map(map_issue_raw).collect();
+        let next = if issues.page_info.has_next_page {
+            issues.page_info.end_cursor
+        } else {
+            None
+        };
+        return Ok((raw, next));
+    }
+
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
         let not_found = errors.iter().any(|error| {
             error.error_type.as_deref() == Some("NOT_FOUND")
@@ -604,23 +621,10 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
             .with_context("errors", message));
     }
 
-    let repository = response
-        .data
-        .and_then(|data| data.repository)
-        .ok_or_else(|| {
-            AppError::not_found("Repository not found or not visible to the token")
-                .with_operation("parse_issues_response")
-        })?;
-
-    let issues = repository.issues;
-    let raw = issues.nodes.into_iter().map(map_issue_raw).collect();
-    let next = if issues.page_info.has_next_page {
-        issues.page_info.end_cursor
-    } else {
-        None
-    };
-
-    Ok((raw, next))
+    Err(
+        AppError::not_found("Repository not found or not visible to the token")
+            .with_operation("parse_issues_response"),
+    )
 }
 
 /// Parse a GraphQL projects response into a page of [`Project`]s and the cursor
@@ -1258,6 +1262,53 @@ mod tests {
     //! without a test catching it.
     use super::*;
     use domain::AppErrorKind;
+
+    #[test]
+    fn parse_issues_tolerates_partial_field_errors_when_data_is_present() {
+        // GitHub returns the issue data *plus* a field-level FORBIDDEN on
+        // `statusCheckRollup` when the token cannot read a repo's checks. The
+        // board must still load from the data rather than failing wholesale.
+        let body = r#"{
+            "data": { "repository": { "issues": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [ {
+                    "number": 1, "title": "A Slice", "url": "https://x/1", "body": "",
+                    "state": "OPEN", "labels": { "nodes": [ { "name": "slice" } ] },
+                    "assignees": { "nodes": [] }, "parent": null,
+                    "blockedBy": { "nodes": [] },
+                    "closedByPullRequestsReferences": { "nodes": [ {
+                        "number": 9, "url": "https://x/pull/9", "title": "PR", "author": null,
+                        "isDraft": false, "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
+                        "commits": { "nodes": [ { "commit": { "statusCheckRollup": null } } ] },
+                        "reviewThreads": { "nodes": [] }
+                    } ] }
+                } ]
+            } } },
+            "errors": [ { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token",
+                "path": ["repository","issues","nodes",0,"closedByPullRequestsReferences","nodes",0,"commits","nodes",0,"commit","statusCheckRollup"] } ]
+        }"#;
+
+        let (issues, next) =
+            parse_issues_response(body).expect("partial field errors must not fail the board");
+        assert_eq!(next, None);
+        assert_eq!(issues.len(), 1);
+        // The forbidden statusCheckRollup came back null -> CI simply not failing.
+        assert_eq!(issues[0].linked_prs.len(), 1);
+        assert!(!issues[0].linked_prs[0].ci_failing);
+        assert_eq!(
+            issues[0].linked_prs[0].pr_status,
+            domain::PrStatus::Approved
+        );
+    }
+
+    #[test]
+    fn parse_issues_still_fails_when_no_repository_data() {
+        // A whole-repository FORBIDDEN (no data) must still surface as an error.
+        let body = r#"{ "data": { "repository": null },
+            "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to a repository" } ] }"#;
+        let error = parse_issues_response(body).expect_err("absent repository must fail");
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+    }
 
     #[test]
     fn parse_assign_ids_extracts_viewer_and_issue_ids() {
