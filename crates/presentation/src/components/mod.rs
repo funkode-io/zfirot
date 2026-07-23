@@ -54,7 +54,7 @@ pub fn state_dot_color(state: SliceState) -> &'static str {
     }
 }
 
-/// Human label for a PR review-lifecycle stage, shown on a WIP Slice's headline.
+/// Human label for a PR review-lifecycle stage, shown on a Slice's PR headline.
 pub fn pr_status_label(status: PrStatus) -> &'static str {
     match status {
         PrStatus::Draft => "Draft",
