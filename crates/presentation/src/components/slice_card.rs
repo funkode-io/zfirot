@@ -94,9 +94,8 @@ pub fn SliceCard(
                 }
             }
 
-            // --- PR status headline: the Slice's WIP substate (its PR's review
-            // stage). Single-PR case; multi-PR Best PR selection is a later Slice.
-            if let Some(pr) = slice.best_pr() {
+            // --- PR status headline: the Slice's review-lifecycle spine, driven by its Best PR.
+            // Shown whenever the Slice has at least one open PR; decorations ride on top.
                 div { class: "flex items-center gap-1.5 mt-1.5 {pr_headline_color(pr)}",
                     span { class: "{pr_headline_icon_class(pr)} size-4 shrink-0" }
                     span { class: "text-xs font-medium", "{pr_headline_label(pr)}" }
