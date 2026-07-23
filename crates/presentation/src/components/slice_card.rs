@@ -133,7 +133,10 @@ pub fn SliceCard(
                             title: "{pr.title}",
                             href: "{pr.url}",
                             if is_blocked {
-                                span { class: "icon-[lucide--triangle-alert] text-warning size-3" }
+                                span {
+                                    class: "icon-[lucide--triangle-alert] text-warning size-3",
+                                    title: "This Slice is Blocked — the PR is in progress while a dependency Slice is still open",
+                                }
                             }
                             if has_multiple_prs {
                                 span { class: "{pr_headline_icon_class(pr)} size-3.5 shrink-0" }
