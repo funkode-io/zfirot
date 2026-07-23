@@ -53,8 +53,24 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
         child.linked_prs[0].url,
         "https://github.com/funkode-io/zfirot/pull/12"
     );
+    // The approved PR (isDraft=false, reviewDecision=APPROVED) derives Approved.
+    assert_eq!(child.linked_prs[0].pr_status, domain::PrStatus::Approved);
+    // MERGEABLE -> no Conflicts decoration.
+    assert!(!child.linked_prs[0].conflicts);
+    // statusCheckRollup=SUCCESS -> no CI-failing decoration.
+    assert!(!child.linked_prs[0].ci_failing);
+    // One of two review threads is unresolved -> count of 1 (non-blocking).
+    assert_eq!(child.linked_prs[0].unresolved_comment_count, 1);
     assert_eq!(child.linked_prs[1].number, 13);
     assert_eq!(child.linked_prs[1].author, None);
+    // The draft follow-up PR (isDraft=true) derives Draft regardless of review.
+    assert_eq!(child.linked_prs[1].pr_status, domain::PrStatus::Draft);
+    // CONFLICTING -> Conflicts decoration is set.
+    assert!(child.linked_prs[1].conflicts);
+    // statusCheckRollup=FAILURE -> CI-failing decoration is set.
+    assert!(child.linked_prs[1].ci_failing);
+    // No review threads -> no unresolved comments.
+    assert_eq!(child.linked_prs[1].unresolved_comment_count, 0);
     assert_eq!(child.assignee.as_deref(), Some("carlos-verdes"));
     assert_eq!(
         child.assignee_avatar_url.as_deref(),

@@ -97,6 +97,32 @@ pub struct LinkedPrRef {
     pub title: String,
     /// The PR's URL on GitHub, for opening it in a browser.
     pub url: String,
+    /// The review-lifecycle stage of this PR (Draft ... Approved), derived from
+    /// GitHub's draft flag and review decision. Drives the Slice's WIP headline
+    /// (via its Best PR); merge-health Decorations ride on top of it.
+    pub pr_status: crate::PrStatus,
+    /// `true` when the PR conflicts with its base branch and needs a manual
+    /// conflict merge (GitHub `mergeable = CONFLICTING`). A branch merely behind
+    /// its base (auto-updatable) is deliberately not flagged.
+    pub conflicts: bool,
+    /// `true` when the PR's checks have settled on a failure (GitHub
+    /// `statusCheckRollup = FAILURE | ERROR`). Pending checks are transient and
+    /// not flagged.
+    pub ci_failing: bool,
+    /// Count of the PR's review threads still open (`isResolved = false`).
+    /// Non-blocking — surfaced so follow-up notes are visible — and does not
+    /// affect whether the PR reads as ready to merge.
+    pub unresolved_comment_count: u32,
+}
+
+impl LinkedPrRef {
+    /// Whether this PR reads as **ready to merge** — Approved with no blocking
+    /// Decorations (not conflicting, CI not failing). Unresolved comments do
+    /// **not** disqualify it, since they do not block a merge. Derived at read
+    /// time and never stored (see ADR 0004).
+    pub fn is_ready_to_merge(&self) -> bool {
+        self.pr_status == crate::PrStatus::Approved && !self.conflicts && !self.ci_failing
+    }
 }
 
 /// A read model of a GitHub issue that is a Slice of a PRD.
@@ -122,6 +148,16 @@ pub struct Slice {
     /// The open Pull Requests linked to this Slice via their closing reference,
     /// for the `pr #n @u` badges.
     pub linked_prs: Vec<LinkedPrRef>,
+}
+
+impl Slice {
+    /// The **Best PR** — the open Linked PR with the highest [`PrStatus`], whose
+    /// status and Decorations drive the Slice's WIP headline. `None` when the
+    /// Slice has no open PR. On a tie the later PR in input order wins, which is
+    /// display-immaterial since the statuses are equal.
+    pub fn best_pr(&self) -> Option<&LinkedPrRef> {
+        self.linked_prs.iter().max_by_key(|pr| pr.pr_status)
+    }
 }
 
 /// Raw, GitHub-shaped facts about a single issue, before its [`SliceState`] is
@@ -258,7 +294,114 @@ mod tests {
             author: Some("hubot".to_string()),
             title: "Implement the Slice".to_string(),
             url: "https://github.com/funkode-io/zfirot/pull/200".to_string(),
+            pr_status: crate::PrStatus::AwaitingReview,
+            conflicts: false,
+            ci_failing: false,
+            unresolved_comment_count: 0,
         }
+    }
+
+    #[test]
+    fn ready_to_merge_is_approved_with_no_blocking_decorations() {
+        use crate::PrStatus;
+        struct Case {
+            name: &'static str,
+            status: PrStatus,
+            conflicts: bool,
+            ci_failing: bool,
+            unresolved: u32,
+            expected: bool,
+        }
+        let cases = [
+            Case {
+                name: "approved, clean -> ready",
+                status: PrStatus::Approved,
+                conflicts: false,
+                ci_failing: false,
+                unresolved: 0,
+                expected: true,
+            },
+            Case {
+                name: "approved with unresolved comments -> still ready (non-blocking)",
+                status: PrStatus::Approved,
+                conflicts: false,
+                ci_failing: false,
+                unresolved: 3,
+                expected: true,
+            },
+            Case {
+                name: "approved but conflicting -> not ready",
+                status: PrStatus::Approved,
+                conflicts: true,
+                ci_failing: false,
+                unresolved: 0,
+                expected: false,
+            },
+            Case {
+                name: "approved but CI failing -> not ready",
+                status: PrStatus::Approved,
+                conflicts: false,
+                ci_failing: true,
+                unresolved: 0,
+                expected: false,
+            },
+            Case {
+                name: "not yet approved -> not ready",
+                status: PrStatus::ChangesRequested,
+                conflicts: false,
+                ci_failing: false,
+                unresolved: 0,
+                expected: false,
+            },
+        ];
+        for case in cases {
+            let pr = LinkedPrRef {
+                pr_status: case.status,
+                conflicts: case.conflicts,
+                ci_failing: case.ci_failing,
+                unresolved_comment_count: case.unresolved,
+                ..linked_pr()
+            };
+            assert_eq!(pr.is_ready_to_merge(), case.expected, "{}", case.name);
+        }
+    }
+
+    fn pr_with_status(number: u64, status: crate::PrStatus) -> LinkedPrRef {
+        LinkedPrRef {
+            number,
+            pr_status: status,
+            ..linked_pr()
+        }
+    }
+
+    #[test]
+    fn best_pr_is_the_highest_status_open_pr() {
+        use crate::PrStatus;
+        let make = |prs| {
+            RawSlice {
+                linked_prs: prs,
+                ..ready_raw()
+            }
+            .into_slice()
+        };
+
+        // No open PR -> no Best PR.
+        assert!(make(vec![]).best_pr().is_none());
+
+        // A single PR is trivially the Best PR.
+        let single = make(vec![pr_with_status(1, PrStatus::Draft)]);
+        assert_eq!(single.best_pr().map(|pr| pr.number), Some(1));
+
+        // With several, the highest status wins regardless of input order.
+        let many = make(vec![
+            pr_with_status(1, PrStatus::Draft),
+            pr_with_status(2, PrStatus::Approved),
+            pr_with_status(3, PrStatus::AwaitingReview),
+        ]);
+        assert_eq!(
+            many.best_pr().map(|pr| (pr.number, pr.pr_status)),
+            Some((2, PrStatus::Approved))
+        );
     }
 
     /// `n` distinct open blocker references, for exercising state derivation.

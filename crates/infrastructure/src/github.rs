@@ -3,7 +3,10 @@
 use application::GitHubPort;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use domain::{AppAction, AppError, AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
+use domain::{
+    AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RepoRef,
+    ReviewDecision,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 
@@ -26,7 +29,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
       }
     }
   }
@@ -56,7 +59,7 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
         assignees(first: 1) { nodes { login } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
       }
     }
   }
@@ -576,6 +579,23 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
             .with_source(err)
     })?;
 
+    // GitHub returns partial data alongside field-level errors — e.g. a
+    // FORBIDDEN on `statusCheckRollup` when the token cannot read a repo's CI
+    // checks. When the repository data is present, use it (a forbidden optional
+    // field simply comes back null) rather than failing the whole board on a
+    // partial error. Only when there is no usable repository do the errors
+    // become fatal.
+    if let Some(repository) = response.data.and_then(|data| data.repository) {
+        let issues = repository.issues;
+        let raw = issues.nodes.into_iter().map(map_issue_raw).collect();
+        let next = if issues.page_info.has_next_page {
+            issues.page_info.end_cursor
+        } else {
+            None
+        };
+        return Ok((raw, next));
+    }
+
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
         let not_found = errors.iter().any(|error| {
             error.error_type.as_deref() == Some("NOT_FOUND")
@@ -601,23 +621,10 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
             .with_context("errors", message));
     }
 
-    let repository = response
-        .data
-        .and_then(|data| data.repository)
-        .ok_or_else(|| {
-            AppError::not_found("Repository not found or not visible to the token")
-                .with_operation("parse_issues_response")
-        })?;
-
-    let issues = repository.issues;
-    let raw = issues.nodes.into_iter().map(map_issue_raw).collect();
-    let next = if issues.page_info.has_next_page {
-        issues.page_info.end_cursor
-    } else {
-        None
-    };
-
-    Ok((raw, next))
+    Err(
+        AppError::not_found("Repository not found or not visible to the token")
+            .with_operation("parse_issues_response"),
+    )
 }
 
 /// Parse a GraphQL projects response into a page of [`Project`]s and the cursor
@@ -900,6 +907,18 @@ fn node_into_project(node: RepositoryNode) -> Project {
     }
 }
 
+/// Map GitHub's `reviewDecision` string to the domain [`ReviewDecision`]. A null
+/// decision (review not required, or none reached) or any unrecognised value
+/// maps to `None`, which [`PrStatus::derive`] reads as "awaiting review".
+fn review_decision(raw: Option<&str>) -> Option<ReviewDecision> {
+    match raw {
+        Some("APPROVED") => Some(ReviewDecision::Approved),
+        Some("CHANGES_REQUESTED") => Some(ReviewDecision::ChangesRequested),
+        Some("REVIEW_REQUIRED") => Some(ReviewDecision::ReviewRequired),
+        _ => None,
+    }
+}
+
 /// Project one GraphQL issue node into a [`RawIssue`] for the two-tier
 /// classifier: open/closed, labels, native parent number (and whether it is a
 /// `prd`-labelled parent), native blockers (open and closed), assignee, and
@@ -918,6 +937,24 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
             author: pr.author.map(|author| author.login),
             title: pr.title,
             url: pr.url,
+            pr_status: PrStatus::derive(
+                pr.is_draft,
+                review_decision(pr.review_decision.as_deref()),
+            ),
+            conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
+            ci_failing: pr
+                .commits
+                .nodes
+                .first()
+                .and_then(|node| node.commit.status_check_rollup.as_ref())
+                .map(|rollup| matches!(rollup.state.as_str(), "FAILURE" | "ERROR"))
+                .unwrap_or(false),
+            unresolved_comment_count: pr
+                .review_threads
+                .nodes
+                .iter()
+                .filter(|thread| !thread.is_resolved)
+                .count() as u32,
         })
         .collect();
 
@@ -1044,11 +1081,57 @@ struct LinkedPrConnection {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LinkedPrNode {
     number: u64,
     url: String,
     title: String,
     author: Option<AuthorNode>,
+    #[serde(default)]
+    is_draft: bool,
+    review_decision: Option<String>,
+    mergeable: Option<String>,
+    #[serde(default)]
+    commits: CommitConnection,
+    #[serde(default)]
+    review_threads: ReviewThreadConnection,
+}
+
+/// The PR's last commit (via `commits(last: 1)`), carrying the aggregated CI
+/// check rollup used for the CI-failing Decoration.
+#[derive(Deserialize, Default)]
+struct CommitConnection {
+    nodes: Vec<PullRequestCommitNode>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestCommitNode {
+    commit: CommitNode,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitNode {
+    status_check_rollup: Option<StatusCheckRollup>,
+}
+
+#[derive(Deserialize)]
+struct StatusCheckRollup {
+    state: String,
+}
+
+/// The PR's review threads, for counting the unresolved ones (the
+/// Unresolved-comments Decoration).
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadConnection {
+    nodes: Vec<ReviewThreadNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadNode {
+    is_resolved: bool,
 }
 
 #[derive(Deserialize)]
@@ -1179,6 +1262,53 @@ mod tests {
     //! without a test catching it.
     use super::*;
     use domain::AppErrorKind;
+
+    #[test]
+    fn parse_issues_tolerates_partial_field_errors_when_data_is_present() {
+        // GitHub returns the issue data *plus* a field-level FORBIDDEN on
+        // `statusCheckRollup` when the token cannot read a repo's checks. The
+        // board must still load from the data rather than failing wholesale.
+        let body = r#"{
+            "data": { "repository": { "issues": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [ {
+                    "number": 1, "title": "A Slice", "url": "https://x/1", "body": "",
+                    "state": "OPEN", "labels": { "nodes": [ { "name": "slice" } ] },
+                    "assignees": { "nodes": [] }, "parent": null,
+                    "blockedBy": { "nodes": [] },
+                    "closedByPullRequestsReferences": { "nodes": [ {
+                        "number": 9, "url": "https://x/pull/9", "title": "PR", "author": null,
+                        "isDraft": false, "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
+                        "commits": { "nodes": [ { "commit": { "statusCheckRollup": null } } ] },
+                        "reviewThreads": { "nodes": [] }
+                    } ] }
+                } ]
+            } } },
+            "errors": [ { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token",
+                "path": ["repository","issues","nodes",0,"closedByPullRequestsReferences","nodes",0,"commits","nodes",0,"commit","statusCheckRollup"] } ]
+        }"#;
+
+        let (issues, next) =
+            parse_issues_response(body).expect("partial field errors must not fail the board");
+        assert_eq!(next, None);
+        assert_eq!(issues.len(), 1);
+        // The forbidden statusCheckRollup came back null -> CI simply not failing.
+        assert_eq!(issues[0].linked_prs.len(), 1);
+        assert!(!issues[0].linked_prs[0].ci_failing);
+        assert_eq!(
+            issues[0].linked_prs[0].pr_status,
+            domain::PrStatus::Approved
+        );
+    }
+
+    #[test]
+    fn parse_issues_still_fails_when_no_repository_data() {
+        // A whole-repository FORBIDDEN (no data) must still surface as an error.
+        let body = r#"{ "data": { "repository": null },
+            "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to a repository" } ] }"#;
+        let error = parse_issues_response(body).expect_err("absent repository must fail");
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+    }
 
     #[test]
     fn parse_assign_ids_extracts_viewer_and_issue_ids() {

@@ -78,13 +78,54 @@
                   "title": "Implement SliceState derivation",
                   "author": {
                     "login": "carlos-verdes"
+                  },
+                  "isDraft": false,
+                  "reviewDecision": "APPROVED",
+                  "mergeable": "MERGEABLE",
+                  "commits": {
+                    "nodes": [
+                      {
+                        "commit": {
+                          "statusCheckRollup": {
+                            "state": "SUCCESS"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "reviewThreads": {
+                    "nodes": [
+                      {
+                        "isResolved": true
+                      },
+                      {
+                        "isResolved": false
+                      }
+                    ]
                   }
                 },
                 {
                   "number": 13,
                   "url": "https://github.com/funkode-io/zfirot/pull/13",
                   "title": "Follow-up tweak",
-                  "author": null
+                  "author": null,
+                  "isDraft": true,
+                  "reviewDecision": null,
+                  "mergeable": "CONFLICTING",
+                  "commits": {
+                    "nodes": [
+                      {
+                        "commit": {
+                          "statusCheckRollup": {
+                            "state": "FAILURE"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "reviewThreads": {
+                    "nodes": []
+                  }
                 }
               ]
             }
