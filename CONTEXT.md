@@ -150,3 +150,38 @@ _Avoid_: entity, model
 The project the user was viewing when the app last closed, persisted on the
 local device only so the app reopens there on next launch.
 _Avoid_: recent, history
+
+## Identity and authentication
+
+**Viewer**:
+The authenticated GitHub user the stored token acts as. The app reads the
+Viewer's `login`, `name`, and `avatarUrl` (GitHub's `viewer`) to show an account
+menu; the token itself carries no profile.
+_Avoid_: current user, account, me
+
+**Rotate** (UI label: "Change token"):
+Replace the stored token with a freshly-granted one for the **same Viewer**,
+atomically — the old token stays valid until the new one is validated and saved,
+and all account-scoped local state is preserved. The action used when the app's
+required grants grow (a new feature needs a new permission).
+_Avoid_: renew, refresh (refresh is the board action)
+
+**Sign out**:
+Remove the token **and** all account-scoped local state (tracked repos,
+last-opened project, cached recent projects, cached boards), resetting the app to
+its first-run, no-token state. UI preferences (theme, view mode) survive because
+they are not tied to the Viewer.
+_Avoid_: log out, disconnect
+
+**Invalid token**:
+A stored token GitHub rejects as unusable — revoked, expired, or malformed
+(Unauthorized / 401). It is useless, so the app clears it and routes to the
+paste-token screen.
+_Avoid_: bad token, expired (only one of the causes)
+
+**Under-scoped token**:
+A token that is valid but missing a grant an operation needs (Forbidden / 403).
+It still works elsewhere, so the app **never clears it**; instead it offers to
+Rotate, carrying the specific missing permission so the required-permissions list
+can highlight the exact grant to add.
+_Avoid_: insufficient token, unauthorized (that is the Invalid case)
