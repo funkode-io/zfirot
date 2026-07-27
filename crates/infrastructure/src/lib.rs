@@ -7,7 +7,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AppResult, LinkedPrRef, Project, RawIssue, RepoRef};
+use domain::{AppResult, LinkedPrRef, Project, RawIssue, RepoRef, Viewer};
 
 mod board_cache;
 mod github;
@@ -44,6 +44,19 @@ impl GitHubPort for FakeGitHubPort {
         _label: &str,
     ) -> domain::AppAction {
         Ok(())
+    }
+
+    async fn viewer(&self) -> AppResult<Viewer> {
+        Ok(sample_viewer())
+    }
+}
+
+/// A canned Viewer for the fake adapter and previews.
+pub fn sample_viewer() -> Viewer {
+    Viewer {
+        login: "carlos-verdes".to_string(),
+        name: Some("Carlos Verdes".to_string()),
+        avatar_url: "https://avatars.githubusercontent.com/u/9919?v=4".to_string(),
     }
 }
 

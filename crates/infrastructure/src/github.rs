@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
     AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RepoRef,
-    ReviewDecision,
+    ReviewDecision, Viewer,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -95,6 +95,14 @@ query Projects($cursor: String) {
 }
 "#;
 
+/// The authenticated user's identity (login, display name, avatar), for the
+/// account menu.
+const VIEWER_QUERY: &str = r#"
+query Viewer {
+  viewer { login name avatarUrl }
+}
+"#;
+
 /// Resolve the node IDs the assign-self mutation needs: the authenticated
 /// user (`viewer`) and the target issue (the assignable). Both are looked up in
 /// one round trip before the mutation runs.
@@ -106,7 +114,6 @@ query AssignIds($owner: String!, $name: String!, $number: Int!) {
   }
 }
 "#;
-
 /// Assign the authenticated user to an issue, claiming a Ready Slice. The board
 /// re-polls after this succeeds, so the now-assigned Slice derives `Wip`.
 const ASSIGN_MUTATION: &str = r#"
@@ -296,6 +303,38 @@ impl GitHubClient {
         response.text().await.map_err(|err| {
             AppError::unavailable("Could not read GitHub's response")
                 .with_operation("GitHubClient::fetch_projects_page")
+                .with_source(err)
+        })
+    }
+
+    /// Fetch the authenticated user's identity (no pagination: a single object).
+    async fn fetch_viewer(&self) -> AppResult<String> {
+        let body = serde_json::json!({ "query": VIEWER_QUERY });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_viewer")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_viewer",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_viewer")
                 .with_source(err)
         })
     }
@@ -531,6 +570,11 @@ impl GitHubPort for GitHubClient {
             .run_add_label_mutation(&ids.labelable_id, &ids.label_id)
             .await?;
         parse_add_label_mutation(&mutation_body)
+    }
+
+    async fn viewer(&self) -> AppResult<Viewer> {
+        let body = self.fetch_viewer().await?;
+        parse_viewer_response(&body)
     }
 }
 
@@ -889,6 +933,42 @@ fn label_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError {
         .with_context("errors", message)
 }
 
+/// Parse a GraphQL viewer response into the domain [`Viewer`]. Pure and
+/// offline, so the HTTP boundary stays thin and testable.
+pub fn parse_viewer_response(body: &str) -> AppResult<Viewer> {
+    let response: ViewerResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_viewer_response")
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        let message = errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let error = if message.to_lowercase().contains("rate limit") {
+            AppError::rate_limited("GitHub rate limit exceeded")
+        } else {
+            AppError::internal("GitHub reported a query error")
+        };
+        return Err(error
+            .with_operation("parse_viewer_response")
+            .with_context("errors", message));
+    }
+
+    let node = response.data.map(|data| data.viewer).ok_or_else(|| {
+        AppError::internal("GitHub returned no viewer data").with_operation("parse_viewer_response")
+    })?;
+
+    Ok(Viewer {
+        login: node.login,
+        name: node.name,
+        avatar_url: node.avatar_url,
+    })
+}
+
 /// Map a repository node to the project the app tracks. A fork stands in for its
 /// upstream parent: the board reads issues from upstream, so we adopt the
 /// parent's owner/name and its push time (the project's real activity). A
@@ -1214,11 +1294,11 @@ struct ProjectsResponse {
 
 #[derive(Deserialize)]
 struct ProjectsData {
-    viewer: Viewer,
+    viewer: ProjectsViewer,
 }
 
 #[derive(Deserialize)]
-struct Viewer {
+struct ProjectsViewer {
     repositories: RepositoryConnection,
 }
 
@@ -1252,6 +1332,25 @@ struct ParentRepositoryNode {
 #[derive(Deserialize)]
 struct RepositoryOwner {
     login: String,
+}
+
+#[derive(Deserialize)]
+struct ViewerResponse {
+    data: Option<ViewerResponseData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct ViewerResponseData {
+    viewer: ViewerNode,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewerNode {
+    login: String,
+    name: Option<String>,
+    avatar_url: String,
 }
 
 #[cfg(test)]
@@ -1481,5 +1580,62 @@ mod tests {
             format!("{error:?}").contains("personal access token"),
             "GitHub's raw text should be attached as diagnostic context: {error:?}"
         );
+    }
+
+    #[test]
+    fn parse_viewer_extracts_login_name_and_avatar() {
+        let body = r#"{
+            "data": {
+                "viewer": {
+                    "login": "carlos-verdes",
+                    "name": "Carlos Verdes",
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4"
+                }
+            }
+        }"#;
+
+        let viewer = parse_viewer_response(body).expect("a clean viewer response should parse");
+
+        assert_eq!(viewer.login, "carlos-verdes");
+        assert_eq!(viewer.name.as_deref(), Some("Carlos Verdes"));
+        assert_eq!(
+            viewer.avatar_url,
+            "https://avatars.githubusercontent.com/u/9919?v=4"
+        );
+    }
+
+    #[test]
+    fn parse_viewer_tolerates_a_missing_display_name() {
+        let body = r#"{
+            "data": {
+                "viewer": {
+                    "login": "carlos-verdes",
+                    "name": null,
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4"
+                }
+            }
+        }"#;
+
+        let viewer = parse_viewer_response(body).expect("a null name should still parse");
+
+        assert_eq!(viewer.name, None);
+    }
+
+    #[test]
+    fn parse_viewer_maps_rate_limit_errors() {
+        let body = r#"{ "errors": [ { "message": "API rate limit exceeded" } ] }"#;
+
+        let error = parse_viewer_response(body).expect_err("a rate-limit error should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::RateLimited);
+    }
+
+    #[test]
+    fn parse_viewer_maps_other_query_errors_to_internal() {
+        let body = r#"{ "errors": [ { "message": "Something went wrong" } ] }"#;
+
+        let error = parse_viewer_response(body).expect_err("a query error should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::Internal);
     }
 }

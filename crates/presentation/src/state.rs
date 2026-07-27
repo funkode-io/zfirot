@@ -8,14 +8,14 @@
 use std::sync::Arc;
 
 use application::{
-    AuthService, BoardCachePort, BoardCacheUsage, BoardOpen, BoardRefresh, BoardService,
-    BoardSnapshot, CachedBoardService, GitHubPort, LastOpenedService, LoadedBoard,
+    AccountService, AuthService, BoardCachePort, BoardCacheUsage, BoardOpen, BoardRefresh,
+    BoardService, BoardSnapshot, CachedBoardService, GitHubPort, LastOpenedService, LoadedBoard,
     ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
     TrackedProjectsService,
 };
 use domain::{
     AppAction, AppResult, BoardViewMode, GitHubToken, IssueClassification, Project, RepoRef,
-    ThemePreference,
+    ThemePreference, Viewer,
 };
 #[cfg(debug_assertions)]
 use infrastructure::EnvSecureStore;
@@ -260,4 +260,14 @@ pub async fn confirm_classification(
     AppState::from_token(&token, repo.clone())?
         .confirm_classification(issue_number, classification)
         .await
+}
+
+/// The signed-in Viewer (avatar, login), for the account menu. Reads the
+/// stored token; a missing or rejected token surfaces as an error, so the
+/// caller (the account menu) falls back to a generic icon rather than blocking
+/// on it.
+pub async fn viewer() -> AppResult<Viewer> {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
+    AccountService::new(port).viewer().await
 }

@@ -13,18 +13,19 @@ use application::{
 use dioxus::prelude::*;
 use domain::{
     group_into_lanes, AppErrorKind, BoardSummary, BoardViewMode, GitHubToken, IssueClassification,
-    PollInterval, Project, ReconcileInterval, RepoRef, Slice, ThemePreference,
+    PollInterval, Project, ReconcileInterval, RepoRef, Slice, ThemePreference, Viewer,
 };
 
 use crate::components::{
-    ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner, TokenScreen,
+    AccountMenu, ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner,
+    TokenScreen,
 };
 use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
     confirm_classification, last_opened, open_and_track_project, open_board, open_project,
     reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
     remember_theme_preference, remember_view_mode, secure_store, theme_preference, tracked_repos,
-    untrack_repo, view_mode,
+    untrack_repo, view_mode, viewer as fetch_viewer,
 };
 use tracing::warn;
 
@@ -133,6 +134,12 @@ pub fn App() -> Element {
     let mut theme_initialized = use_signal(|| false);
     // Runs board view-mode initialisation exactly once.
     let mut view_mode_initialized = use_signal(|| false);
+    // The signed-in Viewer (avatar, login), for the account menu. `None` while
+    // loading or if the fetch failed — the menu falls back to a generic icon.
+    let mut viewer = use_signal(|| Option::<Viewer>::None);
+    // Guards the Viewer fetch so it runs once per app session, not on every
+    // `reload` bump.
+    let mut viewer_fetch_attempted = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -197,6 +204,25 @@ pub fn App() -> Element {
                 graph_view.set(true);
             }
         });
+    });
+
+    // Fetch the signed-in Viewer once a token is present (Home or Board showing),
+    // so the account menu can show a real avatar + login. A fetch failure simply
+    // leaves `viewer` at `None`, which the menu reads as "show a generic icon" —
+    // never blocking on it.
+    use_effect(move || {
+        let has_token = matches!(
+            view.read().as_ref(),
+            Some(View::Home { .. }) | Some(View::Board { .. })
+        );
+        if has_token && !viewer_fetch_attempted() {
+            viewer_fetch_attempted.set(true);
+            spawn(async move {
+                if let Ok(fetched) = fetch_viewer().await {
+                    viewer.set(Some(fetched));
+                }
+            });
+        }
     });
 
     // Stale-while-revalidate: once the home screen has painted *from the cache*,
@@ -615,6 +641,7 @@ pub fn App() -> Element {
                     cache_usage: cache_stats(),
                     on_clear_cache_all,
                     on_clear_cache_repo,
+                    viewer: viewer(),
                     div { class: "flex justify-center py-16",
                         Spinner { label: "Loading board…" }
                     }
@@ -630,6 +657,7 @@ pub fn App() -> Element {
                     on_open_discovered,
                     on_open_goto,
                     on_untrack,
+                    viewer: viewer(),
                 }
             },
             (Some(View::NeedToken { reason }), ..) => rsx! {
@@ -673,6 +701,7 @@ pub fn App() -> Element {
                         cache_usage: cache_stats(),
                         on_clear_cache_all,
                         on_clear_cache_repo,
+                        viewer: viewer(),
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
                         }
@@ -700,6 +729,7 @@ pub fn App() -> Element {
                     cache_usage: cache_stats(),
                     on_clear_cache_all,
                     on_clear_cache_repo,
+                    viewer: viewer(),
                     ErrorBanner { message: message.clone() }
                 }
             },
@@ -900,6 +930,7 @@ fn BoardShell(
     #[props(default)] on_clear_cache_repo: Option<EventHandler<RepoRef>>,
     #[props(default)] graph_view: bool,
     #[props(default)] on_toggle_graph: Option<EventHandler<()>>,
+    #[props(default)] viewer: Option<Viewer>,
 ) -> Element {
     let total_cache = format_bytes(cache_usage.total_bytes);
     rsx! {
@@ -1018,6 +1049,7 @@ fn BoardShell(
                             }
                         }
                     }
+                    AccountMenu { viewer }
                 }
             }
             {children}

@@ -4,6 +4,7 @@
 //! receive data as props and emit events via callbacks, so they can be previewed
 //! and tested without GitHub.
 
+mod account_menu;
 mod board_column;
 mod error_banner;
 mod home_screen;
@@ -13,6 +14,7 @@ mod slice_card;
 mod spinner;
 mod token_screen;
 
+pub use account_menu::AccountMenu;
 pub use board_column::BoardColumn;
 pub use error_banner::ErrorBanner;
 pub use home_screen::HomeScreen;
