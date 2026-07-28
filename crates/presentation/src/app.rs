@@ -24,8 +24,8 @@ use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
     confirm_classification, last_opened, open_and_track_project, open_board, open_project,
     reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
-    remember_theme_preference, remember_view_mode, secure_store, theme_preference, tracked_repos,
-    untrack_repo, view_mode, viewer as fetch_viewer,
+    remember_theme_preference, remember_view_mode, secure_store, sign_out, theme_preference,
+    tracked_repos, untrack_repo, view_mode, viewer as fetch_viewer,
 };
 use tracing::warn;
 
@@ -94,6 +94,9 @@ pub fn App() -> Element {
     // Set to a client-safe message when confirming a suggested classification
     // fails, shown above the board; cleared on a successful confirm.
     let mut confirm_error = use_signal(|| Option::<String>::None);
+    // Set to a client-safe message when signing out fails, shown above the
+    // current screen (Home or Board); cleared on a successful sign-out.
+    let mut sign_out_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
     // Where the user wants to be; starts at `Auto` so the last-opened project
@@ -140,6 +143,18 @@ pub fn App() -> Element {
     // Guards the Viewer fetch so it runs once per app session, not on every
     // `reload` bump.
     let mut viewer_fetch_attempted = use_signal(|| false);
+    // True while the Change-token (Rotate) screen is shown as a full-screen
+    // overlay in front of whatever was on screen (Home or a board). Toggled by
+    // the account menu's "Change token…" item; Cancel or a successful save
+    // clears it, returning to that same underlying view untouched.
+    let mut show_change_token = use_signal(|| false);
+    // Cleared on a successful Change-token save, set to a client-safe message
+    // when the pasted token is rejected. Independent from `token_error` (the
+    // first-launch paste-token screen) so the two flows never share state.
+    let mut change_token_error = use_signal(|| Option::<String>::None);
+    // True while a freshly-pasted replacement token is being validated and
+    // persisted, driving the Change-token screen's own spinner.
+    let mut change_token_saving = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -467,6 +482,40 @@ pub fn App() -> Element {
         });
     };
 
+    // Open the Change-token (Rotate) overlay from the account menu, on top of
+    // whatever is currently shown (Home or a board).
+    let on_open_change_token = move |_| {
+        change_token_error.set(None);
+        show_change_token.set(true);
+    };
+
+    // Cancel: dismiss the overlay without touching the stored token, returning
+    // to exactly the view that was showing underneath.
+    let on_change_token_cancel = move |_| {
+        change_token_error.set(None);
+        show_change_token.set(false);
+    };
+
+    // Save the replacement token via the existing `AuthService::save_token`
+    // (an atomic overwrite — no prior delete — so the old token keeps working
+    // until this succeeds). On success, dismiss the overlay: the underlying
+    // Home/board view and all local state (tracked repos, caches, theme, view
+    // mode) are untouched, since the same Viewer is still signed in.
+    let on_change_token_submit = move |raw: String| {
+        spawn(async move {
+            change_token_saving.set(true);
+            let auth = AuthService::new(secure_store());
+            match auth.save_token(&raw).await {
+                Ok(()) => {
+                    change_token_error.set(None);
+                    show_change_token.set(false);
+                }
+                Err(error) => change_token_error.set(Some(error.to_string())),
+            }
+            change_token_saving.set(false);
+        });
+    };
+
     let on_open_discovered = use_callback(move |repo: RepoRef| {
         spawn(async move {
             // Persist the choice (best-effort) and navigate to its board.
@@ -561,6 +610,30 @@ pub fn App() -> Element {
         },
     );
 
+    // Sign out: remove the token and account-scoped local state, then
+    // re-resolve the view — `resolve_view` finds no token and routes to the
+    // paste-token screen. Session-only signals (the fetched Viewer, the
+    // retained board snapshot, revalidation guards) are reset so a fresh
+    // sign-in starts clean rather than reusing the prior account's state.
+    let on_sign_out = move |_| {
+        spawn(async move {
+            match sign_out().await {
+                Ok(()) => {
+                    sign_out_error.set(None);
+                    viewer.set(None);
+                    viewer_fetch_attempted.set(false);
+                    board_snapshot.set(None);
+                    prefetched_board.set(None);
+                    board_revalidated.set(None);
+                    revalidated.set(false);
+                    nav.set(Nav::Auto);
+                    reload += 1;
+                }
+                Err(error) => sign_out_error.set(Some(error.to_string())),
+            }
+        });
+    };
+
     // Back to the project picker. Persistence is untouched, so the next launch
     // still reopens the last project; this only changes the current session.
     // Reset the revalidate guard so returning to Home refreshes the list again.
@@ -614,7 +687,17 @@ pub fn App() -> Element {
         document::Title { "Zfirot" }
         document::Stylesheet { href: TAILWIND_CSS }
 
-        match (&*view.read_unchecked(), board_loading, nav()) {
+        if show_change_token() {
+            TokenScreen {
+                title: "Change your Personal Access Token".to_string(),
+                description: "Replace the token Zfirot uses to talk to GitHub — for example when a new feature needs a permission your current token doesn't grant yet. Your current token keeps working until the new one is saved, so cancelling leaves everything exactly as it was.".to_string(),
+                error: change_token_error(),
+                saving: change_token_saving(),
+                on_submit: on_change_token_submit,
+                on_cancel: on_change_token_cancel,
+            }
+        } else {
+            match (&*view.read_unchecked(), board_loading, nav()) {
             // Navigating to a board we do not have yet: opening a project from
             // the home screen or reopening one on launch. Show the board chrome
             // with a spinner so the navigation has immediate feedback. A board
@@ -630,6 +713,8 @@ pub fn App() -> Element {
                     on_clear_cache_all,
                     on_clear_cache_repo,
                     viewer: viewer(),
+                    on_change_token: on_open_change_token,
+                    on_sign_out,
                     div { class: "flex justify-center py-16",
                         Spinner { label: "Loading board…" }
                     }
@@ -646,6 +731,11 @@ pub fn App() -> Element {
                     on_open_goto,
                     on_untrack,
                     viewer: viewer(),
+                    on_change_token: on_open_change_token,
+                    on_sign_out,
+                }
+                if let Some(message) = sign_out_error() {
+                    ErrorBanner { message }
                 }
             },
             (Some(View::NeedToken { reason }), ..) => rsx! {
@@ -690,10 +780,15 @@ pub fn App() -> Element {
                         on_clear_cache_all,
                         on_clear_cache_repo,
                         viewer: viewer(),
+                        on_change_token: on_open_change_token,
+                        on_sign_out,
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
                         }
                         if let Some(message) = confirm_error() {
+                            ErrorBanner { message }
+                        }
+                        if let Some(message) = sign_out_error() {
                             ErrorBanner { message }
                         }
                         BoardSummaryBar { summary }
@@ -718,12 +813,15 @@ pub fn App() -> Element {
                     on_clear_cache_all,
                     on_clear_cache_repo,
                     viewer: viewer(),
+                    on_change_token: on_open_change_token,
+                    on_sign_out,
                     ErrorBanner { message: message.clone() }
                 }
             },
             (None, ..) => rsx! {
                 LoadingScreen { label: "Loading…" }
             },
+            }
         }
     }
 }
@@ -999,6 +1097,8 @@ fn BoardShell(
     #[props(default)] graph_view: bool,
     #[props(default)] on_toggle_graph: Option<EventHandler<()>>,
     #[props(default)] viewer: Option<Viewer>,
+    on_change_token: EventHandler<()>,
+    on_sign_out: EventHandler<()>,
 ) -> Element {
     let total_cache = format_bytes(cache_usage.total_bytes);
     rsx! {
@@ -1117,7 +1217,7 @@ fn BoardShell(
                             }
                         }
                     }
-                    AccountMenu { viewer }
+                    AccountMenu { viewer, on_change_token, on_sign_out }
                 }
             }
             {children}

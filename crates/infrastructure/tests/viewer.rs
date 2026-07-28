@@ -4,6 +4,7 @@
 use application::{AccountService, GitHubPort};
 use async_trait::async_trait;
 use domain::{AppAction, AppError, AppErrorKind, AppResult, Project, RawIssue, RepoRef, Viewer};
+use infrastructure::{FakeBoardCache, FakeProjectStore, FakeSecureStore};
 
 /// A fake that returns a canned Viewer, standing in for a successful GitHub
 /// identity fetch.
@@ -66,10 +67,14 @@ impl GitHubPort for FailingViewerPort {
 
 #[tokio::test]
 async fn viewer_returns_the_ports_signed_in_identity() {
-    let service = AccountService::new(StubGitHubPort);
+    let service = AccountService::new(
+        FakeSecureStore::empty(),
+        FakeProjectStore::empty(),
+        FakeBoardCache::empty(),
+    );
 
     let viewer = service
-        .viewer()
+        .viewer(&StubGitHubPort)
         .await
         .expect("the port should return a Viewer");
 
@@ -83,10 +88,14 @@ async fn viewer_returns_the_ports_signed_in_identity() {
 
 #[tokio::test]
 async fn viewer_surfaces_a_port_failure_with_operation_context() {
-    let service = AccountService::new(FailingViewerPort);
+    let service = AccountService::new(
+        FakeSecureStore::empty(),
+        FakeProjectStore::empty(),
+        FakeBoardCache::empty(),
+    );
 
     let error = service
-        .viewer()
+        .viewer(&FailingViewerPort)
         .await
         .expect_err("a failing port should surface as an error, not a panic");
 
