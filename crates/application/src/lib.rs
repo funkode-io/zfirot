@@ -398,6 +398,11 @@ pub trait ProjectStorePort: Send + Sync {
     async fn view_mode(&self) -> AppResult<Option<BoardViewMode>>;
     /// Persist the selected board view mode.
     async fn remember_view_mode(&self, mode: BoardViewMode) -> AppAction;
+    /// Clear every account-scoped piece of local state — the last-opened
+    /// project, the tracked-repos list, and the cached recent-projects list —
+    /// in one operation, leaving the theme and view-mode preferences untouched
+    /// (they are not tied to the signed-in Viewer, so they survive signing out).
+    async fn clear_account_data(&self) -> AppAction;
 }
 
 /// Shared stores are stores too, so the composition root can hand the same
@@ -446,6 +451,10 @@ impl<S: ProjectStorePort + ?Sized> ProjectStorePort for Arc<S> {
 
     async fn remember_view_mode(&self, mode: BoardViewMode) -> AppAction {
         (**self).remember_view_mode(mode).await
+    }
+
+    async fn clear_account_data(&self) -> AppAction {
+        (**self).clear_account_data().await
     }
 }
 
@@ -748,23 +757,58 @@ impl<S: SecureStorePort> AuthService<S> {
     }
 }
 
-/// Use-case for the signed-in account: the Viewer's identity, for the account
-/// menu. Backed by a [`GitHubPort`].
-pub struct AccountService<G: GitHubPort> {
-    github: G,
+/// Use-case for the signed-in account: the Viewer's identity for the account
+/// menu, and signing out. Backed by a [`SecureStorePort`] (the token), a
+/// [`ProjectStorePort`] (account-scoped local state), and a [`BoardCachePort`]
+/// (cached board snapshots) — the three sign-out touches. The Viewer fetch
+/// takes its [`GitHubPort`] per call rather than storing one, since sign-out
+/// never needs it: signing out must not require wiring a live GitHub client or
+/// a valid token just to clear local state.
+pub struct AccountService<S: SecureStorePort, P: ProjectStorePort, C: BoardCachePort> {
+    secure_store: S,
+    project_store: P,
+    board_cache: C,
 }
 
-impl<G: GitHubPort> AccountService<G> {
-    pub fn new(github: G) -> Self {
-        Self { github }
+impl<S: SecureStorePort, P: ProjectStorePort, C: BoardCachePort> AccountService<S, P, C> {
+    pub fn new(secure_store: S, project_store: P, board_cache: C) -> Self {
+        Self {
+            secure_store,
+            project_store,
+            board_cache,
+        }
     }
 
     /// The signed-in Viewer (login, name, avatar), for the account menu.
-    pub async fn viewer(&self) -> AppResult<Viewer> {
-        self.github
+    pub async fn viewer<G: GitHubPort>(&self, github: &G) -> AppResult<Viewer> {
+        github
             .viewer()
             .await
             .map_err(|err| err.with_operation("AccountService::viewer"))
+    }
+
+    /// Sign out: remove the stored token, clear account-scoped local state
+    /// (tracked repos, last-opened project, cached recent projects), and clear
+    /// every cached board snapshot — resetting the app to its first-run,
+    /// no-token state. UI preferences (theme, board view mode) are
+    /// deliberately left untouched, since they are not tied to the Viewer.
+    ///
+    /// Each step is best-effort-ordered but not best-effort-tolerant: a failure
+    /// stops the sequence and surfaces immediately, so a partial sign-out is
+    /// never silently swallowed.
+    pub async fn sign_out(&self) -> AppAction {
+        self.secure_store
+            .delete_token()
+            .await
+            .map_err(|err| err.with_operation("AccountService::sign_out"))?;
+        self.project_store
+            .clear_account_data()
+            .await
+            .map_err(|err| err.with_operation("AccountService::sign_out"))?;
+        self.board_cache
+            .clear_all()
+            .await
+            .map_err(|err| err.with_operation("AccountService::sign_out"))
     }
 }
 

@@ -24,8 +24,8 @@ use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
     confirm_classification, last_opened, open_and_track_project, open_board, open_project,
     reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
-    remember_theme_preference, remember_view_mode, secure_store, theme_preference, tracked_repos,
-    untrack_repo, view_mode, viewer as fetch_viewer,
+    remember_theme_preference, remember_view_mode, secure_store, sign_out, theme_preference,
+    tracked_repos, untrack_repo, view_mode, viewer as fetch_viewer,
 };
 use tracing::warn;
 
@@ -94,6 +94,9 @@ pub fn App() -> Element {
     // Set to a client-safe message when confirming a suggested classification
     // fails, shown above the board; cleared on a successful confirm.
     let mut confirm_error = use_signal(|| Option::<String>::None);
+    // Set to a client-safe message when signing out fails, shown above the
+    // current screen (Home or Board); cleared on a successful sign-out.
+    let mut sign_out_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
     // Where the user wants to be; starts at `Auto` so the last-opened project
@@ -607,6 +610,30 @@ pub fn App() -> Element {
         },
     );
 
+    // Sign out: remove the token and account-scoped local state, then
+    // re-resolve the view — `resolve_view` finds no token and routes to the
+    // paste-token screen. Session-only signals (the fetched Viewer, the
+    // retained board snapshot, revalidation guards) are reset so a fresh
+    // sign-in starts clean rather than reusing the prior account's state.
+    let on_sign_out = move |_| {
+        spawn(async move {
+            match sign_out().await {
+                Ok(()) => {
+                    sign_out_error.set(None);
+                    viewer.set(None);
+                    viewer_fetch_attempted.set(false);
+                    board_snapshot.set(None);
+                    prefetched_board.set(None);
+                    board_revalidated.set(None);
+                    revalidated.set(false);
+                    nav.set(Nav::Auto);
+                    reload += 1;
+                }
+                Err(error) => sign_out_error.set(Some(error.to_string())),
+            }
+        });
+    };
+
     // Back to the project picker. Persistence is untouched, so the next launch
     // still reopens the last project; this only changes the current session.
     // Reset the revalidate guard so returning to Home refreshes the list again.
@@ -687,6 +714,7 @@ pub fn App() -> Element {
                     on_clear_cache_repo,
                     viewer: viewer(),
                     on_change_token: on_open_change_token,
+                    on_sign_out,
                     div { class: "flex justify-center py-16",
                         Spinner { label: "Loading board…" }
                     }
@@ -704,6 +732,10 @@ pub fn App() -> Element {
                     on_untrack,
                     viewer: viewer(),
                     on_change_token: on_open_change_token,
+                    on_sign_out,
+                }
+                if let Some(message) = sign_out_error() {
+                    ErrorBanner { message }
                 }
             },
             (Some(View::NeedToken { reason }), ..) => rsx! {
@@ -749,10 +781,14 @@ pub fn App() -> Element {
                         on_clear_cache_repo,
                         viewer: viewer(),
                         on_change_token: on_open_change_token,
+                        on_sign_out,
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
                         }
                         if let Some(message) = confirm_error() {
+                            ErrorBanner { message }
+                        }
+                        if let Some(message) = sign_out_error() {
                             ErrorBanner { message }
                         }
                         BoardSummaryBar { summary }
@@ -778,6 +814,7 @@ pub fn App() -> Element {
                     on_clear_cache_repo,
                     viewer: viewer(),
                     on_change_token: on_open_change_token,
+                    on_sign_out,
                     ErrorBanner { message: message.clone() }
                 }
             },
@@ -1061,6 +1098,7 @@ fn BoardShell(
     #[props(default)] on_toggle_graph: Option<EventHandler<()>>,
     #[props(default)] viewer: Option<Viewer>,
     on_change_token: EventHandler<()>,
+    on_sign_out: EventHandler<()>,
 ) -> Element {
     let total_cache = format_bytes(cache_usage.total_bytes);
     rsx! {
@@ -1179,7 +1217,7 @@ fn BoardShell(
                             }
                         }
                     }
-                    AccountMenu { viewer, on_change_token }
+                    AccountMenu { viewer, on_change_token, on_sign_out }
                 }
             }
             {children}

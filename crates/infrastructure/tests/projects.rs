@@ -84,6 +84,10 @@ impl ProjectStorePort for CountingProjectStore {
     async fn remember_view_mode(&self, _mode: BoardViewMode) -> AppAction {
         Ok(())
     }
+
+    async fn clear_account_data(&self) -> AppAction {
+        Ok(())
+    }
 }
 
 /// A GitHub port that returns projects in a deliberately *unsorted* order, so

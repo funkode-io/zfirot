@@ -269,5 +269,20 @@ pub async fn confirm_classification(
 pub async fn viewer() -> AppResult<Viewer> {
     let token = AuthService::new(secure_store()).require_token().await?;
     let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
-    AccountService::new(port).viewer().await
+    AccountService::new(secure_store(), project_store()?, board_cache()?)
+        .viewer(&port)
+        .await
+}
+
+/// Sign out: remove the stored token, clear account-scoped local state
+/// (tracked repos, last-opened project, cached recent projects), and clear
+/// every cached board snapshot — resetting the app to its first-run, no-token
+/// state. UI preferences (theme, board view mode) are deliberately left
+/// untouched. A purely local operation: no token or network is needed, so
+/// signing out still works even if the stored token has already gone missing
+/// or gone bad.
+pub async fn sign_out() -> AppAction {
+    AccountService::new(secure_store(), project_store()?, board_cache()?)
+        .sign_out()
+        .await
 }
