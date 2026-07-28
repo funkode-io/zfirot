@@ -24,6 +24,7 @@ pub fn HomeScreen(
     on_open_discovered: EventHandler<RepoRef>,
     on_open_goto: EventHandler<RepoRef>,
     on_untrack: EventHandler<RepoRef>,
+    on_change_token: EventHandler<()>,
     #[props(default)] viewer: Option<Viewer>,
 ) -> Element {
     let mut show_all = use_signal(|| false);
@@ -152,7 +153,7 @@ pub fn HomeScreen(
                         "Search your projects, or type a full owner/repo to open it directly."
                     }
                 }
-                AccountMenu { viewer }
+                AccountMenu { viewer, on_change_token }
             }
 
             div { class: "mb-6 w-full max-w-sm",
