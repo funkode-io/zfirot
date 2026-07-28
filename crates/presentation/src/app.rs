@@ -140,6 +140,18 @@ pub fn App() -> Element {
     // Guards the Viewer fetch so it runs once per app session, not on every
     // `reload` bump.
     let mut viewer_fetch_attempted = use_signal(|| false);
+    // True while the Change-token (Rotate) screen is shown as a full-screen
+    // overlay in front of whatever was on screen (Home or a board). Toggled by
+    // the account menu's "Change token…" item; Cancel or a successful save
+    // clears it, returning to that same underlying view untouched.
+    let mut show_change_token = use_signal(|| false);
+    // Cleared on a successful Change-token save, set to a client-safe message
+    // when the pasted token is rejected. Independent from `token_error` (the
+    // first-launch paste-token screen) so the two flows never share state.
+    let mut change_token_error = use_signal(|| Option::<String>::None);
+    // True while a freshly-pasted replacement token is being validated and
+    // persisted, driving the Change-token screen's own spinner.
+    let mut change_token_saving = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -467,6 +479,40 @@ pub fn App() -> Element {
         });
     };
 
+    // Open the Change-token (Rotate) overlay from the account menu, on top of
+    // whatever is currently shown (Home or a board).
+    let on_open_change_token = move |_| {
+        change_token_error.set(None);
+        show_change_token.set(true);
+    };
+
+    // Cancel: dismiss the overlay without touching the stored token, returning
+    // to exactly the view that was showing underneath.
+    let on_change_token_cancel = move |_| {
+        change_token_error.set(None);
+        show_change_token.set(false);
+    };
+
+    // Save the replacement token via the existing `AuthService::save_token`
+    // (an atomic overwrite — no prior delete — so the old token keeps working
+    // until this succeeds). On success, dismiss the overlay: the underlying
+    // Home/board view and all local state (tracked repos, caches, theme, view
+    // mode) are untouched, since the same Viewer is still signed in.
+    let on_change_token_submit = move |raw: String| {
+        spawn(async move {
+            change_token_saving.set(true);
+            let auth = AuthService::new(secure_store());
+            match auth.save_token(&raw).await {
+                Ok(()) => {
+                    change_token_error.set(None);
+                    show_change_token.set(false);
+                }
+                Err(error) => change_token_error.set(Some(error.to_string())),
+            }
+            change_token_saving.set(false);
+        });
+    };
+
     let on_open_discovered = use_callback(move |repo: RepoRef| {
         spawn(async move {
             // Persist the choice (best-effort) and navigate to its board.
@@ -614,7 +660,17 @@ pub fn App() -> Element {
         document::Title { "Zfirot" }
         document::Stylesheet { href: TAILWIND_CSS }
 
-        match (&*view.read_unchecked(), board_loading, nav()) {
+        if show_change_token() {
+            TokenScreen {
+                title: "Change your Personal Access Token".to_string(),
+                description: "Replace the token Zfirot uses to talk to GitHub — for example when a new feature needs a permission your current token doesn't grant yet. Your current token keeps working until the new one is saved, so cancelling leaves everything exactly as it was.".to_string(),
+                error: change_token_error(),
+                saving: change_token_saving(),
+                on_submit: on_change_token_submit,
+                on_cancel: on_change_token_cancel,
+            }
+        } else {
+            match (&*view.read_unchecked(), board_loading, nav()) {
             // Navigating to a board we do not have yet: opening a project from
             // the home screen or reopening one on launch. Show the board chrome
             // with a spinner so the navigation has immediate feedback. A board
@@ -630,6 +686,7 @@ pub fn App() -> Element {
                     on_clear_cache_all,
                     on_clear_cache_repo,
                     viewer: viewer(),
+                    on_change_token: on_open_change_token,
                     div { class: "flex justify-center py-16",
                         Spinner { label: "Loading board…" }
                     }
@@ -646,6 +703,7 @@ pub fn App() -> Element {
                     on_open_goto,
                     on_untrack,
                     viewer: viewer(),
+                    on_change_token: on_open_change_token,
                 }
             },
             (Some(View::NeedToken { reason }), ..) => rsx! {
@@ -690,6 +748,7 @@ pub fn App() -> Element {
                         on_clear_cache_all,
                         on_clear_cache_repo,
                         viewer: viewer(),
+                        on_change_token: on_open_change_token,
                         if let Some(message) = assign_error() {
                             ErrorBanner { message }
                         }
@@ -718,12 +777,14 @@ pub fn App() -> Element {
                     on_clear_cache_all,
                     on_clear_cache_repo,
                     viewer: viewer(),
+                    on_change_token: on_open_change_token,
                     ErrorBanner { message: message.clone() }
                 }
             },
             (None, ..) => rsx! {
                 LoadingScreen { label: "Loading…" }
             },
+            }
         }
     }
 }
@@ -999,6 +1060,7 @@ fn BoardShell(
     #[props(default)] graph_view: bool,
     #[props(default)] on_toggle_graph: Option<EventHandler<()>>,
     #[props(default)] viewer: Option<Viewer>,
+    on_change_token: EventHandler<()>,
 ) -> Element {
     let total_cache = format_bytes(cache_usage.total_bytes);
     rsx! {
@@ -1117,7 +1179,7 @@ fn BoardShell(
                             }
                         }
                     }
-                    AccountMenu { viewer }
+                    AccountMenu { viewer, on_change_token }
                 }
             }
             {children}
