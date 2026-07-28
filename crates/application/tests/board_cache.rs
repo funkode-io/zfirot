@@ -7,7 +7,7 @@ use application::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use domain::{AppAction, AppResult, Project, RawIssue, RepoRef};
+use domain::{AppAction, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RepoRef, SliceState};
 
 #[derive(Default)]
 struct CountingBoardCache {
@@ -493,4 +493,86 @@ async fn reconcile_full_load_drops_ghost_issue_from_cache() {
         2,
         "changed reconcile should rewrite the cache with the full-load snapshot"
     );
+}
+
+/// Regression test for the bug behind a Slice showing without its linked PR:
+/// GitHub does not bump an issue's own `updatedAt` when a PR is opened with a
+/// closing reference to it, so a delta fetched via `load_issues_since`'s
+/// `since` filter can miss the PR entirely (the issue simply never appears in
+/// the delta payload). Only a full reconcile — which re-derives every issue's
+/// `closedByPullRequestsReferences` from scratch — is guaranteed to catch it.
+#[tokio::test]
+async fn delta_refresh_misses_a_newly_linked_pr_but_reconcile_catches_it() {
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let cache = Arc::new(CountingBoardCache::default());
+    let linked_pr = LinkedPrRef {
+        number: 99,
+        author: Some("carlos-verdes".to_string()),
+        title: "Fix the thing".to_string(),
+        url: "https://github.com/funkode-io/zfirot/pull/99".to_string(),
+        pr_status: PrStatus::AwaitingReview,
+        conflicts: false,
+        ci_failing: false,
+        unresolved_comment_count: 0,
+    };
+    let with_linked_pr = RawIssue {
+        linked_prs: vec![linked_pr],
+        ..open_issue(60, "Ready Slice")
+    };
+
+    let service = CachedBoardService::new(
+        SequencePort::new(
+            vec![
+                // Cold open: no linked PR yet.
+                vec![open_issue(60, "Ready Slice")],
+                // Full reconcile: GitHub's current state, PR now linked.
+                vec![with_linked_pr],
+            ],
+            // The background delta: empty, exactly as GitHub would return it
+            // when the issue's own `updatedAt` never advanced.
+            vec![vec![]],
+        ),
+        cache.clone(),
+    );
+
+    let snapshot = match service.open(&repo).await.expect("cold open should seed") {
+        BoardOpen::Cold(loaded) => {
+            assert_eq!(
+                loaded.board.slices[0].state,
+                SliceState::Ready,
+                "no linked PR yet: the Slice starts Ready"
+            );
+            loaded.snapshot
+        }
+        BoardOpen::Cached(_) => panic!("first open is cold"),
+    };
+
+    let refresh = service
+        .refresh_cached(&repo, &snapshot)
+        .await
+        .expect("delta refresh should succeed");
+    let snapshot_after_delta = match refresh {
+        BoardRefresh::Unchanged(returned) => returned,
+        BoardRefresh::Changed(_) => {
+            panic!("an empty delta must not fabricate a change")
+        }
+    };
+
+    let reconcile = service
+        .reconcile_cached(&repo, &snapshot_after_delta)
+        .await
+        .expect("reconcile should succeed");
+
+    match reconcile {
+        BoardRefresh::Changed(loaded) => {
+            assert_eq!(
+                loaded.board.slices[0].state,
+                SliceState::Wip,
+                "a full reconcile must pick up the linked PR the delta could not see"
+            );
+        }
+        BoardRefresh::Unchanged(_) => {
+            panic!("reconcile must catch a linked PR the delta window missed")
+        }
+    }
 }

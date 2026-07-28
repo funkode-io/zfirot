@@ -253,7 +253,14 @@ pub fn App() -> Element {
     });
 
     // Stale-while-revalidate for project boards: if a board was painted from the
-    // local cache, refresh it once in the background and repaint only if changed.
+    // local cache, refresh it once in the background — a fast delta first, then
+    // a silent authoritative reconcile (same two-phase pattern as the manual
+    // Refresh button) — and repaint only if either phase finds a real change.
+    // The reconcile matters here specifically: GitHub does not bump an issue's
+    // own `updatedAt` when a PR is opened with a closing reference to it, so a
+    // just-opened linked PR can be invisible to the delta's `since` filter for
+    // as long as the board stays open, until the reconcile re-derives it from a
+    // full load.
     use_effect(move || {
         let cached_board = match view.read().as_ref() {
             Some(View::Board {
@@ -270,24 +277,24 @@ pub fn App() -> Element {
             }
             board_revalidated.set(Some(repo.clone()));
             spawn(async move {
-                match refresh_board(&repo, &snapshot).await {
-                    Ok(BoardRefresh::Changed(loaded)) => {
-                        board_snapshot.set(Some(loaded.snapshot.clone()));
-                        prefetched_board.set(Some(View::Board {
-                            repo,
-                            board: loaded.board,
-                            loaded_at: now_hms(),
-                            snapshot: loaded.snapshot,
-                            from_cache: false,
-                        }));
-                        reload += 1;
-                    }
-                    // Facts unchanged: don't repaint, but adopt the snapshot so
-                    // its advanced `fetched_at` moves the next delta window on.
-                    Ok(BoardRefresh::Unchanged(snapshot)) => {
-                        board_snapshot.set(Some(snapshot));
-                    }
-                    Err(_) => {}
+                if let Some(base) = delta_refresh(
+                    repo.clone(),
+                    snapshot,
+                    board_snapshot,
+                    prefetched_board,
+                    reload,
+                )
+                .await
+                {
+                    authoritative_reconcile(
+                        repo,
+                        base,
+                        board_snapshot,
+                        prefetched_board,
+                        reload,
+                        reconciling,
+                    )
+                    .await;
                 }
             });
         }
@@ -410,52 +417,27 @@ pub fn App() -> Element {
                 // above and the flag being set inside the task.
                 board_refreshing.set(true);
                 spawn(async move {
-                    // Fast path: delta refresh, repaint from the fetched board.
-                    let base = match refresh_board(&repo, &snapshot).await {
-                        Ok(BoardRefresh::Changed(loaded)) => {
-                            board_snapshot.set(Some(loaded.snapshot.clone()));
-                            prefetched_board.set(Some(View::Board {
-                                repo: repo.clone(),
-                                board: loaded.board,
-                                loaded_at: now_hms(),
-                                snapshot: loaded.snapshot.clone(),
-                                from_cache: false,
-                            }));
-                            reload += 1;
-                            Some(loaded.snapshot)
-                        }
-                        // Facts unchanged: adopt the snapshot so its advanced
-                        // `fetched_at` moves the next delta window on.
-                        Ok(BoardRefresh::Unchanged(snapshot)) => {
-                            board_snapshot.set(Some(snapshot.clone()));
-                            Some(snapshot)
-                        }
-                        Err(_) => None,
-                    };
+                    let base = delta_refresh(
+                        repo.clone(),
+                        snapshot,
+                        board_snapshot,
+                        prefetched_board,
+                        reload,
+                    )
+                    .await;
                     // Spinner clears after the fast delta paint.
                     board_refreshing.set(false);
 
-                    // Authoritative slow path: a silent one-shot reconcile heals
-                    // what the delta cannot observe. Skipped when a reconcile is
-                    // already running; repaints only on a real difference.
                     if let Some(base) = base {
-                        if !reconciling() {
-                            reconciling.set(true);
-                            if let Ok(BoardRefresh::Changed(loaded)) =
-                                reconcile_board(&repo, &base).await
-                            {
-                                board_snapshot.set(Some(loaded.snapshot.clone()));
-                                prefetched_board.set(Some(View::Board {
-                                    repo,
-                                    board: loaded.board,
-                                    loaded_at: now_hms(),
-                                    snapshot: loaded.snapshot,
-                                    from_cache: false,
-                                }));
-                                reload += 1;
-                            }
-                            reconciling.set(false);
-                        }
+                        authoritative_reconcile(
+                            repo,
+                            base,
+                            board_snapshot,
+                            prefetched_board,
+                            reload,
+                            reconciling,
+                        )
+                        .await;
                     }
                 });
                 return;
@@ -906,6 +888,81 @@ fn is_auth_failure(kind: AppErrorKind) -> bool {
 /// snapshot is loaded so it can be shown as the "last updated" timestamp.
 fn now_hms() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// The fast half of a two-phase board refresh: a delta fetch that repaints
+/// immediately on a real change (`prefetched_board` + `reload`) and otherwise
+/// just advances the retained snapshot's `fetched_at` so the next delta window
+/// moves forward. Returns the resulting snapshot on success (`Changed` or
+/// `Unchanged`), for the caller to feed into [`authoritative_reconcile`];
+/// `None` on a fetch failure, so the caller skips reconciling from a result
+/// that may not reflect reality. Shared by the auto-revalidate-on-cache-open
+/// effect and the manual Refresh button, so both apply the same rule.
+async fn delta_refresh(
+    repo: RepoRef,
+    snapshot: BoardSnapshot,
+    mut board_snapshot: Signal<Option<BoardSnapshot>>,
+    mut prefetched_board: Signal<Option<View>>,
+    mut reload: Signal<u32>,
+) -> Option<BoardSnapshot> {
+    match refresh_board(&repo, &snapshot).await {
+        Ok(BoardRefresh::Changed(loaded)) => {
+            board_snapshot.set(Some(loaded.snapshot.clone()));
+            prefetched_board.set(Some(View::Board {
+                repo,
+                board: loaded.board,
+                loaded_at: now_hms(),
+                snapshot: loaded.snapshot.clone(),
+                from_cache: false,
+            }));
+            reload += 1;
+            Some(loaded.snapshot)
+        }
+        // Facts unchanged: don't repaint, but adopt the snapshot so its
+        // advanced `fetched_at` moves the next delta window on.
+        Ok(BoardRefresh::Unchanged(snapshot)) => {
+            board_snapshot.set(Some(snapshot.clone()));
+            Some(snapshot)
+        }
+        Err(_) => None,
+    }
+}
+
+/// The slow, authoritative half of a two-phase board refresh: a silent full
+/// reconcile that heals drift the delta cannot observe. This is not only for
+/// hard-deleted/transferred issues (the original motivation for the slow
+/// background reconcile loop): GitHub does not bump an issue's own
+/// `updatedAt` when a PR is opened with a closing reference to it, so a
+/// Slice's brand-new linked PR can be invisible to every `load_issues_since`
+/// delta — including the auto-revalidate-on-open one — until a full load
+/// re-derives `closedByPullRequestsReferences` from scratch. Skipped when a
+/// reconcile is already running; repaints (`prefetched_board` + `reload`) only
+/// on a real difference. Shared by the same two call sites as
+/// [`delta_refresh`].
+async fn authoritative_reconcile(
+    repo: RepoRef,
+    base: BoardSnapshot,
+    mut board_snapshot: Signal<Option<BoardSnapshot>>,
+    mut prefetched_board: Signal<Option<View>>,
+    mut reload: Signal<u32>,
+    mut reconciling: Signal<bool>,
+) {
+    if reconciling() {
+        return;
+    }
+    reconciling.set(true);
+    if let Ok(BoardRefresh::Changed(loaded)) = reconcile_board(&repo, &base).await {
+        board_snapshot.set(Some(loaded.snapshot.clone()));
+        prefetched_board.set(Some(View::Board {
+            repo,
+            board: loaded.board,
+            loaded_at: now_hms(),
+            snapshot: loaded.snapshot,
+            from_cache: false,
+        }));
+        reload += 1;
+    }
+    reconciling.set(false);
 }
 
 /// The board chrome (header + logo) wrapping either the columns or an error.
