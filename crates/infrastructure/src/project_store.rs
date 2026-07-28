@@ -317,6 +317,30 @@ impl ProjectStorePort for FileProjectStore {
                 .with_source(err)
         })
     }
+
+    async fn clear_account_data(&self) -> AppAction {
+        // Best-effort per file, but a genuine (non-NotFound) failure on any of
+        // them stops the sequence and surfaces rather than leaving a partial
+        // sign-out silently in place. Theme and view-mode files are
+        // deliberately left untouched.
+        for path in [
+            self.path.clone(),
+            self.tracked_repos_path(),
+            self.recent_projects_path(),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(AppError::internal("Could not clear account data.")
+                        .with_operation("FileProjectStore::clear_account_data")
+                        .with_context("path", path.display().to_string())
+                        .with_source(err))
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// An in-memory [`ProjectStorePort`] for tests.
@@ -411,6 +435,13 @@ impl ProjectStorePort for FakeProjectStore {
 
     async fn remember_view_mode(&self, mode: BoardViewMode) -> AppAction {
         *self.view_mode.lock().expect("lock poisoned") = Some(mode);
+        Ok(())
+    }
+
+    async fn clear_account_data(&self) -> AppAction {
+        *self.last_opened.lock().expect("lock poisoned") = None;
+        *self.cached_projects.lock().expect("lock poisoned") = None;
+        self.tracked_repos.lock().expect("lock poisoned").clear();
         Ok(())
     }
 }

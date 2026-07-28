@@ -3,10 +3,13 @@ use domain::Viewer;
 
 /// The signed-in account menu: shows the Viewer's avatar and `@login` (a
 /// generic icon while the Viewer is loading or could not be fetched), and
-/// holds the account-level actions — Change token, Sign out — added by later
-/// tickets. Callback-only: it neither fetches nor persists anything.
+/// holds the account-level actions — currently Sign out, guarded by a confirm
+/// dialog naming exactly what is removed and what is kept. Callback-only: it
+/// neither fetches nor persists anything; confirming just emits `on_sign_out`.
 #[component]
-pub fn AccountMenu(viewer: Option<Viewer>) -> Element {
+pub fn AccountMenu(viewer: Option<Viewer>, on_sign_out: EventHandler<()>) -> Element {
+    let mut confirm_open = use_signal(|| false);
+
     rsx! {
         div { class: "dropdown dropdown-end",
             div {
@@ -39,6 +42,61 @@ pub fn AccountMenu(viewer: Option<Viewer>) -> Element {
                         span { "Signed in" }
                     }
                 }
+                li {
+                    button {
+                        class: "text-error",
+                        onclick: move |_| confirm_open.set(true),
+                        span { class: "icon-[lucide--log-out] size-4" }
+                        "Sign out"
+                    }
+                }
+            }
+        }
+        if confirm_open() {
+            SignOutConfirmDialog {
+                on_cancel: move |_| confirm_open.set(false),
+                on_confirm: move |_| {
+                    confirm_open.set(false);
+                    on_sign_out.call(());
+                },
+            }
+        }
+    }
+}
+
+/// The confirm dialog gating "Sign out", naming exactly what it removes
+/// (token, tracked repos, last-opened project, cached projects, cached
+/// boards) and what it keeps (theme, board view mode), per ADR 0005.
+#[component]
+fn SignOutConfirmDialog(on_cancel: EventHandler<()>, on_confirm: EventHandler<()>) -> Element {
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box",
+                h3 { class: "text-lg font-bold", "Sign out?" }
+                p { class: "py-2 text-sm",
+                    "This removes your Personal Access Token, tracked repos, the "
+                    "last-opened project, cached recent projects, and cached "
+                    "board snapshots."
+                }
+                p { class: "text-sm opacity-70",
+                    "Your theme and board view preferences are kept."
+                }
+                div { class: "modal-action",
+                    button {
+                        class: "btn btn-ghost",
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-error",
+                        onclick: move |_| on_confirm.call(()),
+                        "Sign out"
+                    }
+                }
+            }
+            div {
+                class: "modal-backdrop",
+                onclick: move |_| on_cancel.call(()),
             }
         }
     }
