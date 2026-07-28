@@ -1,13 +1,16 @@
 use dioxus::prelude::*;
-use domain::{filter_home, visible_tracked_repos, HomeFilter, Project, RepoRef};
+use domain::{filter_home, visible_tracked_repos, HomeFilter, Project, RepoRef, Viewer};
+
+use crate::components::AccountMenu;
 
 /// How many recent projects to show before the user clicks "Show more".
 const INITIAL_VISIBLE: usize = 6;
 
 /// The home screen: a search box over the discovered projects with a gated
 /// direct-open action. Emits `on_open_discovered` when a matching project is
-/// clicked, and `on_open_goto` when the go-to action is triggered. Callback-only
-/// — it neither fetches nor persists anything.
+/// clicked, and `on_open_goto` when the go-to action is triggered. Shows the
+/// account menu (`viewer`) in its header. Callback-only — it neither fetches
+/// nor persists anything.
 ///
 /// Typing filters the visible projects by case-insensitive substring on
 /// `owner/name`. When nothing matches but the query is a valid `owner/repo`, a
@@ -21,6 +24,7 @@ pub fn HomeScreen(
     on_open_discovered: EventHandler<RepoRef>,
     on_open_goto: EventHandler<RepoRef>,
     on_untrack: EventHandler<RepoRef>,
+    #[props(default)] viewer: Option<Viewer>,
 ) -> Element {
     let mut show_all = use_signal(|| false);
     let mut query = use_signal(String::new);
@@ -141,11 +145,14 @@ pub fn HomeScreen(
 
     rsx! {
         div { class: "min-h-screen bg-base-100 p-6",
-            header { class: "mb-6",
-                h1 { class: "text-2xl font-bold", "Recent projects" }
-                p { class: "text-sm opacity-70",
-                    "Search your projects, or type a full owner/repo to open it directly."
+            header { class: "flex items-start justify-between mb-6",
+                div {
+                    h1 { class: "text-2xl font-bold", "Recent projects" }
+                    p { class: "text-sm opacity-70",
+                        "Search your projects, or type a full owner/repo to open it directly."
+                    }
                 }
+                AccountMenu { viewer }
             }
 
             div { class: "mb-6 w-full max-w-sm",

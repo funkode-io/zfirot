@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use domain::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AppAction,
     AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken, IssueClassification, Prd,
-    PrdRef, Project, RawIssue, RawSlice, RepoRef, Slice, ThemePreference,
+    PrdRef, Project, RawIssue, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +58,17 @@ pub trait GitHubPort: Send + Sync {
     /// Add a label to an issue, so confirming a suggested classification tags it
     /// (`prd` or `slice`) and the next poll reclassifies it onto the board.
     async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction;
+
+    /// The authenticated Viewer (login, name, avatar), for the account menu.
+    ///
+    /// Defaults to a clear failure so adapters that do not (yet) support it need
+    /// no change; [`AccountService::viewer`] simply propagates that error, and
+    /// the presentation layer treats any failure as "viewer unknown" — showing
+    /// a generic icon rather than blocking on it.
+    async fn viewer(&self) -> AppResult<Viewer> {
+        Err(AppError::internal("This adapter cannot fetch the viewer")
+            .with_operation("GitHubPort::viewer"))
+    }
 }
 
 /// Shared ports are ports too, so the composition root can hand the same
@@ -86,6 +97,10 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
 
     async fn add_label(&self, repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
         (**self).add_label(repo, issue_number, label).await
+    }
+
+    async fn viewer(&self) -> AppResult<Viewer> {
+        (**self).viewer().await
     }
 }
 
@@ -730,6 +745,26 @@ impl<S: SecureStorePort> AuthService<S> {
             .delete_token()
             .await
             .map_err(|err| err.with_operation("AuthService::clear_token"))
+    }
+}
+
+/// Use-case for the signed-in account: the Viewer's identity, for the account
+/// menu. Backed by a [`GitHubPort`].
+pub struct AccountService<G: GitHubPort> {
+    github: G,
+}
+
+impl<G: GitHubPort> AccountService<G> {
+    pub fn new(github: G) -> Self {
+        Self { github }
+    }
+
+    /// The signed-in Viewer (login, name, avatar), for the account menu.
+    pub async fn viewer(&self) -> AppResult<Viewer> {
+        self.github
+            .viewer()
+            .await
+            .map_err(|err| err.with_operation("AccountService::viewer"))
     }
 }
 
