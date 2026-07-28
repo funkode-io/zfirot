@@ -943,19 +943,7 @@ pub fn parse_viewer_response(body: &str) -> AppResult<Viewer> {
     })?;
 
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
-        let message = errors
-            .into_iter()
-            .map(|error| error.message)
-            .collect::<Vec<_>>()
-            .join("; ");
-        let error = if message.to_lowercase().contains("rate limit") {
-            AppError::rate_limited("GitHub rate limit exceeded")
-        } else {
-            AppError::internal("GitHub reported a query error")
-        };
-        return Err(error
-            .with_operation("parse_viewer_response")
-            .with_context("errors", message));
+        return Err(viewer_error(errors, "parse_viewer_response"));
     }
 
     let node = response.data.map(|data| data.viewer).ok_or_else(|| {
@@ -967,6 +955,43 @@ pub fn parse_viewer_response(body: &str) -> AppResult<Viewer> {
         name: node.name,
         avatar_url: node.avatar_url,
     })
+}
+
+/// Map a GraphQL `errors` array from a viewer round trip to an [`AppError`] the
+/// caller can act on, joining the messages for context.
+///
+/// A `FORBIDDEN` here means the token cannot read even its own basic profile
+/// (e.g. a token GitHub has otherwise rejected or under-scoped), so it is
+/// classified the same way `assign_error`/`label_error` classify a missing
+/// grant — as `Forbidden`, not `Internal` — so callers can route it through the
+/// same Under-scoped handling as every other GitHub operation.
+fn viewer_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError {
+    let forbidden = errors.iter().any(|error| {
+        matches!(error.error_type.as_deref(), Some("FORBIDDEN"))
+            || error
+                .message
+                .to_lowercase()
+                .contains("not accessible by personal access token")
+    });
+    let message = errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let lowered = message.to_lowercase();
+    let error = if forbidden {
+        AppError::forbidden(
+            "GitHub denied reading your profile. Your fine-grained token may be \
+             missing a required permission.",
+        )
+    } else if lowered.contains("rate limit") {
+        AppError::rate_limited("GitHub rate limit exceeded")
+    } else {
+        AppError::internal("GitHub reported a query error")
+    };
+    error
+        .with_operation(operation)
+        .with_context("errors", message)
 }
 
 /// Map a repository node to the project the app tracks. A fork stands in for its
@@ -1628,6 +1653,31 @@ mod tests {
         let error = parse_viewer_response(body).expect_err("a rate-limit error should fail");
 
         assert_eq!(error.kind(), AppErrorKind::RateLimited);
+    }
+
+    #[test]
+    fn parse_viewer_maps_forbidden_to_forbidden_not_internal() {
+        let body = r#"{
+            "data": null,
+            "errors": [
+                { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token" }
+            ]
+        }"#;
+
+        let error = parse_viewer_response(body).expect_err("a FORBIDDEN response should fail");
+
+        assert_eq!(error.kind(), AppErrorKind::Forbidden);
+        // GitHub's raw text must not leak into the user-facing message...
+        let display = error.to_string();
+        assert!(
+            !display.contains("personal access token"),
+            "GitHub's raw text must not reach the user-facing message: {display}"
+        );
+        // ...but is kept for diagnostics in the error context instead.
+        assert!(
+            format!("{error:?}").contains("personal access token"),
+            "GitHub's raw text should be attached as diagnostic context: {error:?}"
+        );
     }
 
     #[test]
