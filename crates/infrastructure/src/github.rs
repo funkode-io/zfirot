@@ -749,6 +749,9 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
                     .to_lowercase()
                     .contains("could not resolve to a repository")
         });
+        let forbidden = errors
+            .iter()
+            .any(|error| error.error_type.as_deref() == Some("FORBIDDEN"));
         let message = errors
             .into_iter()
             .map(|error| error.message)
@@ -756,6 +759,12 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
             .join("; ");
         let error = if not_found {
             AppError::not_found("Repository not found or not visible to the token")
+        } else if forbidden {
+            // The whole repository (not just an optional field) is Forbidden —
+            // e.g. a fine-grained token with no Issues permission at all. Must
+            // classify Forbidden, not Internal, so CredentialFailure::UnderScoped
+            // routes to Rotate instead of a generic error.
+            AppError::forbidden("The token lacks access to this repository")
         } else if message.to_lowercase().contains("rate limit") {
             AppError::rate_limited("GitHub rate limit exceeded")
         } else {
@@ -862,12 +871,21 @@ pub fn parse_projects_response(body: &str) -> AppResult<(Vec<Project>, Option<St
     })?;
 
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        let forbidden = errors
+            .iter()
+            .any(|error| error.error_type.as_deref() == Some("FORBIDDEN"));
         let message = errors
             .into_iter()
             .map(|error| error.message)
             .collect::<Vec<_>>()
             .join("; ");
-        let error = if message.to_lowercase().contains("rate limit") {
+        let error = if forbidden {
+            // The token cannot list repositories at all (e.g. missing the
+            // Metadata/Contents permission). Must classify Forbidden, not
+            // Internal, so CredentialFailure::UnderScoped routes to Rotate
+            // instead of a generic error.
+            AppError::forbidden("The token lacks access to your repositories")
+        } else if message.to_lowercase().contains("rate limit") {
             AppError::rate_limited("GitHub rate limit exceeded")
         } else {
             AppError::internal("GitHub reported a query error")
@@ -1666,6 +1684,18 @@ mod tests {
             "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to a repository" } ] }"#;
         let error = parse_issues_response(body).expect_err("absent repository must fail");
         assert_eq!(error.kind(), AppErrorKind::NotFound);
+    }
+
+    #[test]
+    fn parse_issues_maps_a_whole_repository_forbidden_to_forbidden_not_internal() {
+        // A Forbidden GraphQL error (token lacks a permission the whole query
+        // needs, e.g. Issues: Read) must classify as Forbidden so the
+        // CredentialFailure::UnderScoped routing actually triggers — falling
+        // through to Internal would show a generic error instead of Rotate.
+        let body = r#"{ "data": { "repository": null },
+            "errors": [ { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token" } ] }"#;
+        let error = parse_issues_response(body).expect_err("a FORBIDDEN response should fail");
+        assert_eq!(error.kind(), AppErrorKind::Forbidden);
     }
 
     /// A minimal `RawIssueNode`-shaped JSON body, for embedding inside a pull

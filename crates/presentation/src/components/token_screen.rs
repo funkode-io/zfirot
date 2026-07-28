@@ -126,16 +126,36 @@ pub fn TokenScreen(
 /// containment match in either direction since GitHub's own wording and this
 /// screen's copy are not guaranteed to align character-for-character — e.g. a
 /// missing permission of `"Issues"` matches the `"Issues — Read and write"`
-/// line, and a fuller `"Issues: Read and write"` would too.
+/// line, and a fuller `"Issues: Read and write"` matches too: punctuation
+/// (`:`, `—`, `-`, ...) is normalized to spaces before comparing so wording
+/// differences in separators never block a real match.
 fn names_permission(permission_line: &str, missing_permission: Option<&str>) -> bool {
     match missing_permission {
         Some(missing) if !missing.trim().is_empty() => {
-            let line = permission_line.to_lowercase();
-            let missing = missing.to_lowercase();
+            let line = normalize_for_matching(permission_line);
+            let missing = normalize_for_matching(missing);
             line.contains(&missing) || missing.contains(&line)
         }
         _ => false,
     }
+}
+
+/// Lowercase, with every run of non-alphanumeric characters collapsed to a
+/// single space, so `"Issues: Read and write"` and `"Issues — Read and write"`
+/// compare as the same words regardless of punctuation.
+fn normalize_for_matching(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut last_was_space = false;
+    for ch in text.to_lowercase().chars() {
+        if ch.is_alphanumeric() {
+            normalized.push(ch);
+            last_was_space = false;
+        } else if !last_was_space {
+            normalized.push(' ');
+            last_was_space = true;
+        }
+    }
+    normalized.trim().to_string()
 }
 
 #[cfg(test)]
@@ -152,6 +172,14 @@ mod tests {
         assert!(names_permission(
             "Pull requests — Read-only",
             Some("pull requests")
+        ));
+    }
+
+    #[test]
+    fn matches_despite_different_punctuation_between_the_wordings() {
+        assert!(names_permission(
+            "Issues — Read and write",
+            Some("Issues: Read and write")
         ));
     }
 

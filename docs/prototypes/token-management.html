@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zfirot — token management prototype</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css" />
+  <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+  <style>
+    /* Map the app's `icon-[lucide--x]` idiom onto iconify for the prototype. */
+    .ico { width: 1.25rem; height: 1.25rem; display: inline-block; }
+  </style>
+</head>
+<body class="bg-base-200">
+  <!-- Prototype switcher (not part of the app) -->
+  <div class="navbar bg-neutral text-neutral-content px-4 gap-2 text-sm">
+    <span class="font-semibold opacity-80 mr-2">Prototype:</span>
+    <button class="btn btn-xs" onclick="show('board')">Board top bar</button>
+    <button class="btn btn-xs" onclick="show('home')">Home top bar</button>
+    <button class="btn btn-xs" onclick="show('change')">Change token</button>
+    <button class="btn btn-xs" onclick="show('signout')">Sign out confirm</button>
+    <span class="ml-auto opacity-60">daisyUI mock — semantics reflect the grilling, not final</span>
+  </div>
+
+  <!-- ========================= BOARD TOP BAR ========================= -->
+  <section data-screen="board" class="p-6">
+    <div class="min-h-[60vh] bg-base-100 rounded-box p-6 shadow">
+      <header class="flex items-center gap-2 mb-6">
+        <iconify-icon icon="lucide:workflow" class="text-primary ico"></iconify-icon>
+        <h1 class="text-2xl font-bold">Zfirot</h1>
+        <span class="text-base opacity-60">/ majidalfuttaim/zfirot</span>
+        <button class="btn btn-ghost btn-sm btn-square" title="Back to projects">
+          <iconify-icon icon="lucide:undo-2" class="ico"></iconify-icon>
+        </button>
+
+        <div class="ml-auto flex items-center gap-3">
+          <!-- existing cache dropdown (shown for context) -->
+          <button class="btn btn-ghost btn-sm gap-2" title="Board cache usage">
+            <iconify-icon icon="lucide:database" class="ico"></iconify-icon>
+            <span class="text-xs font-medium">12.4 KB</span>
+          </button>
+          <button class="btn btn-ghost btn-sm btn-square" title="Toggle theme">
+            <iconify-icon icon="lucide:sun" class="ico"></iconify-icon>
+          </button>
+          <button class="btn btn-ghost btn-sm btn-square" title="Refresh now">
+            <iconify-icon icon="lucide:refresh-cw" class="ico"></iconify-icon>
+          </button>
+
+          <!-- NEW: account menu (avatar + @login come from `viewer`) -->
+          <div class="dropdown dropdown-end">
+            <div tabindex="0" role="button" class="btn btn-ghost btn-sm gap-2" title="Account">
+              <div class="avatar">
+                <div class="w-6 rounded-full">
+                  <img src="https://avatars.githubusercontent.com/u/9919?v=4" alt="@cverdes" />
+                </div>
+              </div>
+              <iconify-icon icon="lucide:chevron-down" class="size-3"></iconify-icon>
+            </div>
+            <ul tabindex="0" class="dropdown-content menu p-2 shadow bg-base-200 rounded-box w-64 mt-1 z-10">
+              <li class="menu-title text-xs">
+                <span>Signed in as @cverdes</span>
+              </li>
+              <li>
+                <a onclick="show('change')">
+                  <iconify-icon icon="lucide:key-round" class="ico"></iconify-icon>
+                  Change token…
+                </a>
+              </li>
+              <li>
+                <a class="text-error" onclick="show('signout')">
+                  <iconify-icon icon="lucide:log-out" class="ico"></iconify-icon>
+                  Sign out
+                </a>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </header>
+
+      <div class="flex items-center gap-2 mb-4">
+        <span class="badge badge-success badge-outline gap-1">Ready <span class="font-semibold">3</span></span>
+        <span class="badge badge-warning badge-outline gap-1">WIP <span class="font-semibold">2</span></span>
+        <span class="badge badge-error badge-outline gap-1">Blocked <span class="font-semibold">1</span></span>
+      </div>
+      <p class="opacity-50 text-sm">…board columns…</p>
+    </div>
+  </section>
+
+  <!-- ========================= HOME TOP BAR ========================= -->
+  <section data-screen="home" class="p-6 hidden">
+    <div class="min-h-[60vh] bg-base-100 rounded-box p-6 shadow">
+      <header class="flex items-center gap-2 mb-6">
+        <iconify-icon icon="lucide:workflow" class="text-primary ico"></iconify-icon>
+        <h1 class="text-2xl font-bold">Zfirot</h1>
+        <div class="ml-auto flex items-center gap-3">
+          <button class="btn btn-ghost btn-sm btn-square" title="Toggle theme">
+            <iconify-icon icon="lucide:sun" class="ico"></iconify-icon>
+          </button>
+          <!-- Same account menu, shared on home -->
+          <div class="dropdown dropdown-end">
+            <div tabindex="0" role="button" class="btn btn-ghost btn-sm gap-2" title="Account">
+              <div class="avatar">
+                <div class="w-6 rounded-full">
+                  <img src="https://avatars.githubusercontent.com/u/9919?v=4" alt="@cverdes" />
+                </div>
+              </div>
+              <iconify-icon icon="lucide:chevron-down" class="size-3"></iconify-icon>
+            </div>
+            <ul tabindex="0" class="dropdown-content menu p-2 shadow bg-base-200 rounded-box w-64 mt-1 z-10">
+              <li class="menu-title text-xs"><span>Signed in as @cverdes</span></li>
+              <li><a onclick="show('change')"><iconify-icon icon="lucide:key-round" class="ico"></iconify-icon> Change token…</a></li>
+              <li><a class="text-error" onclick="show('signout')"><iconify-icon icon="lucide:log-out" class="ico"></iconify-icon> Sign out</a></li>
+            </ul>
+          </div>
+        </div>
+      </header>
+      <h2 class="text-lg font-semibold mb-2">Recent projects</h2>
+      <p class="opacity-50 text-sm">…project cards…</p>
+    </div>
+  </section>
+
+  <!-- ========================= CHANGE TOKEN SCREEN ========================= -->
+  <section data-screen="change" class="hidden">
+    <div class="min-h-screen bg-base-100 flex items-center justify-center p-6">
+      <div class="card w-full max-w-md bg-base-200 shadow-md">
+        <div class="card-body">
+          <h2 class="card-title">Change your GitHub token</h2>
+
+          <!-- Rotate context: explains WHY (new grants) without clearing the old token yet -->
+          <div class="alert alert-info text-sm">
+            <iconify-icon icon="lucide:info" class="ico"></iconify-icon>
+            <span>New features need extra permissions. Create a re-scoped token and paste it below — your current token keeps working until the new one is saved.</span>
+          </div>
+
+          <a class="link link-primary text-sm inline-flex items-center gap-1"
+             href="https://github.com/settings/personal-access-tokens/new">
+            <iconify-icon icon="lucide:external-link" class="size-4"></iconify-icon>
+            Create a fine-grained token on GitHub
+          </a>
+
+          <div class="rounded-box bg-base-300 p-3 text-sm">
+            <p class="font-medium mb-1">Required repository permissions:</p>
+            <ul class="list-disc list-inside opacity-80">
+              <li>Issues — Read and write</li>
+              <li>Pull requests — Read-only</li>
+              <li>Contents — Read-only</li>
+              <li class="text-primary font-medium">Metadata — Read-only <span class="badge badge-primary badge-xs align-middle">new</span></li>
+            </ul>
+          </div>
+
+          <div class="flex flex-col gap-1 w-full">
+            <label class="text-sm font-medium">Personal Access Token</label>
+            <input type="password" class="input w-full" placeholder="github_pat_…" value="github_pat_11ABCDEF" />
+          </div>
+
+          <div class="card-actions justify-between mt-2">
+            <!-- Cancel returns to where you were WITHOUT touching the old token -->
+            <button class="btn btn-ghost" onclick="show('board')">Cancel</button>
+            <button class="btn btn-primary">Save new token</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================= SIGN OUT CONFIRM ========================= -->
+  <section data-screen="signout" class="hidden">
+    <div class="min-h-screen bg-base-100 flex items-center justify-center p-6">
+      <div class="card w-full max-w-sm bg-base-200 shadow-md">
+        <div class="card-body">
+          <h2 class="card-title">
+            <iconify-icon icon="lucide:log-out" class="ico"></iconify-icon>
+            Sign out?
+          </h2>
+          <p class="text-sm opacity-70">
+            This removes your token <strong>and all synced data</strong> from this device:
+            tracked repos, last-opened project, cached recent projects, and cached boards.
+            Your theme and view preferences stay. You'll need to paste a token again to start over.
+          </p>
+          <div class="card-actions justify-end mt-2">
+            <button class="btn btn-ghost" onclick="show('board')">Cancel</button>
+            <button class="btn btn-error" onclick="show('change')">Sign out</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    function show(name) {
+      document.querySelectorAll('section[data-screen]').forEach(s => {
+        s.classList.toggle('hidden', s.dataset.screen !== name);
+      });
+      // close any open dropdown
+      if (document.activeElement) document.activeElement.blur();
+      window.scrollTo(0, 0);
+    }
+  </script>
+</body>
+</html>

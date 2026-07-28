@@ -540,8 +540,10 @@ pub fn App() -> Element {
     // already-showing view), there is no underlying view here — the load that
     // produced `NeedRotate` failed — so a successful save must retry it instead.
     let on_rotate_reactive_submit = move |raw: String| {
+        // Set before `spawn`, not inside it: a fast repeat click must see
+        // `saving` already true, not slip through a check-then-set gap.
+        rotate_reactive_saving.set(true);
         spawn(async move {
-            rotate_reactive_saving.set(true);
             let auth = AuthService::new(secure_store());
             match auth.save_token(&raw).await {
                 Ok(()) => {
@@ -793,7 +795,7 @@ pub fn App() -> Element {
             (Some(View::NeedRotate { reason, missing_permission }), ..) => rsx! {
                 TokenScreen {
                     title: "Update your Personal Access Token".to_string(),
-                    description: format!("{reason} Grant the missing permission below, then paste the updated token here. Your current token keeps working until the new one is saved."),
+                    description: format!("{reason} — grant the missing permission below, then paste the updated token here. Your current token keeps working until the new one is saved."),
                     error: rotate_reactive_error(),
                     saving: rotate_reactive_saving(),
                     on_submit: on_rotate_reactive_submit,
