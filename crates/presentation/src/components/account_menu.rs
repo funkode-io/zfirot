@@ -9,6 +9,15 @@ use domain::Viewer;
 #[component]
 pub fn AccountMenu(viewer: Option<Viewer>, on_sign_out: EventHandler<()>) -> Element {
     let mut confirm_open = use_signal(|| false);
+    // The trigger carries the accessible name (who is signed in, or that the
+    // Viewer hasn't loaded/could not be fetched yet) so assistive tech
+    // announces it even though the visible "@login" text itself only shows
+    // once the dropdown is opened; the avatar image stays decorative (empty
+    // `alt`) so it is not announced twice alongside the label.
+    let account_label = match &viewer {
+        Some(viewer) => format!("Account: signed in as @{}", viewer.login),
+        None => "Account".to_string(),
+    };
 
     rsx! {
         div { class: "dropdown dropdown-end",
@@ -16,7 +25,8 @@ pub fn AccountMenu(viewer: Option<Viewer>, on_sign_out: EventHandler<()>) -> Ele
                 tabindex: "0",
                 role: "button",
                 class: "btn btn-ghost btn-sm gap-2",
-                title: "Account",
+                title: "{account_label}",
+                aria_label: "{account_label}",
                 if let Some(viewer) = &viewer {
                     div { class: "avatar",
                         div { class: "w-6 rounded-full",
