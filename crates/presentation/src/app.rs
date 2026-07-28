@@ -12,8 +12,9 @@ use application::{
 };
 use dioxus::prelude::*;
 use domain::{
-    group_into_lanes, AppErrorKind, BoardSummary, BoardViewMode, GitHubToken, IssueClassification,
-    PollInterval, Project, ReconcileInterval, RepoRef, Slice, ThemePreference, Viewer,
+    group_into_lanes, AppError, AppErrorKind, BoardSummary, BoardViewMode, CredentialFailure,
+    GitHubToken, IssueClassification, PollInterval, Project, ReconcileInterval, RepoRef, Slice,
+    ThemePreference, Viewer,
 };
 
 use crate::components::{
@@ -62,6 +63,16 @@ enum View {
     /// rejected by GitHub (so the user knows why they are being asked again) and
     /// `None` on first launch when no token has ever been saved.
     NeedToken { reason: Option<String> },
+    /// A stored token is valid but GitHub refused it a specific grant while
+    /// loading (`CredentialFailure::UnderScoped`): the token is kept (never
+    /// cleared) and the Change-token (Rotate) screen is shown reactively so the
+    /// user can grant the missing permission without losing a perfectly usable
+    /// credential. `missing_permission` names the grant when GitHub's error
+    /// says so, for the highlighted item in the required-permissions list.
+    NeedRotate {
+        reason: String,
+        missing_permission: Option<String>,
+    },
     /// A token is stored but loading failed for a non-auth reason (network, rate
     /// limit): a transient error shown in the board shell.
     Error(String),
@@ -155,6 +166,14 @@ pub fn App() -> Element {
     // True while a freshly-pasted replacement token is being validated and
     // persisted, driving the Change-token screen's own spinner.
     let mut change_token_saving = use_signal(|| false);
+    // Drives the reactive Change-token (Rotate) screen shown directly in place
+    // of a failed board/project-list load when the stored token is merely
+    // Under-scoped (`View::NeedRotate`) — kept separate from `change_token_*`
+    // above (the account-menu-triggered overlay) since the two never show at
+    // once and a successful submit here must retry the load instead of just
+    // dismissing an overlay.
+    let mut rotate_reactive_error = use_signal(|| Option::<String>::None);
+    let mut rotate_reactive_saving = use_signal(|| false);
 
     let view = use_resource(move || async move {
         let _ = reload(); // subscribe so a save or selection re-resolves the view
@@ -516,6 +535,26 @@ pub fn App() -> Element {
         });
     };
 
+    // Submit for the reactive `View::NeedRotate` screen: unlike
+    // `on_change_token_submit` above (which just dismisses an overlay over an
+    // already-showing view), there is no underlying view here — the load that
+    // produced `NeedRotate` failed — so a successful save must retry it instead.
+    let on_rotate_reactive_submit = move |raw: String| {
+        spawn(async move {
+            rotate_reactive_saving.set(true);
+            let auth = AuthService::new(secure_store());
+            match auth.save_token(&raw).await {
+                Ok(()) => {
+                    rotate_reactive_error.set(None);
+                    prefetched_board.set(None);
+                    reload += 1;
+                }
+                Err(error) => rotate_reactive_error.set(Some(error.to_string())),
+            }
+            rotate_reactive_saving.set(false);
+        });
+    };
+
     let on_open_discovered = use_callback(move |repo: RepoRef| {
         spawn(async move {
             // Persist the choice (best-effort) and navigate to its board.
@@ -745,6 +784,22 @@ pub fn App() -> Element {
                     on_submit,
                 }
             },
+            // A stored token is valid but is missing a specific GitHub grant:
+            // the token is never cleared here (only `NeedToken`/Invalid clears
+            // it), so this reuses the same Change-token copy and permissions
+            // list as the account-menu-triggered overlay, but with no Cancel —
+            // there is nowhere to return to since the load that produced this
+            // view failed. A successful submit retries the load.
+            (Some(View::NeedRotate { reason, missing_permission }), ..) => rsx! {
+                TokenScreen {
+                    title: "Update your Personal Access Token".to_string(),
+                    description: format!("{reason} Grant the missing permission below, then paste the updated token here. Your current token keeps working until the new one is saved."),
+                    error: rotate_reactive_error(),
+                    saving: rotate_reactive_saving(),
+                    on_submit: on_rotate_reactive_submit,
+                    highlighted_permission: missing_permission.clone(),
+                }
+            },
             // Token present and the board loaded.
             (Some(View::Board {
                 repo,
@@ -863,13 +918,7 @@ async fn resolve_view(nav: Nav) -> View {
                     snapshot: loaded.snapshot,
                     from_cache: false,
                 },
-                Err(error) if is_auth_failure(error.kind()) => {
-                    let _ = auth.clear_token().await;
-                    View::NeedToken {
-                        reason: Some(error.to_string()),
-                    }
-                }
-                Err(error) => View::Error(error.to_string()),
+                Err(error) => credential_failure_view(&auth, error).await,
             };
         }
         Nav::Auto => match last_opened().await {
@@ -894,17 +943,7 @@ async fn resolve_view(nav: Nav) -> View {
             snapshot: loaded.snapshot,
             from_cache: false,
         },
-        Err(error) if is_auth_failure(error.kind()) => {
-            // The stored token was rejected (revoked, expired, or missing
-            // scopes). Discard it so we do not loop on a known-bad secret, then
-            // route the user back to the screen to paste a new one. Clearing is
-            // best-effort: routing back is what matters.
-            let _ = auth.clear_token().await;
-            View::NeedToken {
-                reason: Some(error.to_string()),
-            }
-        }
-        Err(error) => View::Error(error.to_string()),
+        Err(error) => credential_failure_view(&auth, error).await,
     }
 }
 
@@ -948,15 +987,7 @@ async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToke
             Ok(None) => View::Error("The cached projects vanished during refresh.".into()),
             Err(error) => View::Error(error.to_string()),
         },
-        Err(error) if is_auth_failure(error.kind()) => {
-            // A rejected token must not strand the user on an error screen.
-            // Discard it (best-effort) and route back to paste a new one.
-            let _ = auth.clear_token().await;
-            View::NeedToken {
-                reason: Some(error.to_string()),
-            }
-        }
-        Err(error) => View::Error(error.to_string()),
+        Err(error) => credential_failure_view(auth, error).await,
     }
 }
 
@@ -982,10 +1013,31 @@ async fn resolve_system_theme() -> ThemePreference {
     }
 }
 
-/// Whether an error means the token itself is the problem (so the user should be
-/// asked for a new one) rather than a transient/network failure.
-fn is_auth_failure(kind: AppErrorKind) -> bool {
-    matches!(kind, AppErrorKind::Unauthorized | AppErrorKind::Forbidden)
+/// Map a GitHub-call failure to the view it should route to, per
+/// [`CredentialFailure`]. `Invalid` clears the stored token (best-effort —
+/// routing back is what matters) and asks for a fresh one, exactly as before.
+/// `UnderScoped` **keeps the token** and opens the Change-token (Rotate)
+/// screen instead: the credential is still perfectly usable, it is just
+/// missing a grant, so wiping it would strand the user for no reason (the
+/// original bug this ticket fixes). Anything else is a transient failure the
+/// caller cannot act on by touching the token.
+async fn credential_failure_view<S: SecureStorePort>(
+    auth: &AuthService<S>,
+    error: AppError,
+) -> View {
+    match CredentialFailure::classify(&error) {
+        CredentialFailure::Invalid => {
+            let _ = auth.clear_token().await;
+            View::NeedToken {
+                reason: Some(error.to_string()),
+            }
+        }
+        CredentialFailure::UnderScoped { missing_permission } => View::NeedRotate {
+            reason: error.to_string(),
+            missing_permission,
+        },
+        CredentialFailure::None => View::Error(error.to_string()),
+    }
 }
 
 /// The current local wall-clock time as `HH:MM:SS`, captured when a board

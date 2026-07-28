@@ -12,6 +12,9 @@ use dioxus::prelude::*;
 /// `on_cancel` is set a Cancel button shows alongside Save, so the Change-token
 /// view can return to wherever the user was without touching the stored token —
 /// the first-launch screen has no such path since there is nowhere to return to.
+/// `highlighted_permission` names one of the required permissions below to mark
+/// distinctly (e.g. an Under-scoped token's missing grant) — `None` renders the
+/// list plainly.
 #[component]
 pub fn TokenScreen(
     on_submit: EventHandler<String>,
@@ -20,6 +23,7 @@ pub fn TokenScreen(
     #[props(default)] title: Option<String>,
     #[props(default)] description: Option<String>,
     #[props(default)] on_cancel: Option<EventHandler<()>>,
+    #[props(default)] highlighted_permission: Option<String>,
 ) -> Element {
     let mut token = use_signal(String::new);
     let is_blank = token.read().trim().is_empty();
@@ -27,6 +31,11 @@ pub fn TokenScreen(
     let description = description.unwrap_or_else(|| {
         "Zfirot reads your project board from GitHub. Create a fine-grained Personal Access Token, grant it the permissions below, then paste it here. It is saved to your operating system's secure store and reused on every launch.".to_string()
     });
+    let required_permissions = [
+        "Issues — Read and write",
+        "Pull requests — Read-only",
+        "Contents — Read-only",
+    ];
 
     rsx! {
         div { class: "min-h-screen bg-base-100 flex items-center justify-center p-6",
@@ -51,9 +60,25 @@ pub fn TokenScreen(
                     div { class: "rounded-box bg-base-300 p-3 text-sm",
                         p { class: "font-medium mb-1", "Required repository permissions:" }
                         ul { class: "list-disc list-inside opacity-80",
-                            li { "Issues — Read and write" }
-                            li { "Pull requests — Read-only" }
-                            li { "Contents — Read-only" }
+                            for permission in required_permissions {
+                                if names_permission(permission, highlighted_permission.as_deref()) {
+                                    li { class: "font-semibold text-warning list-none flex items-center gap-1",
+                                        span { class: "icon-[lucide--alert-triangle] size-4" }
+                                        "{permission} (missing)"
+                                    }
+                                } else {
+                                    li { "{permission}" }
+                                }
+                            }
+                        }
+                        if let Some(missing) = highlighted_permission.as_deref().filter(|missing| {
+                            !required_permissions
+                                .iter()
+                                .any(|permission| names_permission(permission, Some(missing)))
+                        }) {
+                            p { class: "text-warning font-medium mt-2",
+                                "Also missing: {missing}"
+                            }
                         }
                     }
                     div { class: "flex flex-col gap-1 w-full",
@@ -93,5 +118,50 @@ pub fn TokenScreen(
                 }
             }
         }
+    }
+}
+
+/// Whether a required-permission line (e.g. `"Issues — Read and write"`) is the
+/// one a Forbidden error named as missing. A loose, case-insensitive
+/// containment match in either direction since GitHub's own wording and this
+/// screen's copy are not guaranteed to align character-for-character — e.g. a
+/// missing permission of `"Issues"` matches the `"Issues — Read and write"`
+/// line, and a fuller `"Issues: Read and write"` would too.
+fn names_permission(permission_line: &str, missing_permission: Option<&str>) -> bool {
+    match missing_permission {
+        Some(missing) if !missing.trim().is_empty() => {
+            let line = permission_line.to_lowercase();
+            let missing = missing.to_lowercase();
+            line.contains(&missing) || missing.contains(&line)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_a_permission_named_by_its_leading_word() {
+        assert!(names_permission("Issues — Read and write", Some("Issues")));
+    }
+
+    #[test]
+    fn matches_case_insensitively() {
+        assert!(names_permission(
+            "Pull requests — Read-only",
+            Some("pull requests")
+        ));
+    }
+
+    #[test]
+    fn does_not_match_a_different_permission() {
+        assert!(!names_permission("Contents — Read-only", Some("Issues")));
+    }
+
+    #[test]
+    fn does_not_match_when_nothing_is_missing() {
+        assert!(!names_permission("Issues — Read and write", None));
     }
 }
