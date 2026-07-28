@@ -3,10 +3,11 @@ use domain::Viewer;
 
 /// The signed-in account menu: shows the Viewer's avatar and `@login` (a
 /// generic icon while the Viewer is loading or could not be fetched), and
-/// holds the account-level actions — Change token, Sign out — added by later
-/// tickets. Callback-only: it neither fetches nor persists anything.
+/// holds the account-level actions — Change token (emits `on_change_token`)
+/// and Sign out, the latter added by a later ticket. Callback-only: it neither
+/// fetches nor persists anything.
 #[component]
-pub fn AccountMenu(viewer: Option<Viewer>) -> Element {
+pub fn AccountMenu(viewer: Option<Viewer>, on_change_token: EventHandler<()>) -> Element {
     // The trigger carries the accessible name (who is signed in, or that the
     // Viewer hasn't loaded/could not be fetched yet) so assistive tech
     // announces it even though the visible "@login" text itself only shows
@@ -48,6 +49,13 @@ pub fn AccountMenu(viewer: Option<Viewer>) -> Element {
                         span { "Signed in as @{viewer.login}" }
                     } else {
                         span { "Signed in" }
+                    }
+                }
+                li {
+                    a {
+                        onclick: move |_| on_change_token.call(()),
+                        span { class: "icon-[lucide--key-round] size-4" }
+                        "Change token…"
                     }
                 }
             }
