@@ -76,20 +76,24 @@ pub fn AccountMenu(viewer: Option<Viewer>, on_sign_out: EventHandler<()>) -> Ele
 
 /// The confirm dialog gating "Sign out", naming exactly what it removes
 /// (token, tracked repos, last-opened project, cached projects, cached
-/// boards) and what it keeps (theme, board view mode), per ADR 0005.
+/// boards) and what it keeps (theme, view mode), per ADR 0005.
 #[component]
 fn SignOutConfirmDialog(on_cancel: EventHandler<()>, on_confirm: EventHandler<()>) -> Element {
     rsx! {
-        div { class: "modal modal-open",
+        div {
+            class: "modal modal-open",
+            role: "dialog",
+            aria_modal: "true",
+            aria_labelledby: "sign-out-dialog-title",
             div { class: "modal-box",
-                h3 { class: "text-lg font-bold", "Sign out?" }
+                h3 { id: "sign-out-dialog-title", class: "text-lg font-bold", "Sign out?" }
                 p { class: "py-2 text-sm",
                     "This removes your Personal Access Token, tracked repos, the "
                     "last-opened project, cached recent projects, and cached "
                     "board snapshots."
                 }
                 p { class: "text-sm opacity-70",
-                    "Your theme and board view preferences are kept."
+                    "Your theme and view mode are kept."
                 }
                 div { class: "modal-action",
                     button {
