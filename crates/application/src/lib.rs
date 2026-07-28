@@ -62,8 +62,9 @@ pub trait GitHubPort: Send + Sync {
     /// The authenticated Viewer (login, name, avatar), for the account menu.
     ///
     /// Defaults to a clear failure so adapters that do not (yet) support it need
-    /// no change; [`AccountService::viewer`] surfaces that as "unknown", which
-    /// the account menu reads as "show a generic icon" rather than blocking.
+    /// no change; [`AccountService::viewer`] simply propagates that error, and
+    /// the presentation layer treats any failure as "viewer unknown" — showing
+    /// a generic icon rather than blocking on it.
     async fn viewer(&self) -> AppResult<Viewer> {
         Err(AppError::internal("This adapter cannot fetch the viewer")
             .with_operation("GitHubPort::viewer"))
