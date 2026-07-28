@@ -56,10 +56,48 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
         body
         state
         labels(first: 20) { nodes { name } }
-        assignees(first: 1) { nodes { login } }
+        assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
         closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
+      }
+    }
+  }
+}
+"#;
+
+/// Pull requests updated at or after `since` (any state), for healing a
+/// specific blind spot in [`ISSUES_SINCE_QUERY`]: GitHub does **not** bump an
+/// issue's own `updatedAt` when a PR is opened (or changed) with a closing
+/// reference to it, so a Slice's brand-new or just-updated linked PR is
+/// invisible to the issues-since delta for as long as the issue itself stays
+/// otherwise untouched. A pull request's own `updatedAt` *does* advance on
+/// every such change, so walking PRs ordered by `updatedAt` descending and
+/// pulling in the issues each currently closes (`closingIssuesReferences`,
+/// fetched with the exact same shape as the issues queries) closes the gap.
+/// Ordering lets the caller stop as soon as a page reaches a PR older than
+/// `since` — everything after it is older still.
+const PULL_REQUESTS_SINCE_QUERY: &str = r#"
+query PullRequestsSince($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 50, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        updatedAt
+        closingIssuesReferences(first: 10) {
+          nodes {
+            number
+            title
+            url
+            body
+            state
+            labels(first: 20) { nodes { name } }
+            assignees(first: 1) { nodes { login avatarUrl } }
+            parent { number labels(first: 20) { nodes { name } } }
+            blockedBy(first: 50) { nodes { number } }
+            closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
+          }
+        }
       }
     }
   }
@@ -268,6 +306,46 @@ impl GitHubClient {
         response.text().await.map_err(|err| {
             AppError::unavailable("Could not read GitHub's response")
                 .with_operation("GitHubClient::fetch_issues_since_page")
+                .with_source(err)
+        })
+    }
+
+    /// Fetch a single page of pull requests updated since the last poll (any
+    /// state), for [`PULL_REQUESTS_SINCE_QUERY`].
+    async fn fetch_pull_requests_since_page(
+        &self,
+        repo: &RepoRef,
+        cursor: Option<&str>,
+    ) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": PULL_REQUESTS_SINCE_QUERY,
+            "variables": { "owner": repo.owner, "name": repo.name, "cursor": cursor },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_pull_requests_since_page")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_pull_requests_since_page",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_pull_requests_since_page")
                 .with_source(err)
         })
     }
@@ -551,6 +629,29 @@ impl GitHubPort for GitHubClient {
             }
         }
 
+        // Close the blind spot `ISSUES_SINCE_QUERY` has on its own: GitHub does
+        // not bump an issue's own `updatedAt` when a PR opens (or changes) with
+        // a closing reference to it, so a Slice's brand-new or just-updated
+        // linked PR would otherwise stay invisible until a full reconcile. A
+        // PR's own `updatedAt` does advance on such changes, so walk PRs
+        // updated since the same watermark and pull in the issues each
+        // currently closes — fetched fresh, reflecting the PR's current status,
+        // Decorations, or (once merged/abandoned) its absence. Duplicates with
+        // the issues above are harmless: `merge_issues` (application layer)
+        // merges by issue number, last write wins.
+        let mut pr_cursor: Option<String> = None;
+        loop {
+            let body = self
+                .fetch_pull_requests_since_page(repo, pr_cursor.as_deref())
+                .await?;
+            let (page, next) = parse_pull_requests_since_response(&body, &since)?;
+            issues.extend(page);
+            match next {
+                Some(end) => pr_cursor = Some(end),
+                None => break,
+            }
+        }
+
         Ok(issues)
     }
 
@@ -668,6 +769,86 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
     Err(
         AppError::not_found("Repository not found or not visible to the token")
             .with_operation("parse_issues_response"),
+    )
+}
+
+/// Parse a page of [`PULL_REQUESTS_SINCE_QUERY`] into the raw issues the
+/// returned pull requests currently close, and the next page cursor — `None`
+/// once a PR older than `since` is reached (pull requests are ordered by
+/// `updatedAt` descending, so everything after is older still) or there is no
+/// next page. Pure and offline, mirroring [`parse_issues_response`].
+fn parse_pull_requests_since_response(
+    body: &str,
+    since: &DateTime<Utc>,
+) -> AppResult<(Vec<RawIssue>, Option<String>)> {
+    let response: PullRequestsSinceResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation("parse_pull_requests_since_response")
+            .with_source(err)
+    })?;
+
+    // GitHub returns partial data alongside field-level errors (see
+    // `parse_issues_response`); only when there is no usable repository do the
+    // errors become fatal.
+    if let Some(pull_requests) = response
+        .data
+        .and_then(|data| data.repository)
+        .map(|repository| repository.pull_requests)
+    {
+        let mut issues = Vec::new();
+        let mut reached_before_since = false;
+        for node in pull_requests.nodes {
+            if node.updated_at < *since {
+                reached_before_since = true;
+                break;
+            }
+            issues.extend(
+                node.closing_issues_references
+                    .nodes
+                    .into_iter()
+                    .map(map_issue_raw),
+            );
+        }
+
+        let next = if reached_before_since {
+            None
+        } else if pull_requests.page_info.has_next_page {
+            pull_requests.page_info.end_cursor
+        } else {
+            None
+        };
+
+        return Ok((issues, next));
+    }
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        let not_found = errors.iter().any(|error| {
+            error.error_type.as_deref() == Some("NOT_FOUND")
+                || error
+                    .message
+                    .to_lowercase()
+                    .contains("could not resolve to a repository")
+        });
+        let message = errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let error = if not_found {
+            AppError::not_found("Repository not found or not visible to the token")
+        } else if message.to_lowercase().contains("rate limit") {
+            AppError::rate_limited("GitHub rate limit exceeded")
+        } else {
+            AppError::internal("GitHub reported a query error")
+        };
+        return Err(error
+            .with_operation("parse_pull_requests_since_response")
+            .with_context("errors", message));
+    }
+
+    Err(
+        AppError::not_found("Repository not found or not visible to the token")
+            .with_operation("parse_pull_requests_since_response"),
     )
 }
 
@@ -1283,6 +1464,46 @@ struct RawIssueNode {
     closed_by_pull_requests_references: LinkedPrConnection,
 }
 
+// ── Pull-requests-since query (healing the issues-since delta's blind spot) ────
+
+#[derive(Deserialize)]
+struct PullRequestsSinceResponse {
+    data: Option<PullRequestsSinceData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestsSinceData {
+    repository: Option<PullRequestsSinceRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestsSinceRepository {
+    pull_requests: PullRequestsSinceConnection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestsSinceConnection {
+    page_info: PageInfo,
+    nodes: Vec<PullRequestSinceNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestSinceNode {
+    updated_at: DateTime<Utc>,
+    closing_issues_references: ClosingIssuesConnection,
+}
+
+/// The issues one pull request currently closes, in the exact same shape as
+/// [`RawIssueNode`] so [`map_issue_raw`] can project them identically.
+#[derive(Deserialize)]
+struct ClosingIssuesConnection {
+    nodes: Vec<RawIssueNode>,
+}
+
 #[derive(Deserialize)]
 struct NameConnection {
     nodes: Vec<NameNode>,
@@ -1388,6 +1609,19 @@ mod tests {
     use domain::AppErrorKind;
 
     #[test]
+    fn issues_since_query_requests_assignee_avatar_url() {
+        // Regression guard: `parse_issues_response` (shared by the full and
+        // since queries) requires `avatarUrl` on every assignee. The since
+        // query used to omit it from its selection set, so any assigned issue
+        // in a delta page would fail to deserialize and silently error out the
+        // whole background refresh.
+        assert!(
+            ISSUES_SINCE_QUERY.contains("login avatarUrl"),
+            "ISSUES_SINCE_QUERY must request avatarUrl alongside login"
+        );
+    }
+
+    #[test]
     fn parse_issues_tolerates_partial_field_errors_when_data_is_present() {
         // GitHub returns the issue data *plus* a field-level FORBIDDEN on
         // `statusCheckRollup` when the token cannot read a repo's checks. The
@@ -1431,6 +1665,102 @@ mod tests {
         let body = r#"{ "data": { "repository": null },
             "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to a repository" } ] }"#;
         let error = parse_issues_response(body).expect_err("absent repository must fail");
+        assert_eq!(error.kind(), AppErrorKind::NotFound);
+    }
+
+    /// A minimal `RawIssueNode`-shaped JSON body, for embedding inside a pull
+    /// request's `closingIssuesReferences`.
+    fn issue_node_json(number: u64) -> String {
+        format!(
+            r#"{{
+                "number": {number},
+                "title": "A Slice",
+                "url": "https://github.com/acme/widgets/issues/{number}",
+                "body": "",
+                "state": "OPEN",
+                "labels": {{ "nodes": [ {{ "name": "slice" }} ] }},
+                "assignees": {{ "nodes": [] }},
+                "parent": null,
+                "blockedBy": {{ "nodes": [] }},
+                "closedByPullRequestsReferences": {{ "nodes": [] }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn parse_pull_requests_since_extracts_issues_closed_by_recent_prs() {
+        let body = format!(
+            r#"{{
+                "data": {{ "repository": {{ "pullRequests": {{
+                    "pageInfo": {{ "hasNextPage": false, "endCursor": null }},
+                    "nodes": [ {{
+                        "updatedAt": "2026-07-28T07:41:22Z",
+                        "closingIssuesReferences": {{ "nodes": [ {} ] }}
+                    }} ]
+                }} }} }}
+            }}"#,
+            issue_node_json(1233)
+        );
+        let since: DateTime<Utc> = "2026-07-27T00:00:00Z".parse().expect("valid RFC 3339");
+
+        let (issues, next) = parse_pull_requests_since_response(&body, &since)
+            .expect("a clean response should parse");
+
+        assert_eq!(next, None);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 1233);
+    }
+
+    #[test]
+    fn parse_pull_requests_since_stops_at_the_first_pr_older_than_since() {
+        // Ordered by `updatedAt` descending: the first PR is recent (kept), the
+        // second is older than `since` (excluded, and pagination must stop even
+        // though the page itself claims a next page exists).
+        let body = format!(
+            r#"{{
+                "data": {{ "repository": {{ "pullRequests": {{
+                    "pageInfo": {{ "hasNextPage": true, "endCursor": "CURSOR" }},
+                    "nodes": [
+                        {{
+                            "updatedAt": "2026-07-28T07:41:22Z",
+                            "closingIssuesReferences": {{ "nodes": [ {} ] }}
+                        }},
+                        {{
+                            "updatedAt": "2026-01-01T00:00:00Z",
+                            "closingIssuesReferences": {{ "nodes": [ {} ] }}
+                        }}
+                    ]
+                }} }} }}
+            }}"#,
+            issue_node_json(1233),
+            issue_node_json(9999)
+        );
+        let since: DateTime<Utc> = "2026-07-27T00:00:00Z".parse().expect("valid RFC 3339");
+
+        let (issues, next) = parse_pull_requests_since_response(&body, &since)
+            .expect("a clean response should parse");
+
+        assert_eq!(
+            issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
+            vec![1233],
+            "only the PR at or after `since` should contribute an issue"
+        );
+        assert_eq!(
+            next, None,
+            "pagination must stop once a PR older than `since` is reached, \
+             even though the page reports a next page"
+        );
+    }
+
+    #[test]
+    fn parse_pull_requests_since_still_fails_when_no_repository_data() {
+        let body = r#"{ "data": { "repository": null },
+            "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to a repository" } ] }"#;
+        let since: DateTime<Utc> = "2026-07-27T00:00:00Z".parse().expect("valid RFC 3339");
+
+        let error = parse_pull_requests_since_response(body, &since)
+            .expect_err("absent repository must fail");
+
         assert_eq!(error.kind(), AppErrorKind::NotFound);
     }
 
