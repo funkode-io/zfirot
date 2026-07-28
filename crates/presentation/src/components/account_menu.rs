@@ -3,11 +3,16 @@ use domain::Viewer;
 
 /// The signed-in account menu: shows the Viewer's avatar and `@login` (a
 /// generic icon while the Viewer is loading or could not be fetched), and
-/// holds the account-level actions — currently Sign out, guarded by a confirm
-/// dialog naming exactly what is removed and what is kept. Callback-only: it
-/// neither fetches nor persists anything; confirming just emits `on_sign_out`.
+/// holds the account-level actions — Change token (emits `on_change_token`)
+/// and Sign out, guarded by a confirm dialog naming exactly what is removed
+/// and what is kept. Callback-only: it neither fetches nor persists anything;
+/// confirming Sign out just emits `on_sign_out`.
 #[component]
-pub fn AccountMenu(viewer: Option<Viewer>, on_sign_out: EventHandler<()>) -> Element {
+pub fn AccountMenu(
+    viewer: Option<Viewer>,
+    on_change_token: EventHandler<()>,
+    on_sign_out: EventHandler<()>,
+) -> Element {
     let mut confirm_open = use_signal(|| false);
     // The trigger carries the accessible name (who is signed in, or that the
     // Viewer hasn't loaded/could not be fetched yet) so assistive tech
@@ -50,6 +55,13 @@ pub fn AccountMenu(viewer: Option<Viewer>, on_sign_out: EventHandler<()>) -> Ele
                         span { "Signed in as @{viewer.login}" }
                     } else {
                         span { "Signed in" }
+                    }
+                }
+                li {
+                    a {
+                        onclick: move |_| on_change_token.call(()),
+                        span { class: "icon-[lucide--key-round] size-4" }
+                        "Change token…"
                     }
                 }
                 li {

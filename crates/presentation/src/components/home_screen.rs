@@ -9,8 +9,8 @@ const INITIAL_VISIBLE: usize = 6;
 /// The home screen: a search box over the discovered projects with a gated
 /// direct-open action. Emits `on_open_discovered` when a matching project is
 /// clicked, and `on_open_goto` when the go-to action is triggered. Shows the
-/// account menu (`viewer`, `on_sign_out`) in its header. Callback-only — it
-/// neither fetches nor persists anything.
+/// account menu (`viewer`, `on_change_token`, `on_sign_out`) in its header.
+/// Callback-only — it neither fetches nor persists anything.
 ///
 /// Typing filters the visible projects by case-insensitive substring on
 /// `owner/name`. When nothing matches but the query is a valid `owner/repo`, a
@@ -24,6 +24,7 @@ pub fn HomeScreen(
     on_open_discovered: EventHandler<RepoRef>,
     on_open_goto: EventHandler<RepoRef>,
     on_untrack: EventHandler<RepoRef>,
+    on_change_token: EventHandler<()>,
     on_sign_out: EventHandler<()>,
     #[props(default)] viewer: Option<Viewer>,
 ) -> Element {
@@ -153,7 +154,7 @@ pub fn HomeScreen(
                         "Search your projects, or type a full owner/repo to open it directly."
                     }
                 }
-                AccountMenu { viewer, on_sign_out }
+                AccountMenu { viewer, on_change_token, on_sign_out }
             }
 
             div { class: "mb-6 w-full max-w-sm",
