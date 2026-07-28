@@ -118,7 +118,7 @@ pub fn App() -> Element {
     // True while a full-load reconcile is in flight — either the background loop
     // or the authoritative follow-up a manual refresh kicks off — so the two
     // never stack into overlapping full loads.
-    let mut reconciling = use_signal(|| false);
+    let reconciling = use_signal(|| false);
     // A board view fetched by a `Changed` refresh, handed to the next `view`
     // resolution so it repaints the fresh board without a second network fetch.
     let mut prefetched_board = use_signal(|| Option::<View>::None);
@@ -286,15 +286,21 @@ pub fn App() -> Element {
                 )
                 .await
                 {
-                    authoritative_reconcile(
-                        repo,
-                        base,
-                        board_snapshot,
-                        prefetched_board,
-                        reload,
-                        reconciling,
-                    )
-                    .await;
+                    // Best-effort: this is an automatic background check, not a
+                    // user request, so it backs off if a reconcile (manual or
+                    // the periodic loop) is already running rather than
+                    // stacking with it.
+                    if !reconciling() {
+                        authoritative_reconcile(
+                            repo,
+                            base,
+                            board_snapshot,
+                            prefetched_board,
+                            reload,
+                            reconciling,
+                        )
+                        .await;
+                    }
                 }
             });
         }
@@ -370,28 +376,21 @@ pub fn App() -> Element {
             };
             if let Some(repo) = open_repo {
                 if let Some(snapshot) = board_snapshot() {
-                    // Skip this tick if a reconcile (background or manual-
-                    // triggered) is already running, so full loads never stack.
-                    if reconciling() {
-                        continue;
+                    // Best-effort: this is a periodic background check, not a
+                    // user request, so it backs off if a reconcile (manual or
+                    // the auto-revalidate-on-open effect) is already running
+                    // rather than stacking with it.
+                    if !reconciling() {
+                        authoritative_reconcile(
+                            repo,
+                            snapshot,
+                            board_snapshot,
+                            prefetched_board,
+                            reload,
+                            reconciling,
+                        )
+                        .await;
                     }
-                    reconciling.set(true);
-                    match reconcile_board(&repo, &snapshot).await {
-                        Ok(BoardRefresh::Changed(loaded)) => {
-                            board_snapshot.set(Some(loaded.snapshot.clone()));
-                            prefetched_board.set(Some(View::Board {
-                                repo,
-                                board: loaded.board,
-                                loaded_at: now_hms(),
-                                snapshot: loaded.snapshot,
-                                from_cache: false,
-                            }));
-                            reload += 1;
-                        }
-                        Ok(BoardRefresh::Unchanged(_)) => {}
-                        Err(_) => {}
-                    }
-                    reconciling.set(false);
                 }
             }
         }
@@ -402,6 +401,13 @@ pub fn App() -> Element {
     // issue closed by a merged PR, whose close event may fall outside the delta
     // `since` window). The delta paints first and clears the spinner; the
     // reconcile runs full-load and repaints only on a real difference.
+    //
+    // The reconcile call below is deliberately unconditional (unlike the two
+    // automatic reconcile sources): a user clicking Update must always get a
+    // full reconciliation, never a silent no-op because a background reconcile
+    // happened to be running at that moment — losing that guarantee is exactly
+    // what let a Slice's linked-PR badge go stale despite the user clicking
+    // Update (#149, hardening the guarantee #126 first established).
     let on_refresh = move |_| {
         if board_refreshing() {
             return;
@@ -934,11 +940,19 @@ async fn delta_refresh(
 /// background reconcile loop): GitHub does not bump an issue's own
 /// `updatedAt` when a PR is opened with a closing reference to it, so a
 /// Slice's brand-new linked PR can be invisible to every `load_issues_since`
-/// delta — including the auto-revalidate-on-open one — until a full load
-/// re-derives `closedByPullRequestsReferences` from scratch. Skipped when a
-/// reconcile is already running; repaints (`prefetched_board` + `reload`) only
-/// on a real difference. Shared by the same two call sites as
-/// [`delta_refresh`].
+/// delta until a full load re-derives `closedByPullRequestsReferences` from
+/// scratch.
+///
+/// Unconditional by design: it always runs to completion and never checks
+/// `reconciling` itself. That flag exists to stop the *automatic* sources
+/// (the periodic reconcile loop and the auto-revalidate-on-open effect) from
+/// stacking with each other, and each of those wraps its own call in
+/// `if !reconciling() { ... }`. The manual Refresh button deliberately does
+/// **not** — a user-initiated reconcile must never be silently skipped just
+/// because an unrelated background reconcile happened to be in flight at that
+/// moment, which previously undermined the "Update always fully reconciles"
+/// guarantee from #126 (see #149's follow-up). Repaints (`prefetched_board` +
+/// `reload`) only on a real difference.
 async fn authoritative_reconcile(
     repo: RepoRef,
     base: BoardSnapshot,
@@ -947,9 +961,6 @@ async fn authoritative_reconcile(
     mut reload: Signal<u32>,
     mut reconciling: Signal<bool>,
 ) {
-    if reconciling() {
-        return;
-    }
     reconciling.set(true);
     if let Ok(BoardRefresh::Changed(loaded)) = reconcile_board(&repo, &base).await {
         board_snapshot.set(Some(loaded.snapshot.clone()));
