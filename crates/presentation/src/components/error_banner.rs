@@ -3,18 +3,37 @@ use dioxus::prelude::*;
 /// A full-width error banner that renders a (possibly long) message on its own
 /// lines and turns any `http(s)` URL into a clickable link. Callback-only: it
 /// takes the message as a prop and renders it, with no application access.
+///
+/// When `on_change_token` is set, the banner also renders a "Change token…"
+/// button beneath the message — the actionable treatment an Under-scoped
+/// credential failure gets (per #144) instead of a dead-end plain error.
 #[component]
-pub fn ErrorBanner(message: String) -> Element {
+pub fn ErrorBanner(
+    message: String,
+    #[props(default)] on_change_token: Option<EventHandler<()>>,
+) -> Element {
     rsx! {
         div { role: "alert", class: "alert alert-error items-start",
             span { class: "icon-[lucide--circle-alert] size-5 shrink-0 mt-0.5" }
-            div { class: "text-sm leading-relaxed whitespace-pre-line",
-                for segment in segments(&message) {
-                    match segment {
-                        Segment::Text(text) => rsx! { "{text}" },
-                        Segment::Link(url) => rsx! {
-                            a { class: "link link-neutral font-medium break-all", href: "{url}", "{url}" }
-                        },
+            div { class: "flex-1",
+                div { class: "text-sm leading-relaxed whitespace-pre-line",
+                    for segment in segments(&message) {
+                        match segment {
+                            Segment::Text(text) => rsx! { "{text}" },
+                            Segment::Link(url) => rsx! {
+                                a { class: "link link-neutral font-medium break-all", href: "{url}", "{url}" }
+                            },
+                        }
+                    }
+                }
+                if let Some(on_change_token) = on_change_token {
+                    div { class: "mt-2",
+                        button {
+                            class: "btn btn-sm btn-outline",
+                            onclick: move |_| on_change_token.call(()),
+                            span { class: "icon-[lucide--key-round] size-4" }
+                            "Change token…"
+                        }
                     }
                 }
             }
