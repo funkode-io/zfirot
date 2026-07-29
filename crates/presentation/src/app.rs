@@ -16,6 +16,7 @@ use domain::{
     GitHubToken, IssueClassification, PollInterval, Project, ReconcileInterval, RepoRef, Slice,
     ThemePreference, Viewer,
 };
+use std::{future::Future, sync::Arc};
 
 use crate::components::{
     AccountMenu, ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner,
@@ -108,6 +109,37 @@ enum FeatureActionError {
     UnderScoped(String),
 }
 
+#[derive(Clone)]
+struct ReconcileGate(Arc<tokio::sync::Mutex<()>>);
+
+impl ReconcileGate {
+    fn new() -> Self {
+        Self(Arc::new(tokio::sync::Mutex::new(())))
+    }
+
+    // Best-effort path for automatic reconciles: skip when another reconcile
+    // already holds the gate.
+    async fn try_run<F, Fut>(&self, body: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        if let Ok(_permit) = self.0.clone().try_lock_owned() {
+            body().await;
+        }
+    }
+
+    // Manual refresh path: always run, waiting for any in-flight reconcile.
+    async fn run<F, Fut>(&self, body: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let _permit = self.0.clone().lock_owned().await;
+        body().await;
+    }
+}
+
 #[component]
 pub fn App() -> Element {
     // Cleared on success, set to a client-safe message when a token is rejected.
@@ -143,12 +175,12 @@ pub fn App() -> Element {
     // Retained board snapshot used by `BoardService::refresh` to decide
     // Changed/Unchanged during polls and manual refreshes.
     let mut board_snapshot = use_signal(|| Option::<BoardSnapshot>::None);
-    // True while a manual board refresh is in flight.
+    // True while the fast/manual delta refresh is in flight; it clears before
+    // the authoritative reconcile runs.
     let mut board_refreshing = use_signal(|| false);
-    // True while a full-load reconcile is in flight — either the background loop
-    // or the authoritative follow-up a manual refresh kicks off — so the two
-    // never stack into overlapping full loads.
-    let reconciling = use_signal(|| false);
+    // Single-flight gate for full-load reconciles so background and manual
+    // reconciles never overlap and stale results cannot overwrite newer state.
+    let reconcile_gate = use_hook(ReconcileGate::new);
     // A board view fetched by a `Changed` refresh, handed to the next `view`
     // resolution so it repaints the fresh board without a second network fetch.
     let mut prefetched_board = use_signal(|| Option::<View>::None);
@@ -311,6 +343,7 @@ pub fn App() -> Element {
     // just-opened linked PR can be invisible to the delta's `since` filter for
     // as long as the board stays open, until the reconcile re-derives it from a
     // full load.
+    let reconcile_gate_on_open = reconcile_gate.clone();
     use_effect(move || {
         let cached_board = match view.read().as_ref() {
             Some(View::Board {
@@ -326,6 +359,7 @@ pub fn App() -> Element {
                 return;
             }
             board_revalidated.set(Some(repo.clone()));
+            let gate = reconcile_gate_on_open.clone();
             spawn(async move {
                 if let Some(base) = delta_refresh(
                     repo.clone(),
@@ -336,21 +370,19 @@ pub fn App() -> Element {
                 )
                 .await
                 {
-                    // Best-effort: this is an automatic background check, not a
-                    // user request, so it backs off if a reconcile (manual or
-                    // the periodic loop) is already running rather than
-                    // stacking with it.
-                    if !reconciling() {
-                        authoritative_reconcile(
-                            repo,
-                            base,
-                            board_snapshot,
-                            prefetched_board,
-                            reload,
-                            reconciling,
-                        )
+                    // Best-effort: automatic background checks skip if another
+                    // reconcile is already in flight.
+                    gate.clone()
+                        .try_run(|| {
+                            authoritative_reconcile(
+                                repo,
+                                base,
+                                board_snapshot,
+                                prefetched_board,
+                                reload,
+                            )
+                        })
                         .await;
-                    }
                 }
             });
         }
@@ -413,33 +445,35 @@ pub fn App() -> Element {
     // Slow background reconcile: full-load occasionally to heal any drift that
     // delta refreshes cannot observe (for example, hard-deleted or transferred
     // issues). Silent and non-blocking: repaint only on a real diff.
-    use_future(move || async move {
-        let interval = ReconcileInterval::default().as_duration();
-        loop {
-            tokio::time::sleep(interval).await;
-            // Drop the `view` borrow before awaiting (see the poll loop above):
-            // a held `peek()` guard across the await races a resource re-resolve
-            // and panics with `AlreadyBorrowed`.
-            let open_repo = match &*view.peek() {
-                Some(View::Board { repo, .. }) => Some(repo.clone()),
-                _ => None,
-            };
-            if let Some(repo) = open_repo {
-                if let Some(snapshot) = board_snapshot() {
-                    // Best-effort: this is a periodic background check, not a
-                    // user request, so it backs off if a reconcile (manual or
-                    // the auto-revalidate-on-open effect) is already running
-                    // rather than stacking with it.
-                    if !reconciling() {
-                        authoritative_reconcile(
-                            repo,
-                            snapshot,
-                            board_snapshot,
-                            prefetched_board,
-                            reload,
-                            reconciling,
-                        )
-                        .await;
+    let reconcile_gate_background = reconcile_gate.clone();
+    use_future(move || {
+        let gate = reconcile_gate_background.clone();
+        async move {
+            let interval = ReconcileInterval::default().as_duration();
+            loop {
+                tokio::time::sleep(interval).await;
+                // Drop the `view` borrow before awaiting (see the poll loop above):
+                // a held `peek()` guard across the await races a resource re-resolve
+                // and panics with `AlreadyBorrowed`.
+                let open_repo = match &*view.peek() {
+                    Some(View::Board { repo, .. }) => Some(repo.clone()),
+                    _ => None,
+                };
+                if let Some(repo) = open_repo {
+                    if let Some(snapshot) = board_snapshot() {
+                        // Best-effort: periodic background checks skip if another
+                        // reconcile is already in flight.
+                        gate.clone()
+                            .try_run(|| {
+                                authoritative_reconcile(
+                                    repo,
+                                    snapshot,
+                                    board_snapshot,
+                                    prefetched_board,
+                                    reload,
+                                )
+                            })
+                            .await;
                     }
                 }
             }
@@ -458,6 +492,7 @@ pub fn App() -> Element {
     // happened to be running at that moment — losing that guarantee is exactly
     // what let a Slice's linked-PR badge go stale despite the user clicking
     // Update (#149, hardening the guarantee #126 first established).
+    let reconcile_gate_manual = reconcile_gate.clone();
     let on_refresh = move |_| {
         if board_refreshing() {
             return;
@@ -468,6 +503,7 @@ pub fn App() -> Element {
         };
         if let Some(repo) = open_repo {
             if let Some(snapshot) = board_snapshot() {
+                let gate = reconcile_gate_manual.clone();
                 // Set the in-flight guard synchronously (before the spawn) so
                 // rapid clicks cannot start a second refresh between the check
                 // above and the flag being set inside the task.
@@ -485,15 +521,17 @@ pub fn App() -> Element {
                     board_refreshing.set(false);
 
                     if let Some(base) = base {
-                        authoritative_reconcile(
-                            repo,
-                            base,
-                            board_snapshot,
-                            prefetched_board,
-                            reload,
-                            reconciling,
-                        )
-                        .await;
+                        gate.clone()
+                            .run(|| {
+                                authoritative_reconcile(
+                                    repo,
+                                    base,
+                                    board_snapshot,
+                                    prefetched_board,
+                                    reload,
+                                )
+                            })
+                            .await;
                     }
                 });
                 return;
@@ -1145,25 +1183,16 @@ async fn delta_refresh(
 /// delta until a full load re-derives `closedByPullRequestsReferences` from
 /// scratch.
 ///
-/// Unconditional by design: it always runs to completion and never checks
-/// `reconciling` itself. That flag exists to stop the *automatic* sources
-/// (the periodic reconcile loop and the auto-revalidate-on-open effect) from
-/// stacking with each other, and each of those wraps its own call in
-/// `if !reconciling() { ... }`. The manual Refresh button deliberately does
-/// **not** — a user-initiated reconcile must never be silently skipped just
-/// because an unrelated background reconcile happened to be in flight at that
-/// moment, which previously undermined the "Update always fully reconciles"
-/// guarantee from #126 (see #149's follow-up). Repaints (`prefetched_board` +
-/// `reload`) only on a real difference.
+/// Repaints (`prefetched_board` + `reload`) only on a real difference. Callers
+/// serialize entry through [`ReconcileGate`] so concurrent reconciles cannot
+/// race to overwrite state.
 async fn authoritative_reconcile(
     repo: RepoRef,
     base: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     mut prefetched_board: Signal<Option<View>>,
     mut reload: Signal<u32>,
-    mut reconciling: Signal<bool>,
 ) {
-    reconciling.set(true);
     if let Ok(BoardRefresh::Changed(loaded)) = reconcile_board(&repo, &base).await {
         board_snapshot.set(Some(loaded.snapshot.clone()));
         prefetched_board.set(Some(View::Board {
@@ -1175,7 +1204,6 @@ async fn authoritative_reconcile(
         }));
         reload += 1;
     }
-    reconciling.set(false);
 }
 
 /// The board chrome (header + logo) wrapping either the columns or an error.

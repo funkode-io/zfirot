@@ -16,7 +16,7 @@ dioxus = { version = "0.7", features = ["desktop"] }
 # Used by the board's background-poll timer. Its time driver is desktop/native
 # only (no `wasm32`), so revisit this when gating server/web/desktop — see the
 # poll loop in src/app.rs.
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "sync"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true }
 chrono = "0.4"
