@@ -88,6 +88,15 @@ impl AppError {
         self.kind
     }
 
+    /// Read back a single named value attached via [`with_context`](Self::with_context).
+    /// `None` when that key was never attached.
+    pub fn context(&self, key: &str) -> Option<&str> {
+        self.context
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
     /// Name the operation that failed (`"Module::function"` or `"CommandVariant"`).
     pub fn with_operation(mut self, operation: impl Into<String>) -> Self {
         self.operation = Some(operation.into());
@@ -173,5 +182,17 @@ mod tests {
         let debug = format!("{err:?}");
         assert!(debug.contains("BoardService::classify_board"));
         assert!(debug.contains("funkode-io/zfirot"));
+    }
+
+    #[test]
+    fn context_reads_back_an_attached_value_by_key() {
+        let err = AppError::forbidden("nope").with_context("missing_permission", "Issues");
+        assert_eq!(err.context("missing_permission"), Some("Issues"));
+    }
+
+    #[test]
+    fn context_is_none_for_a_key_never_attached() {
+        let err = AppError::forbidden("nope");
+        assert_eq!(err.context("missing_permission"), None);
     }
 }

@@ -4,6 +4,7 @@
 //! of truth). This crate has no dependencies on other layers.
 
 mod classification;
+mod credential_failure;
 mod error;
 mod freshness;
 mod home_filter;
@@ -22,6 +23,7 @@ mod viewer;
 pub use classification::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
 };
+pub use credential_failure::CredentialFailure;
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
 pub use freshness::{PollInterval, ReconcileInterval};
 pub use home_filter::{filter_home, visible_tracked_repos, HomeFilter};
