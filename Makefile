@@ -43,10 +43,19 @@ build:
 # Build a standalone, optimised macOS app you can run without the toolchain.
 # `dx bundle` auto-runs the Tailwind watcher (Dioxus 0.7), then produces a .app
 # (and .dmg) under target/dx/zfirot/bundle/macos/macos/. Open the .app or drag it
-# to /Applications.
+# to /Applications. On macOS, the resulting .dmg is opened automatically.
 bundle:
 	dx bundle --release --package zfirot --platform desktop
 	@echo "App bundled under target/dx/zfirot/bundle/macos/macos/ — open Zfirot.app or drag it to /Applications."
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		dmg=$$(find target/dx/zfirot/bundle/macos/macos -maxdepth 1 -name '*.dmg' -print -quit); \
+		if [ -n "$$dmg" ]; then \
+			echo "Opening $$dmg..."; \
+			open "$$dmg"; \
+		else \
+			echo "No .dmg found under target/dx/zfirot/bundle/macos/macos/"; \
+		fi \
+	fi
 
 fmt:
 	cargo fmt --all
