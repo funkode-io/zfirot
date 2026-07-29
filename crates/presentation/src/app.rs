@@ -94,17 +94,33 @@ enum Nav {
     GoTo(RepoRef),
 }
 
+/// How a feature action (assign self, confirm classification) failed — what
+/// `ErrorBanner` renders for it. An `Invalid` credential failure never reaches
+/// this type: it clears the token and navigates to the paste screen instead of
+/// leaving any banner behind (see `feature_action_error`).
+#[derive(Clone, PartialEq)]
+enum FeatureActionError {
+    /// Plain transient banner (network, rate limit, not found, a bug, …),
+    /// unchanged from before this ticket.
+    Plain(String),
+    /// Actionable banner: the explanation plus a "Change token…" button that
+    /// opens the Rotate flow, per #144.
+    UnderScoped(String),
+}
+
 #[component]
 pub fn App() -> Element {
     // Cleared on success, set to a client-safe message when a token is rejected.
     let mut token_error = use_signal(|| Option::<String>::None);
     // Set to a client-safe message when assigning self to a Slice fails, shown
     // above the board; cleared on a successful assignment. The delegate (Agent)
-    // action reuses this same banner.
-    let mut assign_error = use_signal(|| Option::<String>::None);
+    // action reuses this same banner. `None` (an Invalid credential failure)
+    // never lands here — that clears the token and navigates away instead.
+    let mut assign_error = use_signal(|| Option::<FeatureActionError>::None);
     // Set to a client-safe message when confirming a suggested classification
-    // fails, shown above the board; cleared on a successful confirm.
-    let mut confirm_error = use_signal(|| Option::<String>::None);
+    // fails, shown above the board; cleared on a successful confirm. Same
+    // Invalid-never-lands-here rule as `assign_error`.
+    let mut confirm_error = use_signal(|| Option::<FeatureActionError>::None);
     // Set to a client-safe message when signing out fails, shown above the
     // current screen (Home or Board); cleared on a successful sign-out.
     let mut sign_out_error = use_signal(|| Option::<String>::None);
@@ -625,7 +641,8 @@ pub fn App() -> Element {
                         assign_error.set(None);
                         reload += 1;
                     }
-                    Err(error) => assign_error.set(Some(error.to_string())),
+                    Err(error) => assign_error
+                        .set(feature_action_error(error, token_error, nav, reload).await),
                 }
             });
         }
@@ -644,7 +661,8 @@ pub fn App() -> Element {
                             confirm_error.set(None);
                             reload += 1;
                         }
-                        Err(error) => confirm_error.set(Some(error.to_string())),
+                        Err(error) => confirm_error
+                            .set(feature_action_error(error, token_error, nav, reload).await),
                     }
                 });
             }
@@ -839,11 +857,11 @@ pub fn App() -> Element {
                         viewer: viewer(),
                         on_change_token: on_open_change_token,
                         on_sign_out,
-                        if let Some(message) = assign_error() {
-                            ErrorBanner { message }
+                        if let Some(error) = assign_error() {
+                            FeatureActionErrorBanner { error, on_change_token: on_open_change_token }
                         }
-                        if let Some(message) = confirm_error() {
-                            ErrorBanner { message }
+                        if let Some(error) = confirm_error() {
+                            FeatureActionErrorBanner { error, on_change_token: on_open_change_token }
                         }
                         if let Some(message) = sign_out_error() {
                             ErrorBanner { message }
@@ -1039,6 +1057,38 @@ async fn credential_failure_view<S: SecureStorePort>(
             missing_permission,
         },
         CredentialFailure::None => View::Error(error.to_string()),
+    }
+}
+
+/// Classify a feature-action failure (assign self, confirm classification)
+/// into the banner it should leave, applying the same ADR 0005
+/// credential-failure routing as [`credential_failure_view`] but for an action
+/// that started from an already-open board rather than a page load. `Invalid`
+/// clears the token and falls back to the paste screen — via `token_error` so
+/// the reason survives the navigation, `Nav::Auto` + `reload` mirroring
+/// `on_sign_out` — leaving no banner at all (`None`). `UnderScoped` and
+/// anything else stay on the Board view with a banner: `UnderScoped` an
+/// actionable one (the caller wires its "Change token…" button to open
+/// Rotate), anything else a plain one, unchanged from before #144.
+async fn feature_action_error(
+    error: AppError,
+    mut token_error: Signal<Option<String>>,
+    mut nav: Signal<Nav>,
+    mut reload: Signal<u32>,
+) -> Option<FeatureActionError> {
+    match CredentialFailure::classify(&error) {
+        CredentialFailure::Invalid => {
+            let auth = AuthService::new(secure_store());
+            let _ = auth.clear_token().await;
+            token_error.set(Some(error.to_string()));
+            nav.set(Nav::Auto);
+            reload += 1;
+            None
+        }
+        CredentialFailure::UnderScoped { .. } => {
+            Some(FeatureActionError::UnderScoped(error.to_string()))
+        }
+        CredentialFailure::None => Some(FeatureActionError::Plain(error.to_string())),
     }
 }
 
@@ -1311,6 +1361,25 @@ fn BoardSummaryBar(summary: BoardSummary) -> Element {
                 span { class: "font-semibold", "{summary.blocked}" }
             }
         }
+    }
+}
+
+/// The banner for a feature-action failure (assign self, confirm
+/// classification): `UnderScoped` renders the actionable treatment (a
+/// "Change token…" button wired to `on_change_token`), `Plain` the same
+/// banner without one. See [`FeatureActionError`].
+#[component]
+fn FeatureActionErrorBanner(
+    error: FeatureActionError,
+    on_change_token: EventHandler<()>,
+) -> Element {
+    match error {
+        FeatureActionError::UnderScoped(message) => rsx! {
+            ErrorBanner { message, on_change_token }
+        },
+        FeatureActionError::Plain(message) => rsx! {
+            ErrorBanner { message }
+        },
     }
 }
 
