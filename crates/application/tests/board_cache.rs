@@ -7,7 +7,9 @@ use application::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use domain::{AppAction, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RepoRef, SliceState};
+use domain::{
+    AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RepoRef, SliceState,
+};
 
 #[derive(Default)]
 struct CountingBoardCache {
@@ -99,6 +101,38 @@ impl GitHubPort for SequencePort {
             .expect("lock poisoned")
             .pop_front()
             .expect("delta sequence should have a value"))
+    }
+
+    async fn list_projects(&self) -> AppResult<Vec<Project>> {
+        Ok(vec![])
+    }
+
+    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
+        Ok(())
+    }
+
+    async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
+        Ok(())
+    }
+}
+
+/// A [`GitHubPort`] whose delta/full-load calls always fail (a connectivity
+/// blip), for asserting that a failed fetch never advances `fetched_at` or
+/// rewrites the cache.
+struct FailingPort;
+
+#[async_trait]
+impl GitHubPort for FailingPort {
+    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        Err(AppError::unavailable("GitHub is temporarily unavailable"))
+    }
+
+    async fn load_issues_since(
+        &self,
+        _repo: &RepoRef,
+        _since: DateTime<Utc>,
+    ) -> AppResult<Vec<RawIssue>> {
+        Err(AppError::unavailable("GitHub is temporarily unavailable"))
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -575,4 +609,86 @@ async fn delta_refresh_misses_a_newly_linked_pr_but_reconcile_catches_it() {
             panic!("reconcile must catch a linked PR the delta window missed")
         }
     }
+}
+
+#[tokio::test]
+async fn failed_delta_refresh_leaves_snapshot_and_cache_untouched() {
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let cache = Arc::new(CountingBoardCache::default());
+    let seed_service = CachedBoardService::new(
+        SequencePort::new(vec![vec![open_issue(50, "Seeded")]], vec![]),
+        cache.clone(),
+    );
+    let snapshot = match seed_service
+        .open(&repo)
+        .await
+        .expect("cold open should seed")
+    {
+        BoardOpen::Cold(loaded) => loaded.snapshot,
+        BoardOpen::Cached(_) => panic!("first open is cold"),
+    };
+    assert_eq!(cache.writes(), 1, "seed should write exactly once");
+
+    // A connectivity blip on the delta half of a refresh.
+    let flaky_service = CachedBoardService::new(FailingPort, cache.clone());
+    flaky_service
+        .refresh_cached(&repo, &snapshot)
+        .await
+        .expect_err("a failing port must surface as an error, not a silent no-op");
+
+    assert_eq!(
+        cache.writes(),
+        1,
+        "a failed delta refresh must not rewrite the cache"
+    );
+    let cached = cache
+        .cached_board(&repo)
+        .await
+        .expect("cache read should succeed")
+        .expect("cache should still hold the seeded snapshot");
+    assert_eq!(
+        cached.fetched_at, snapshot.fetched_at,
+        "a failed delta refresh must not advance the cached fetched_at"
+    );
+}
+
+#[tokio::test]
+async fn failed_reconcile_leaves_snapshot_and_cache_untouched() {
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let cache = Arc::new(CountingBoardCache::default());
+    let seed_service = CachedBoardService::new(
+        SequencePort::new(vec![vec![open_issue(51, "Seeded")]], vec![]),
+        cache.clone(),
+    );
+    let snapshot = match seed_service
+        .open(&repo)
+        .await
+        .expect("cold open should seed")
+    {
+        BoardOpen::Cold(loaded) => loaded.snapshot,
+        BoardOpen::Cached(_) => panic!("first open is cold"),
+    };
+    assert_eq!(cache.writes(), 1, "seed should write exactly once");
+
+    // A connectivity blip on the full-load reconcile.
+    let flaky_service = CachedBoardService::new(FailingPort, cache.clone());
+    flaky_service
+        .reconcile_cached(&repo, &snapshot)
+        .await
+        .expect_err("a failing port must surface as an error, not a silent no-op");
+
+    assert_eq!(
+        cache.writes(),
+        1,
+        "a failed reconcile must not rewrite the cache"
+    );
+    let cached = cache
+        .cached_board(&repo)
+        .await
+        .expect("cache read should succeed")
+        .expect("cache should still hold the seeded snapshot");
+    assert_eq!(
+        cached.fetched_at, snapshot.fetched_at,
+        "a failed reconcile must not advance the cached fetched_at"
+    );
 }

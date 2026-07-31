@@ -156,6 +156,13 @@ pub fn App() -> Element {
     // Set to a client-safe message when signing out fails, shown above the
     // current screen (Home or Board); cleared on a successful sign-out.
     let mut sign_out_error = use_signal(|| Option::<String>::None);
+    // Set to a client-safe message when a delta refresh or authoritative
+    // reconcile fails (e.g. a connectivity blip) — automatic sources and manual
+    // Refresh alike, so a flaky network is visible instead of the board just
+    // silently sitting on stale data. Cleared on the next successful refresh
+    // from any source. Never touches `board_snapshot`/the cache: a failed fetch
+    // must not advance `fetched_at` (see `delta_refresh`/`authoritative_reconcile`).
+    let mut refresh_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
     // Where the user wants to be; starts at `Auto` so the last-opened project
@@ -367,6 +374,7 @@ pub fn App() -> Element {
                     board_snapshot,
                     prefetched_board,
                     reload,
+                    refresh_error,
                 )
                 .await
                 {
@@ -380,6 +388,7 @@ pub fn App() -> Element {
                                 board_snapshot,
                                 prefetched_board,
                                 reload,
+                                refresh_error,
                             )
                         })
                         .await;
@@ -416,6 +425,7 @@ pub fn App() -> Element {
                 if let Some(snapshot) = board_snapshot() {
                     match refresh_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
+                            refresh_error.set(None);
                             // Stash the already-fetched board and repaint from it, so
                             // a change costs one fetch, not two (refresh + reload).
                             board_snapshot.set(Some(loaded.snapshot.clone()));
@@ -431,10 +441,12 @@ pub fn App() -> Element {
                         // Facts unchanged: don't repaint, but adopt the snapshot so
                         // its advanced `fetched_at` moves the next delta window on.
                         Ok(BoardRefresh::Unchanged(snapshot)) => {
+                            refresh_error.set(None);
                             board_snapshot.set(Some(snapshot));
                         }
                         Err(error) => {
                             warn!(repo = %repo, error = ?error, "background reconcile failed");
+                            refresh_error.set(Some(error.to_string()));
                         }
                     }
                 }
@@ -471,6 +483,7 @@ pub fn App() -> Element {
                                     board_snapshot,
                                     prefetched_board,
                                     reload,
+                                    refresh_error,
                                 )
                             })
                             .await;
@@ -515,6 +528,7 @@ pub fn App() -> Element {
                         board_snapshot,
                         prefetched_board,
                         reload,
+                        refresh_error,
                     )
                     .await;
                     // Spinner clears after the fast delta paint.
@@ -529,6 +543,7 @@ pub fn App() -> Element {
                                     board_snapshot,
                                     prefetched_board,
                                     reload,
+                                    refresh_error,
                                 )
                             })
                             .await;
@@ -904,6 +919,9 @@ pub fn App() -> Element {
                         if let Some(message) = sign_out_error() {
                             ErrorBanner { message }
                         }
+                        if let Some(message) = refresh_error() {
+                            ErrorBanner { message }
+                        }
                         BoardSummaryBar { summary }
                         Board {
                             slices: board.slices.clone(),
@@ -1142,17 +1160,24 @@ fn now_hms() -> String {
 /// moves forward. Returns the resulting snapshot on success (`Changed` or
 /// `Unchanged`), for the caller to feed into [`authoritative_reconcile`];
 /// `None` on a fetch failure, so the caller skips reconciling from a result
-/// that may not reflect reality. Shared by the auto-revalidate-on-cache-open
-/// effect and the manual Refresh button, so both apply the same rule.
+/// that may not reflect reality — the retained snapshot and cache are left
+/// exactly as they were, so a failed fetch can never advance `fetched_at`.
+/// Shared by the auto-revalidate-on-cache-open effect, the periodic poll, and
+/// the manual Refresh button, so all three apply the same rule. Clears
+/// `refresh_error` on success (any source healed it) and sets a client-safe
+/// message on failure, so a connectivity blip is visible instead of the board
+/// silently sitting on stale data.
 async fn delta_refresh(
     repo: RepoRef,
     snapshot: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     mut prefetched_board: Signal<Option<View>>,
     mut reload: Signal<u32>,
+    mut refresh_error: Signal<Option<String>>,
 ) -> Option<BoardSnapshot> {
     match refresh_board(&repo, &snapshot).await {
         Ok(BoardRefresh::Changed(loaded)) => {
+            refresh_error.set(None);
             board_snapshot.set(Some(loaded.snapshot.clone()));
             prefetched_board.set(Some(View::Board {
                 repo,
@@ -1167,10 +1192,14 @@ async fn delta_refresh(
         // Facts unchanged: don't repaint, but adopt the snapshot so its
         // advanced `fetched_at` moves the next delta window on.
         Ok(BoardRefresh::Unchanged(snapshot)) => {
+            refresh_error.set(None);
             board_snapshot.set(Some(snapshot.clone()));
             Some(snapshot)
         }
-        Err(_) => None,
+        Err(error) => {
+            refresh_error.set(Some(error.to_string()));
+            None
+        }
     }
 }
 
@@ -1185,24 +1214,35 @@ async fn delta_refresh(
 ///
 /// Repaints (`prefetched_board` + `reload`) only on a real difference. Callers
 /// serialize entry through [`ReconcileGate`] so concurrent reconciles cannot
-/// race to overwrite state.
+/// race to overwrite state. A failed reconcile leaves the retained snapshot
+/// and cache untouched (`fetched_at` never advances on failure) and sets a
+/// client-safe `refresh_error`; any successful reconcile — changed or not —
+/// clears it.
 async fn authoritative_reconcile(
     repo: RepoRef,
     base: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     mut prefetched_board: Signal<Option<View>>,
     mut reload: Signal<u32>,
+    mut refresh_error: Signal<Option<String>>,
 ) {
-    if let Ok(BoardRefresh::Changed(loaded)) = reconcile_board(&repo, &base).await {
-        board_snapshot.set(Some(loaded.snapshot.clone()));
-        prefetched_board.set(Some(View::Board {
-            repo,
-            board: loaded.board,
-            loaded_at: now_hms(),
-            snapshot: loaded.snapshot,
-            from_cache: false,
-        }));
-        reload += 1;
+    match reconcile_board(&repo, &base).await {
+        Ok(BoardRefresh::Changed(loaded)) => {
+            refresh_error.set(None);
+            board_snapshot.set(Some(loaded.snapshot.clone()));
+            prefetched_board.set(Some(View::Board {
+                repo,
+                board: loaded.board,
+                loaded_at: now_hms(),
+                snapshot: loaded.snapshot,
+                from_cache: false,
+            }));
+            reload += 1;
+        }
+        // A reconcile that found nothing to heal still confirms the connection
+        // is healthy, so it clears a previous failure too.
+        Ok(BoardRefresh::Unchanged(_)) => refresh_error.set(None),
+        Err(error) => refresh_error.set(Some(error.to_string())),
     }
 }
 
