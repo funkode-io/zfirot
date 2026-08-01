@@ -1297,6 +1297,9 @@ fn BoardShell(
     on_sign_out: EventHandler<()>,
 ) -> Element {
     let total_cache = format_bytes(cache_usage.total_bytes);
+    // True for a short moment after the repo name was copied, so the copy
+    // button can acknowledge the click before reverting to its idle icon.
+    let mut copied = use_signal(|| false);
     rsx! {
         div { class: "min-h-screen bg-base-100 p-6",
             header { class: "flex items-center gap-2 mb-6",
@@ -1304,6 +1307,29 @@ fn BoardShell(
                 h1 { class: "text-2xl font-bold", "Zfirot" }
                 if let Some(repo) = repo {
                     span { class: "text-base opacity-60", "/ {repo}" }
+                    // Copy the open project's `owner/name` — handy when pasting
+                    // it into a terminal or an issue.
+                    button {
+                        class: "btn btn-ghost btn-xs btn-square",
+                        title: if copied() { "Copied!" } else { "Copy repository name" },
+                        aria_label: "Copy repository name",
+                        onclick: {
+                            let repo = repo.clone();
+                            move |_| {
+                                copy_to_clipboard(&repo);
+                                copied.set(true);
+                                spawn(async move {
+                                    tokio::time::sleep(COPIED_FEEDBACK).await;
+                                    copied.set(false);
+                                });
+                            }
+                        },
+                        if copied() {
+                            span { class: "icon-[lucide--check] size-4 text-success" }
+                        } else {
+                            span { class: "icon-[lucide--copy] size-4" }
+                        }
+                    }
                 }
                 // Always available so an error view (which carries no `repo`)
                 // still has a navigation escape hatch back to the project picker.
@@ -1419,6 +1445,47 @@ fn BoardShell(
             {children}
         }
     }
+}
+
+/// How long the copy button shows its "copied" acknowledgement.
+const COPIED_FEEDBACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Put `text` on the OS clipboard from the webview.
+fn copy_to_clipboard(text: &str) {
+    document::eval(&clipboard_script(text));
+}
+
+/// The JS that copies `text`, with `text` escaped for a single-quoted literal.
+///
+/// Prefers the async Clipboard API and falls back to a hidden textarea plus
+/// `execCommand('copy')` for webviews that expose no `navigator.clipboard`.
+fn clipboard_script(text: &str) -> String {
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    format!(
+        "(function () {{ \
+           const text = '{escaped}'; \
+           const fallback = () => {{ \
+             const area = document.createElement('textarea'); \
+             area.value = text; \
+             area.setAttribute('readonly', ''); \
+             area.style.position = 'fixed'; \
+             area.style.opacity = '0'; \
+             document.body.appendChild(area); \
+             area.select(); \
+             document.execCommand('copy'); \
+             document.body.removeChild(area); \
+           }}; \
+           if (navigator.clipboard && navigator.clipboard.writeText) {{ \
+             navigator.clipboard.writeText(text).catch(fallback); \
+           }} else {{ \
+             fallback(); \
+           }} \
+         }})();"
+    )
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -1565,5 +1632,25 @@ fn OtherIssues(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clipboard_script;
+
+    #[test]
+    fn clipboard_script_carries_the_repo_name() {
+        let script = clipboard_script("majidalfuttaim/zfirot");
+
+        assert!(script.contains("const text = 'majidalfuttaim/zfirot';"));
+        assert!(script.contains("navigator.clipboard.writeText(text)"));
+    }
+
+    #[test]
+    fn clipboard_script_escapes_quotes_and_backslashes() {
+        let script = clipboard_script(r"own'er\name");
+
+        assert!(script.contains(r"const text = 'own\'er\\name';"));
     }
 }
