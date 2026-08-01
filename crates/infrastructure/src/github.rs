@@ -12,9 +12,25 @@ use serde::Deserialize;
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 
+/// The linked-PR selection every issue-projecting query shares, as a literal so
+/// the three queries below can `concat!` it and cannot drift apart.
+///
+/// `state` is deliberately part of it. GitHub's `includeClosedPrs: false` is
+/// **not** "open PRs only": it drops CLOSED-unmerged references but still
+/// returns **MERGED** ones, so the state has to be fetched and filtered
+/// client-side (see [`map_issue_raw`]). `first: 20` because merged references
+/// still occupy slots in the page — a Slice reworked across several PRs must not
+/// have its one open PR pushed out of the window by its merged predecessors.
+macro_rules! linked_prs_selection {
+    () => {
+        r#"closedByPullRequestsReferences(first: 20, includeClosedPrs: false) { nodes { number url title state author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }"#
+    };
+}
+
 /// One page of issues for classification: **open issues only**, with the labels,
 /// native relationships, and linked-PR state the two-tier classifier needs.
-const ISSUES_QUERY: &str = r#"
+const ISSUES_QUERY: &str = concat!(
+    r#"
 query Issues($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     issues(first: 50, after: $cursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
@@ -29,16 +45,20 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
+        "#,
+    linked_prs_selection!(),
+    r#"
       }
     }
   }
 }
-"#;
+"#
+);
 
 /// One page of issue deltas for incremental refresh: open and closed issues
 /// updated at or after `since`.
-const ISSUES_SINCE_QUERY: &str = r#"
+const ISSUES_SINCE_QUERY: &str = concat!(
+    r#"
 query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: DateTime!) {
   repository(owner: $owner, name: $name) {
     issues(
@@ -59,12 +79,15 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
+        "#,
+    linked_prs_selection!(),
+    r#"
       }
     }
   }
 }
-"#;
+"#
+);
 
 /// Pull requests updated at or after `since` (any state), for healing a
 /// specific blind spot in [`ISSUES_SINCE_QUERY`]: GitHub does **not** bump an
@@ -77,7 +100,8 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
 /// fetched with the exact same shape as the issues queries) closes the gap.
 /// Ordering lets the caller stop as soon as a page reaches a PR older than
 /// `since` — everything after it is older still.
-const PULL_REQUESTS_SINCE_QUERY: &str = r#"
+const PULL_REQUESTS_SINCE_QUERY: &str = concat!(
+    r#"
 query PullRequestsSince($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequests(first: 50, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
@@ -95,14 +119,17 @@ query PullRequestsSince($owner: String!, $name: String!, $cursor: String) {
             assignees(first: 1) { nodes { login avatarUrl } }
             parent { number labels(first: 20) { nodes { name } } }
             blockedBy(first: 50) { nodes { number } }
-            closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url title author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }
+            "#,
+    linked_prs_selection!(),
+    r#"
           }
         }
       }
     }
   }
 }
-"#;
+"#
+);
 
 /// The viewer's accessible repositories, most-recently-pushed first, for the
 /// home screen. One page of up to 50 is plenty for a recent-projects list;
@@ -1229,13 +1256,20 @@ fn review_decision(raw: Option<&str>) -> Option<ReviewDecision> {
 /// linked-PR state. The cross-issue open-set filtering and prose resolution are
 /// left to `classify_board`.
 fn map_issue_raw(node: RawIssueNode) -> RawIssue {
-    // `includeClosedPrs: false` means every returned node is an open linked PR,
-    // so each maps straight to a `LinkedPrRef`. A null `author` (e.g. a deleted
-    // account) leaves the `@u` segment off the badge.
+    // A Linked PR is an **open** Pull Request, and the query cannot guarantee
+    // that on its own: `includeClosedPrs: false` drops CLOSED-unmerged
+    // references but still returns MERGED ones. Filtering on the PR's own
+    // `state` here is what stops a merged PR from keeping a Slice in WIP with a
+    // stale `pr #n` badge — no amount of refreshing or reconciling can heal
+    // that, because every fetch re-reads the same fact. Anything that is not
+    // explicitly `OPEN` (including a payload with no state at all) is not a
+    // Linked PR. A null `author` (e.g. a deleted account) leaves the `@u`
+    // segment off the badge.
     let linked_prs = node
         .closed_by_pull_requests_references
         .nodes
         .into_iter()
+        .filter(|pr| pr.state.as_deref() == Some("OPEN"))
         .map(|pr| LinkedPrRef {
             number: pr.number,
             author: pr.author.map(|author| author.login),
@@ -1390,6 +1424,11 @@ struct LinkedPrNode {
     number: u64,
     url: String,
     title: String,
+    /// The PR's own state (`OPEN`, `CLOSED`, `MERGED`). Non-null in GitHub's
+    /// schema; `Option` only so a malformed payload fails closed (not a Linked
+    /// PR) instead of failing to deserialize the whole page.
+    #[serde(default)]
+    state: Option<String>,
     author: Option<AuthorNode>,
     #[serde(default)]
     is_draft: bool,
@@ -1653,7 +1692,8 @@ mod tests {
                     "assignees": { "nodes": [] }, "parent": null,
                     "blockedBy": { "nodes": [] },
                     "closedByPullRequestsReferences": { "nodes": [ {
-                        "number": 9, "url": "https://x/pull/9", "title": "PR", "author": null,
+                        "number": 9, "url": "https://x/pull/9", "title": "PR",
+                        "state": "OPEN", "author": null,
                         "isDraft": false, "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
                         "commits": { "nodes": [ { "commit": { "statusCheckRollup": null } } ] },
                         "reviewThreads": { "nodes": [] }
