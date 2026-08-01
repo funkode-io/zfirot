@@ -183,8 +183,16 @@ pub fn App() -> Element {
     // Changed/Unchanged during polls and manual refreshes.
     let mut board_snapshot = use_signal(|| Option::<BoardSnapshot>::None);
     // True while the fast/manual delta refresh is in flight; it clears before
-    // the authoritative reconcile runs.
+    // the authoritative reconcile runs (see `syncing` for that phase).
     let mut board_refreshing = use_signal(|| false);
+    // True while an authoritative (full-load) reconcile is in flight, from any
+    // source — automatic or manual. Folded into the Refresh button's spinner
+    // (see `refreshing` below) alongside `board_refreshing`, so the button
+    // keeps indicating in-flight work for the whole two-phase refresh instead
+    // of going idle the moment the fast delta phase clears `board_refreshing`,
+    // while the slower reconcile that actually catches things like a just-
+    // merged PR keeps running silently behind an icon that already looks done.
+    let syncing = use_signal(|| false);
     // Single-flight gate for full-load reconciles so background and manual
     // reconciles never overlap and stale results cannot overwrite newer state.
     let reconcile_gate = use_hook(ReconcileGate::new);
@@ -388,6 +396,7 @@ pub fn App() -> Element {
                                 board_snapshot,
                                 prefetched_board,
                                 reload,
+                                syncing,
                                 refresh_error,
                             )
                         })
@@ -483,6 +492,7 @@ pub fn App() -> Element {
                                     board_snapshot,
                                     prefetched_board,
                                     reload,
+                                    syncing,
                                     refresh_error,
                                 )
                             })
@@ -507,7 +517,7 @@ pub fn App() -> Element {
     // Update (#149, hardening the guarantee #126 first established).
     let reconcile_gate_manual = reconcile_gate.clone();
     let on_refresh = move |_| {
-        if board_refreshing() {
+        if board_refreshing() || syncing() {
             return;
         }
         let open_repo = match view.read_unchecked().as_ref() {
@@ -543,6 +553,7 @@ pub fn App() -> Element {
                                     board_snapshot,
                                     prefetched_board,
                                     reload,
+                                    syncing,
                                     refresh_error,
                                 )
                             })
@@ -789,11 +800,16 @@ pub fn App() -> Element {
     // background poll, the Refresh button, or the re-poll after assigning or
     // confirming. The board stays on screen (see `board_loading`), so this only
     // drives a small in-flight indicator on the Refresh button rather than
-    // replacing any content.
+    // replacing any content. Includes `syncing` so the indicator spans the
+    // whole two-phase refresh (delta + authoritative reconcile), not just the
+    // faster delta half — otherwise the button looked idle while a reconcile
+    // that might still change the board (e.g. catching a just-merged PR) kept
+    // running silently behind it.
     let refreshing = (matches!(*view.state().read(), UseResourceState::Pending)
         && matches!(&*view.read_unchecked(), Some(View::Board { .. }))
         && !board_loading)
-        || board_refreshing();
+        || board_refreshing()
+        || syncing();
 
     rsx! {
         document::Title { "Zfirot" }
@@ -1203,8 +1219,13 @@ async fn delta_refresh(
     }
 }
 
-/// The slow, authoritative half of a two-phase board refresh: a silent full
-/// reconcile that heals drift the delta cannot observe. This is not only for
+/// The slow, authoritative half of a two-phase board refresh: not silent any
+/// more — it holds `syncing` true for its whole duration (from every source:
+/// auto-revalidate-on-open, the periodic reconcile loop, or the manual Refresh
+/// button), which the Refresh button's spinner also watches, so the button
+/// keeps indicating in-flight work through this phase instead of going idle
+/// right after the faster `delta_refresh` clears `board_refreshing` while this
+/// heals drift the delta cannot observe. This is not only for
 /// hard-deleted/transferred issues (the original motivation for the slow
 /// background reconcile loop): GitHub does not bump an issue's own
 /// `updatedAt` when a PR is opened with a closing reference to it, so a
@@ -1224,8 +1245,10 @@ async fn authoritative_reconcile(
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     mut prefetched_board: Signal<Option<View>>,
     mut reload: Signal<u32>,
+    mut syncing: Signal<bool>,
     mut refresh_error: Signal<Option<String>>,
 ) {
+    syncing.set(true);
     match reconcile_board(&repo, &base).await {
         Ok(BoardRefresh::Changed(loaded)) => {
             refresh_error.set(None);
@@ -1244,6 +1267,7 @@ async fn authoritative_reconcile(
         Ok(BoardRefresh::Unchanged(_)) => refresh_error.set(None),
         Err(error) => refresh_error.set(Some(error.to_string())),
     }
+    syncing.set(false);
 }
 
 /// The board chrome (header + logo) wrapping either the columns or an error.
