@@ -156,6 +156,13 @@ pub fn App() -> Element {
     // Set to a client-safe message when signing out fails, shown above the
     // current screen (Home or Board); cleared on a successful sign-out.
     let mut sign_out_error = use_signal(|| Option::<String>::None);
+    // Set to a client-safe message when a delta refresh or authoritative
+    // reconcile fails (e.g. a connectivity blip) — automatic sources and manual
+    // Refresh alike, so a flaky network is visible instead of the board just
+    // silently sitting on stale data. Cleared on the next successful refresh
+    // from any source. Never touches `board_snapshot`/the cache: a failed fetch
+    // must not advance `fetched_at` (see `delta_refresh`/`authoritative_reconcile`).
+    let mut refresh_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
     // Where the user wants to be; starts at `Auto` so the last-opened project
@@ -176,8 +183,16 @@ pub fn App() -> Element {
     // Changed/Unchanged during polls and manual refreshes.
     let mut board_snapshot = use_signal(|| Option::<BoardSnapshot>::None);
     // True while the fast/manual delta refresh is in flight; it clears before
-    // the authoritative reconcile runs.
+    // the authoritative reconcile runs (see `syncing` for that phase).
     let mut board_refreshing = use_signal(|| false);
+    // True while an authoritative (full-load) reconcile is in flight, from any
+    // source — automatic or manual. Folded into the Refresh button's spinner
+    // (see `refreshing` below) alongside `board_refreshing`, so the button
+    // keeps indicating in-flight work for the whole two-phase refresh instead
+    // of going idle the moment the fast delta phase clears `board_refreshing`,
+    // while the slower reconcile that actually catches things like a just-
+    // merged PR keeps running silently behind an icon that already looks done.
+    let syncing = use_signal(|| false);
     // Single-flight gate for full-load reconciles so background and manual
     // reconciles never overlap and stale results cannot overwrite newer state.
     let reconcile_gate = use_hook(ReconcileGate::new);
@@ -367,6 +382,7 @@ pub fn App() -> Element {
                     board_snapshot,
                     prefetched_board,
                     reload,
+                    refresh_error,
                 )
                 .await
                 {
@@ -380,6 +396,8 @@ pub fn App() -> Element {
                                 board_snapshot,
                                 prefetched_board,
                                 reload,
+                                syncing,
+                                refresh_error,
                             )
                         })
                         .await;
@@ -416,6 +434,7 @@ pub fn App() -> Element {
                 if let Some(snapshot) = board_snapshot() {
                     match refresh_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
+                            refresh_error.set(None);
                             // Stash the already-fetched board and repaint from it, so
                             // a change costs one fetch, not two (refresh + reload).
                             board_snapshot.set(Some(loaded.snapshot.clone()));
@@ -431,10 +450,12 @@ pub fn App() -> Element {
                         // Facts unchanged: don't repaint, but adopt the snapshot so
                         // its advanced `fetched_at` moves the next delta window on.
                         Ok(BoardRefresh::Unchanged(snapshot)) => {
+                            refresh_error.set(None);
                             board_snapshot.set(Some(snapshot));
                         }
                         Err(error) => {
                             warn!(repo = %repo, error = ?error, "background reconcile failed");
+                            refresh_error.set(Some(error.to_string()));
                         }
                     }
                 }
@@ -471,6 +492,8 @@ pub fn App() -> Element {
                                     board_snapshot,
                                     prefetched_board,
                                     reload,
+                                    syncing,
+                                    refresh_error,
                                 )
                             })
                             .await;
@@ -494,7 +517,7 @@ pub fn App() -> Element {
     // Update (#149, hardening the guarantee #126 first established).
     let reconcile_gate_manual = reconcile_gate.clone();
     let on_refresh = move |_| {
-        if board_refreshing() {
+        if board_refreshing() || syncing() {
             return;
         }
         let open_repo = match view.read_unchecked().as_ref() {
@@ -515,6 +538,7 @@ pub fn App() -> Element {
                         board_snapshot,
                         prefetched_board,
                         reload,
+                        refresh_error,
                     )
                     .await;
                     // Spinner clears after the fast delta paint.
@@ -529,6 +553,8 @@ pub fn App() -> Element {
                                     board_snapshot,
                                     prefetched_board,
                                     reload,
+                                    syncing,
+                                    refresh_error,
                                 )
                             })
                             .await;
@@ -774,11 +800,16 @@ pub fn App() -> Element {
     // background poll, the Refresh button, or the re-poll after assigning or
     // confirming. The board stays on screen (see `board_loading`), so this only
     // drives a small in-flight indicator on the Refresh button rather than
-    // replacing any content.
+    // replacing any content. Includes `syncing` so the indicator spans the
+    // whole two-phase refresh (delta + authoritative reconcile), not just the
+    // faster delta half — otherwise the button looked idle while a reconcile
+    // that might still change the board (e.g. catching a just-merged PR) kept
+    // running silently behind it.
     let refreshing = (matches!(*view.state().read(), UseResourceState::Pending)
         && matches!(&*view.read_unchecked(), Some(View::Board { .. }))
         && !board_loading)
-        || board_refreshing();
+        || board_refreshing()
+        || syncing();
 
     rsx! {
         document::Title { "Zfirot" }
@@ -902,6 +933,9 @@ pub fn App() -> Element {
                             FeatureActionErrorBanner { error, on_change_token: on_open_change_token }
                         }
                         if let Some(message) = sign_out_error() {
+                            ErrorBanner { message }
+                        }
+                        if let Some(message) = refresh_error() {
                             ErrorBanner { message }
                         }
                         BoardSummaryBar { summary }
@@ -1142,17 +1176,24 @@ fn now_hms() -> String {
 /// moves forward. Returns the resulting snapshot on success (`Changed` or
 /// `Unchanged`), for the caller to feed into [`authoritative_reconcile`];
 /// `None` on a fetch failure, so the caller skips reconciling from a result
-/// that may not reflect reality. Shared by the auto-revalidate-on-cache-open
-/// effect and the manual Refresh button, so both apply the same rule.
+/// that may not reflect reality — the retained snapshot and cache are left
+/// exactly as they were, so a failed fetch can never advance `fetched_at`.
+/// Shared by the auto-revalidate-on-cache-open effect, the periodic poll, and
+/// the manual Refresh button, so all three apply the same rule. Clears
+/// `refresh_error` on success (any source healed it) and sets a client-safe
+/// message on failure, so a connectivity blip is visible instead of the board
+/// silently sitting on stale data.
 async fn delta_refresh(
     repo: RepoRef,
     snapshot: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     mut prefetched_board: Signal<Option<View>>,
     mut reload: Signal<u32>,
+    mut refresh_error: Signal<Option<String>>,
 ) -> Option<BoardSnapshot> {
     match refresh_board(&repo, &snapshot).await {
         Ok(BoardRefresh::Changed(loaded)) => {
+            refresh_error.set(None);
             board_snapshot.set(Some(loaded.snapshot.clone()));
             prefetched_board.set(Some(View::Board {
                 repo,
@@ -1167,15 +1208,24 @@ async fn delta_refresh(
         // Facts unchanged: don't repaint, but adopt the snapshot so its
         // advanced `fetched_at` moves the next delta window on.
         Ok(BoardRefresh::Unchanged(snapshot)) => {
+            refresh_error.set(None);
             board_snapshot.set(Some(snapshot.clone()));
             Some(snapshot)
         }
-        Err(_) => None,
+        Err(error) => {
+            refresh_error.set(Some(error.to_string()));
+            None
+        }
     }
 }
 
-/// The slow, authoritative half of a two-phase board refresh: a silent full
-/// reconcile that heals drift the delta cannot observe. This is not only for
+/// The slow, authoritative half of a two-phase board refresh: not silent any
+/// more — it holds `syncing` true for its whole duration (from every source:
+/// auto-revalidate-on-open, the periodic reconcile loop, or the manual Refresh
+/// button), which the Refresh button's spinner also watches, so the button
+/// keeps indicating in-flight work through this phase instead of going idle
+/// right after the faster `delta_refresh` clears `board_refreshing` while this
+/// heals drift the delta cannot observe. This is not only for
 /// hard-deleted/transferred issues (the original motivation for the slow
 /// background reconcile loop): GitHub does not bump an issue's own
 /// `updatedAt` when a PR is opened with a closing reference to it, so a
@@ -1185,25 +1235,39 @@ async fn delta_refresh(
 ///
 /// Repaints (`prefetched_board` + `reload`) only on a real difference. Callers
 /// serialize entry through [`ReconcileGate`] so concurrent reconciles cannot
-/// race to overwrite state.
+/// race to overwrite state. A failed reconcile leaves the retained snapshot
+/// and cache untouched (`fetched_at` never advances on failure) and sets a
+/// client-safe `refresh_error`; any successful reconcile — changed or not —
+/// clears it.
 async fn authoritative_reconcile(
     repo: RepoRef,
     base: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     mut prefetched_board: Signal<Option<View>>,
     mut reload: Signal<u32>,
+    mut syncing: Signal<bool>,
+    mut refresh_error: Signal<Option<String>>,
 ) {
-    if let Ok(BoardRefresh::Changed(loaded)) = reconcile_board(&repo, &base).await {
-        board_snapshot.set(Some(loaded.snapshot.clone()));
-        prefetched_board.set(Some(View::Board {
-            repo,
-            board: loaded.board,
-            loaded_at: now_hms(),
-            snapshot: loaded.snapshot,
-            from_cache: false,
-        }));
-        reload += 1;
+    syncing.set(true);
+    match reconcile_board(&repo, &base).await {
+        Ok(BoardRefresh::Changed(loaded)) => {
+            refresh_error.set(None);
+            board_snapshot.set(Some(loaded.snapshot.clone()));
+            prefetched_board.set(Some(View::Board {
+                repo,
+                board: loaded.board,
+                loaded_at: now_hms(),
+                snapshot: loaded.snapshot,
+                from_cache: false,
+            }));
+            reload += 1;
+        }
+        // A reconcile that found nothing to heal still confirms the connection
+        // is healthy, so it clears a previous failure too.
+        Ok(BoardRefresh::Unchanged(_)) => refresh_error.set(None),
+        Err(error) => refresh_error.set(Some(error.to_string())),
     }
+    syncing.set(false);
 }
 
 /// The board chrome (header + logo) wrapping either the columns or an error.
