@@ -49,7 +49,7 @@ pub fn init() -> Option<PathBuf> {
     // A `None` layer is a no-op layer, which is exactly the stderr-only
     // degradation we want.
     let file_layer = appender.map(|appender| fmt::layer().with_ansi(false).with_writer(appender));
-    let logging_to = file_layer.is_some().then(|| dir).flatten();
+    let logging_to = file_layer.is_some().then_some(dir).flatten();
 
     tracing_subscriber::registry()
         .with(filter)

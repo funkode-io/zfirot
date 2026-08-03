@@ -22,6 +22,7 @@ use crate::components::{
     AccountMenu, ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner,
     TokenScreen,
 };
+use crate::logging::surface_error;
 use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
     confirm_classification, last_opened, open_and_track_project, open_board, open_project,
@@ -29,7 +30,6 @@ use crate::state::{
     remember_theme_preference, remember_view_mode, secure_store, sign_out, theme_preference,
     tracked_repos, untrack_repo, view_mode, viewer as fetch_viewer,
 };
-use tracing::warn;
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
 /// `dx serve` / `dx bundle` (Dioxus 0.7) auto-generate it from
@@ -454,8 +454,7 @@ pub fn App() -> Element {
                             board_snapshot.set(Some(snapshot));
                         }
                         Err(error) => {
-                            warn!(repo = %repo, error = ?error, "background reconcile failed");
-                            refresh_error.set(Some(error.to_string()));
+                            refresh_error.set(Some(surface_error("board_poll", &error)));
                         }
                     }
                 }
@@ -575,7 +574,7 @@ pub fn App() -> Element {
                     token_error.set(None);
                     reload += 1;
                 }
-                Err(error) => token_error.set(Some(error.to_string())),
+                Err(error) => token_error.set(Some(surface_error("save_token", &error))),
             }
             saving.set(false);
         });
@@ -609,7 +608,7 @@ pub fn App() -> Element {
                     change_token_error.set(None);
                     show_change_token.set(false);
                 }
-                Err(error) => change_token_error.set(Some(error.to_string())),
+                Err(error) => change_token_error.set(Some(surface_error("change_token", &error))),
             }
             change_token_saving.set(false);
         });
@@ -631,7 +630,9 @@ pub fn App() -> Element {
                     prefetched_board.set(None);
                     reload += 1;
                 }
-                Err(error) => rotate_reactive_error.set(Some(error.to_string())),
+                Err(error) => {
+                    rotate_reactive_error.set(Some(surface_error("rotate_token", &error)))
+                }
             }
             rotate_reactive_saving.set(false);
         });
@@ -752,7 +753,7 @@ pub fn App() -> Element {
                     nav.set(Nav::Auto);
                     reload += 1;
                 }
-                Err(error) => sign_out_error.set(Some(error.to_string())),
+                Err(error) => sign_out_error.set(Some(surface_error("sign_out", &error))),
             }
         });
     };
@@ -989,7 +990,7 @@ async fn resolve_view(nav: Nav) -> View {
         Err(error) if error.kind() == AppErrorKind::Unauthorized => {
             return View::NeedToken { reason: None }
         }
-        Err(error) => return View::Error(error.to_string()),
+        Err(error) => return View::Error(surface_error("require_token", &error)),
     };
 
     // Decide the project to open from where the user wants to be. `Home` always
@@ -1016,7 +1017,7 @@ async fn resolve_view(nav: Nav) -> View {
         Nav::Auto => match last_opened().await {
             Ok(Some(repo)) => repo,
             Ok(None) => return home_view(&auth, &token).await,
-            Err(error) => return View::Error(error.to_string()),
+            Err(error) => return View::Error(surface_error("last_opened", &error)),
         },
     };
 
@@ -1079,7 +1080,7 @@ async fn home_view<S: SecureStorePort>(auth: &AuthService<S>, token: &GitHubToke
                 from_cache: false,
             },
             Ok(None) => View::Error("The cached projects vanished during refresh.".into()),
-            Err(error) => View::Error(error.to_string()),
+            Err(error) => View::Error(surface_error("home_projects", &error)),
         },
         Err(error) => credential_failure_view(auth, error).await,
     }
@@ -1119,18 +1120,19 @@ async fn credential_failure_view<S: SecureStorePort>(
     auth: &AuthService<S>,
     error: AppError,
 ) -> View {
+    let message = surface_error("credential_failure", &error);
     match CredentialFailure::classify(&error) {
         CredentialFailure::Invalid => {
             let _ = auth.clear_token().await;
             View::NeedToken {
-                reason: Some(error.to_string()),
+                reason: Some(message),
             }
         }
         CredentialFailure::UnderScoped { missing_permission } => View::NeedRotate {
-            reason: error.to_string(),
+            reason: message,
             missing_permission,
         },
-        CredentialFailure::None => View::Error(error.to_string()),
+        CredentialFailure::None => View::Error(message),
     }
 }
 
@@ -1150,19 +1152,18 @@ async fn feature_action_error(
     mut nav: Signal<Nav>,
     mut reload: Signal<u32>,
 ) -> Option<FeatureActionError> {
+    let message = surface_error("feature_action", &error);
     match CredentialFailure::classify(&error) {
         CredentialFailure::Invalid => {
             let auth = AuthService::new(secure_store());
             let _ = auth.clear_token().await;
-            token_error.set(Some(error.to_string()));
+            token_error.set(Some(message));
             nav.set(Nav::Auto);
             reload += 1;
             None
         }
-        CredentialFailure::UnderScoped { .. } => {
-            Some(FeatureActionError::UnderScoped(error.to_string()))
-        }
-        CredentialFailure::None => Some(FeatureActionError::Plain(error.to_string())),
+        CredentialFailure::UnderScoped { .. } => Some(FeatureActionError::UnderScoped(message)),
+        CredentialFailure::None => Some(FeatureActionError::Plain(message)),
     }
 }
 
@@ -1229,7 +1230,7 @@ async fn delta_refresh(
             Some(snapshot)
         }
         Err(error) => {
-            refresh_error.set(Some(error.to_string()));
+            refresh_error.set(Some(surface_error("board_delta_refresh", &error)));
             None
         }
     }
@@ -1281,7 +1282,7 @@ async fn authoritative_reconcile(
         // A reconcile that found nothing to heal still confirms the connection
         // is healthy, so it clears a previous failure too.
         Ok(BoardRefresh::Unchanged(_)) => refresh_error.set(None),
-        Err(error) => refresh_error.set(Some(error.to_string())),
+        Err(error) => refresh_error.set(Some(surface_error("board_reconcile", &error))),
     }
     syncing.set(false);
 }
