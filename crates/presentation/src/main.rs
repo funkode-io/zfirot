@@ -2,6 +2,7 @@
 
 mod app;
 mod components;
+mod logging;
 mod state;
 
 use dioxus::desktop::tao::window::Icon;
@@ -24,14 +25,16 @@ fn window_icon() -> Option<Icon> {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let log_file = logging::init();
 
     install_panic_logger();
+
+    match &log_file {
+        Some(dir) => tracing::info!(log_dir = %dir.display(), "zfirot starting"),
+        // Worth a warning: a bundled build reaching this line is logging to a
+        // stderr that launchd discards, i.e. it is undiagnosable.
+        None => tracing::warn!("zfirot starting without a log file; logging to stderr only"),
+    }
 
     let window = WindowBuilder::new()
         .with_title("Zfirot")
@@ -49,9 +52,10 @@ fn main() {
 /// stack unwinds through the windowing FFI and the window closes regardless. The
 /// value here is diagnosability: it turns a silent "the window just disappeared"
 /// into a logged line naming where and why it happened, so the underlying bug
-/// (e.g. a dropped-value panic in event dispatch) can be tracked down. The
-/// default hook is chained so backtraces still print when `RUST_BACKTRACE` is
-/// set.
+/// (e.g. a dropped-value panic in event dispatch) can be tracked down. Since
+/// [`logging::init`] writes to the log file synchronously, that line reaches
+/// disk even though the process is on its way out. The default hook is chained
+/// so backtraces still print when `RUST_BACKTRACE` is set.
 fn install_panic_logger() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

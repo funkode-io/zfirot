@@ -26,6 +26,7 @@ chrono = { version = "0.4", default-features = true, features = ["serde"] }
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 domain = { path = "crates/domain" }
 application = { path = "crates/application" }
