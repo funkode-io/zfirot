@@ -72,6 +72,11 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     // No review threads -> no unresolved comments.
     assert_eq!(child.linked_prs[1].unresolved_comment_count, 0);
     assert_eq!(child.assignee.as_deref(), Some("carlos-verdes"));
+    // The fixture also carries a MERGED (#11) and a CLOSED (#10) linked PR;
+    // neither is a Linked PR, so neither is lifted (see the dedicated test
+    // below for why the query alone cannot be trusted to filter them).
+    let lifted: Vec<u64> = child.linked_prs.iter().map(|pr| pr.number).collect();
+    assert_eq!(lifted, vec![12, 13]);
     assert_eq!(
         child.assignee_avatar_url.as_deref(),
         Some("https://avatars.githubusercontent.com/u/1?v=4")
@@ -95,4 +100,33 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     let closed = issue_by_number(&issues, 2);
     assert!(closed.closed);
     assert!(closed.is_native_child_of_prd);
+}
+
+/// A Linked PR is an **open** Pull Request. GitHub's
+/// `closedByPullRequestsReferences(includeClosedPrs: false)` argument does *not*
+/// deliver that: it drops CLOSED-unmerged PRs but still returns **MERGED** ones
+/// (verified live — an open issue whose only linked PR was merged still comes
+/// back with that PR). Trusting the argument is what kept a Slice sitting in WIP
+/// with a `pr #n` badge long after its PR was merged, since every refresh and
+/// full reconcile re-fetched the same wrong fact. The projection therefore
+/// filters on the PR's own `state` and only `OPEN` survives.
+#[test]
+fn drops_merged_and_closed_pull_requests_from_linked_prs() {
+    let issues = mapped_issues();
+    let child = issue_by_number(&issues, 3);
+
+    let numbers: Vec<u64> = child.linked_prs.iter().map(|pr| pr.number).collect();
+    assert!(
+        !numbers.contains(&11),
+        "a MERGED pull request is not a Linked PR: {numbers:?}"
+    );
+    assert!(
+        !numbers.contains(&10),
+        "a CLOSED pull request is not a Linked PR: {numbers:?}"
+    );
+    assert_eq!(
+        child.linked_prs.len(),
+        2,
+        "only the two OPEN PRs are lifted"
+    );
 }

@@ -1024,7 +1024,9 @@ async fn resolve_view(nav: Nav) -> View {
         Ok(BoardOpen::Cached(loaded)) => View::Board {
             repo,
             board: loaded.board,
-            loaded_at: now_hms(),
+            // The cache's own fetch time, not now: this paint is as old as the
+            // snapshot until the revalidation below lands.
+            loaded_at: snapshot_hms(loaded.snapshot.fetched_at),
             snapshot: loaded.snapshot,
             from_cache: true,
         },
@@ -1165,9 +1167,23 @@ async fn feature_action_error(
 }
 
 /// The current local wall-clock time as `HH:MM:SS`, captured when a board
-/// snapshot is loaded so it can be shown as the "last updated" timestamp.
+/// snapshot is fetched live so it can be shown as the "last updated" timestamp.
 fn now_hms() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// A snapshot's own fetch time as local `HH:MM:SS`.
+///
+/// A board painted from the local cache must be stamped with *when the cache was
+/// fetched*, not when it was painted: stamping "now" on an hours-old snapshot
+/// tells the user the board is current while it is still showing yesterday's
+/// Slices and their by-now-merged PRs, which makes stale-while-revalidate look
+/// like a bug in the board itself.
+fn snapshot_hms(fetched_at: chrono::DateTime<chrono::Utc>) -> String {
+    fetched_at
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string()
 }
 
 /// The fast half of a two-phase board refresh: a delta fetch that repaints
