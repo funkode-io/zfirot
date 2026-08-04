@@ -7,10 +7,7 @@ use application::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use domain::{
-    AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RawLinkedPr, RepoRef,
-    SliceState,
-};
+use domain::{AppAction, AppError, AppResult, Project, RawIssue, RawLinkedPr, RepoRef};
 
 #[derive(Default)]
 struct CountingBoardCache {
@@ -69,9 +66,6 @@ impl BoardCachePort for CountingBoardCache {
 struct SequencePort {
     issues: Mutex<VecDeque<Vec<RawIssue>>>,
     deltas: Mutex<VecDeque<Vec<RawIssue>>>,
-    /// One open-PR **Sweep** result per call, in order. An exhausted sequence
-    /// keeps answering "no open PRs", which is what a repo without PRs returns.
-    sweeps: Mutex<VecDeque<Vec<RawLinkedPr>>>,
 }
 
 impl SequencePort {
@@ -79,14 +73,7 @@ impl SequencePort {
         Self {
             issues: Mutex::new(VecDeque::from(issues)),
             deltas: Mutex::new(VecDeque::from(deltas)),
-            sweeps: Mutex::new(VecDeque::new()),
         }
-    }
-
-    /// The same port, answering each open-PR sweep from `sweeps` in order.
-    fn sweeping(mut self, sweeps: Vec<Vec<RawLinkedPr>>) -> Self {
-        self.sweeps = Mutex::new(VecDeque::from(sweeps));
-        self
     }
 }
 
@@ -101,13 +88,10 @@ impl GitHubPort for SequencePort {
             .expect("issues sequence should have a value"))
     }
 
+    /// These cases are about the issue side of a refresh; the open-PR **Sweep**
+    /// and everything it drives lives on the hot path (see `tests/hot_refresh.rs`).
     async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
-        Ok(self
-            .sweeps
-            .lock()
-            .expect("lock poisoned")
-            .pop_front()
-            .unwrap_or_default())
+        Ok(vec![])
     }
 
     async fn load_issues_since(
@@ -185,23 +169,6 @@ fn open_issue(number: u64, title: &str) -> RawIssue {
         assignee: None,
         assignee_avatar_url: None,
         is_native_child_of_prd: false,
-    }
-}
-
-/// An open PR closing `issue`, as an open-PR sweep reports it.
-fn open_pr(number: u64, issue: u64) -> RawLinkedPr {
-    RawLinkedPr {
-        pr: LinkedPrRef {
-            number,
-            author: Some("carlos-verdes".to_string()),
-            title: "Fix the thing".to_string(),
-            url: format!("https://github.com/funkode-io/zfirot/pull/{number}"),
-            pr_status: PrStatus::AwaitingReview,
-            conflicts: false,
-            ci_failing: false,
-            unresolved_comment_count: 0,
-        },
-        closes: vec![issue],
     }
 }
 
@@ -567,142 +534,6 @@ async fn reconcile_full_load_drops_ghost_issue_from_cache() {
         2,
         "changed reconcile should rewrite the cache with the full-load snapshot"
     );
-}
-
-/// The headline of ADR 0008 (#179): a merged PR must stop holding its Slice in
-/// **WIP**. The sweep is authoritative over the open-PR set, so the merged PR is
-/// simply absent from the next one — no filtering, and no wait for a full
-/// reconcile.
-#[tokio::test]
-async fn a_pr_that_leaves_the_sweep_releases_its_slice_on_the_next_refresh() {
-    let repo = RepoRef::new("funkode-io", "zfirot");
-    let cache = Arc::new(CountingBoardCache::default());
-
-    let service = CachedBoardService::new(
-        SequencePort::new(vec![vec![open_issue(60, "Ready Slice")]], vec![vec![]]).sweeping(vec![
-            // Cold open: the PR is open, so the Slice is WIP.
-            vec![open_pr(99, 60)],
-            // Next refresh: the PR merged, so it is gone from the sweep.
-            vec![],
-        ]),
-        cache.clone(),
-    );
-
-    let snapshot = match service.open(&repo).await.expect("cold open should seed") {
-        BoardOpen::Cold(loaded) => {
-            assert_eq!(
-                loaded.board.slices[0].state,
-                SliceState::Wip,
-                "an open PR in the sweep makes the Slice WIP"
-            );
-            loaded.snapshot
-        }
-        BoardOpen::Cached(_) => panic!("first open is cold"),
-    };
-
-    let refresh = service
-        .refresh_cached(&repo, &snapshot)
-        .await
-        .expect("refresh should succeed");
-
-    match refresh {
-        BoardRefresh::Changed(loaded) => {
-            assert!(
-                loaded.board.slices[0].linked_prs.is_empty(),
-                "a merged PR is absent from the sweep, so its badge is gone"
-            );
-            assert_eq!(
-                loaded.board.slices[0].state,
-                SliceState::Ready,
-                "the Slice is released the moment its PR leaves the sweep"
-            );
-        }
-        BoardRefresh::Unchanged(_) => panic!("a PR leaving the sweep must repaint the board"),
-    }
-}
-
-/// The other direction: a colleague opens a PR on a Ready Slice. The issue's own
-/// `updatedAt` never moves for that, which is exactly why the PR side is swept
-/// on every refresh instead of being read from the issue.
-#[tokio::test]
-async fn a_pr_appearing_in_the_sweep_moves_its_slice_to_wip() {
-    let repo = RepoRef::new("funkode-io", "zfirot");
-    let cache = Arc::new(CountingBoardCache::default());
-
-    let service = CachedBoardService::new(
-        SequencePort::new(vec![vec![open_issue(60, "Ready Slice")]], vec![vec![]])
-            // No PR at cold open; one appears by the next refresh, with the
-            // issue delta empty (GitHub never touched the issue).
-            .sweeping(vec![vec![], vec![open_pr(99, 60)]]),
-        cache.clone(),
-    );
-
-    let snapshot = match service.open(&repo).await.expect("cold open should seed") {
-        BoardOpen::Cold(loaded) => {
-            assert_eq!(
-                loaded.board.slices[0].state,
-                SliceState::Ready,
-                "no PR yet: the Slice starts Ready"
-            );
-            loaded.snapshot
-        }
-        BoardOpen::Cached(_) => panic!("first open is cold"),
-    };
-
-    let refresh = service
-        .refresh_cached(&repo, &snapshot)
-        .await
-        .expect("refresh should succeed");
-
-    match refresh {
-        BoardRefresh::Changed(loaded) => {
-            assert_eq!(
-                loaded.board.slices[0].state,
-                SliceState::Wip,
-                "a PR appearing in the sweep moves its Slice to WIP"
-            );
-            assert_eq!(
-                loaded.board.slices[0]
-                    .linked_prs
-                    .iter()
-                    .map(|pr| pr.number)
-                    .collect::<Vec<_>>(),
-                vec![99],
-                "the new PR renders its badge"
-            );
-        }
-        BoardRefresh::Unchanged(_) => {
-            panic!("a PR appearing in the sweep must repaint the board")
-        }
-    }
-}
-
-/// A refresh whose sweep and issue delta both report the same facts must not
-/// repaint — a re-swept but unchanged PR set is not a change.
-#[tokio::test]
-async fn an_identical_sweep_reports_unchanged() {
-    let repo = RepoRef::new("funkode-io", "zfirot");
-    let cache = Arc::new(CountingBoardCache::default());
-
-    let service = CachedBoardService::new(
-        SequencePort::new(vec![vec![open_issue(61, "WIP Slice")]], vec![vec![]])
-            .sweeping(vec![vec![open_pr(99, 61)], vec![open_pr(99, 61)]]),
-        cache.clone(),
-    );
-
-    let snapshot = match service.open(&repo).await.expect("cold open should seed") {
-        BoardOpen::Cold(loaded) => loaded.snapshot,
-        BoardOpen::Cached(_) => panic!("first open is cold"),
-    };
-
-    match service
-        .refresh_cached(&repo, &snapshot)
-        .await
-        .expect("refresh should succeed")
-    {
-        BoardRefresh::Unchanged(_) => {}
-        BoardRefresh::Changed(_) => panic!("an unchanged PR set must not repaint the board"),
-    }
 }
 
 #[tokio::test]
