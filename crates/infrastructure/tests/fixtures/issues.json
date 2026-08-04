@@ -26,9 +26,6 @@
             "parent": null,
             "blockedBy": {
               "nodes": []
-            },
-            "closedByPullRequestsReferences": {
-              "nodes": []
             }
           },
           {
@@ -69,109 +66,6 @@
                   "state": "CLOSED"
                 }
               ]
-            },
-            "closedByPullRequestsReferences": {
-              "nodes": [
-                {
-                  "number": 12,
-                  "url": "https://github.com/funkode-io/zfirot/pull/12",
-                  "title": "Implement SliceState derivation",
-                  "state": "OPEN",
-                  "author": {
-                    "login": "carlos-verdes"
-                  },
-                  "isDraft": false,
-                  "reviewDecision": "APPROVED",
-                  "mergeable": "MERGEABLE",
-                  "commits": {
-                    "nodes": [
-                      {
-                        "commit": {
-                          "statusCheckRollup": {
-                            "state": "SUCCESS"
-                          }
-                        }
-                      }
-                    ]
-                  },
-                  "reviewThreads": {
-                    "nodes": [
-                      {
-                        "isResolved": true
-                      },
-                      {
-                        "isResolved": false
-                      }
-                    ]
-                  }
-                },
-                {
-                  "number": 13,
-                  "url": "https://github.com/funkode-io/zfirot/pull/13",
-                  "title": "Follow-up tweak",
-                  "state": "OPEN",
-                  "author": null,
-                  "isDraft": true,
-                  "reviewDecision": null,
-                  "mergeable": "CONFLICTING",
-                  "commits": {
-                    "nodes": [
-                      {
-                        "commit": {
-                          "statusCheckRollup": {
-                            "state": "FAILURE"
-                          }
-                        }
-                      }
-                    ]
-                  },
-                  "reviewThreads": {
-                    "nodes": []
-                  }
-                },
-                {
-                  "number": 11,
-                  "url": "https://github.com/funkode-io/zfirot/pull/11",
-                  "title": "Earlier attempt, already merged",
-                  "state": "MERGED",
-                  "author": {
-                    "login": "carlos-verdes"
-                  },
-                  "isDraft": false,
-                  "reviewDecision": "APPROVED",
-                  "mergeable": "MERGEABLE",
-                  "commits": {
-                    "nodes": [
-                      {
-                        "commit": {
-                          "statusCheckRollup": {
-                            "state": "SUCCESS"
-                          }
-                        }
-                      }
-                    ]
-                  },
-                  "reviewThreads": {
-                    "nodes": []
-                  }
-                },
-                {
-                  "number": 10,
-                  "url": "https://github.com/funkode-io/zfirot/pull/10",
-                  "title": "Abandoned attempt, closed unmerged",
-                  "state": "CLOSED",
-                  "author": null,
-                  "isDraft": false,
-                  "reviewDecision": null,
-                  "mergeable": "UNKNOWN",
-                  "commits": {
-                    "nodes": []
-                  },
-                  "reviewThreads": {
-                    "nodes": []
-                  }
-                }
-              ]
             }
           },
           {
@@ -202,9 +96,6 @@
                   "state": "CLOSED"
                 }
               ]
-            },
-            "closedByPullRequestsReferences": {
-              "nodes": []
             }
           },
           {
@@ -221,9 +112,6 @@
             },
             "parent": null,
             "blockedBy": {
-              "nodes": []
-            },
-            "closedByPullRequestsReferences": {
               "nodes": []
             }
           },
@@ -259,9 +147,6 @@
               }
             },
             "blockedBy": {
-              "nodes": []
-            },
-            "closedByPullRequestsReferences": {
               "nodes": []
             }
           }

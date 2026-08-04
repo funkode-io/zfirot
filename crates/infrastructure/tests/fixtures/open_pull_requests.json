@@ -1,0 +1,112 @@
+{
+  "data": {
+    "repository": {
+      "pullRequests": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Y3Vyc29yOnYyOpHOAA"
+        },
+        "nodes": [
+          {
+            "number": 12,
+            "url": "https://github.com/funkode-io/zfirot/pull/12",
+            "title": "Implement SliceState derivation",
+            "author": {
+              "login": "carlos-verdes"
+            },
+            "isDraft": false,
+            "reviewDecision": "APPROVED",
+            "mergeable": "MERGEABLE",
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "SUCCESS"
+                    }
+                  }
+                }
+              ]
+            },
+            "reviewThreads": {
+              "nodes": [
+                {
+                  "isResolved": true
+                },
+                {
+                  "isResolved": false
+                }
+              ]
+            },
+            "closingIssuesReferences": {
+              "nodes": [
+                {
+                  "number": 3
+                }
+              ]
+            }
+          },
+          {
+            "number": 13,
+            "url": "https://github.com/funkode-io/zfirot/pull/13",
+            "title": "Follow-up: tidy the derivation",
+            "author": null,
+            "isDraft": true,
+            "reviewDecision": null,
+            "mergeable": "CONFLICTING",
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": {
+                      "state": "FAILURE"
+                    }
+                  }
+                }
+              ]
+            },
+            "reviewThreads": {
+              "nodes": []
+            },
+            "closingIssuesReferences": {
+              "nodes": [
+                {
+                  "number": 3
+                },
+                {
+                  "number": 5
+                }
+              ]
+            }
+          },
+          {
+            "number": 14,
+            "url": "https://github.com/funkode-io/zfirot/pull/14",
+            "title": "Bump dependencies",
+            "author": {
+              "login": "dependabot"
+            },
+            "isDraft": false,
+            "reviewDecision": "REVIEW_REQUIRED",
+            "mergeable": "MERGEABLE",
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "statusCheckRollup": null
+                  }
+                }
+              ]
+            },
+            "reviewThreads": {
+              "nodes": []
+            },
+            "closingIssuesReferences": {
+              "nodes": []
+            }
+          }
+        ]
+      }
+    }
+  }
+}

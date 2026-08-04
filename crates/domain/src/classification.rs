@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::LinkedPrRef;
-
 /// How an open GitHub issue has been classified by the two-tier strategy.
 ///
 /// - **Tier 1 (confident, automatic):** `prd` label → [`IssueClassification::Prd`];
@@ -49,6 +47,11 @@ impl IssueClassification {
 /// An adapter projects GitHub API data into this type. The pure
 /// [`classify_issue`] function and the prose-fallback parsing utilities
 /// (`parse_parent_from_body`, `parse_blockers_from_body`) then operate on it.
+///
+/// It deliberately carries **no Pull Request data**: Linked PRs are read from
+/// the PR side by an open-PR **Sweep** ([`crate::RawLinkedPr`]) and joined onto
+/// Slices at classification time, so the issue queries stay shallow and "a
+/// Linked PR is an *open* PR" holds by construction (ADR 0008).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawIssue {
     /// The GitHub issue number.
@@ -70,8 +73,6 @@ pub struct RawIssue {
     pub assignee: Option<String>,
     /// Avatar URL of the assignee, when assigned and available.
     pub assignee_avatar_url: Option<String>,
-    /// The open Pull Requests linked to the issue via their closing reference.
-    pub linked_prs: Vec<LinkedPrRef>,
     /// `true` when this issue is a native sub-issue child of an issue that
     /// carries the `prd` label.
     pub is_native_child_of_prd: bool,
@@ -213,7 +214,6 @@ mod tests {
             native_blockers: Vec::new(),
             assignee: None,
             assignee_avatar_url: None,
-            linked_prs: Vec::new(),
             is_native_child_of_prd: false,
         }
     }

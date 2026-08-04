@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use application::{BoardCachePort, BoardService};
+use application::{BoardCachePort, BoardOpen, BoardService, CachedBoardService};
 use domain::RepoRef;
 use infrastructure::{FakeBoardCache, FakeGitHubPort, FileBoardCache};
 
@@ -172,6 +172,61 @@ async fn file_board_cache_round_trips_per_repo() {
             .expect("cache read should succeed"),
         Some(snapshot_b),
         "repo B snapshot should round-trip"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A board cached by a previous version of the app is in a format this version
+/// cannot read (the snapshot now holds issues and Linked PRs as two collections,
+/// ADR 0008). It must be discarded — the cache simply reads cold — so the board
+/// cold-loads and reseeds instead of painting a half-understood snapshot.
+#[tokio::test]
+async fn file_board_cache_discards_a_snapshot_from_a_previous_app_version() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("zfirot-board-cache-stale-{unique}"));
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let cache = FileBoardCache::at(root.clone());
+
+    // The format that shipped before the open-PR sweep: no version marker, no
+    // Linked PR collection, PR facts nested inside each issue.
+    let path = root.join(&repo.owner).join(format!("{}.json", repo.name));
+    std::fs::create_dir_all(path.parent().expect("the path has a parent"))
+        .expect("the cache directory should be creatable");
+    std::fs::write(
+        &path,
+        r#"{
+            "raw_issues": [ {
+                "number": 1, "title": "A Slice", "url": "https://x/1", "body": null,
+                "labels": ["slice"], "closed": false, "native_parent": null,
+                "native_blockers": [], "assignee": null, "assignee_avatar_url": null,
+                "linked_prs": [], "is_native_child_of_prd": false
+            } ],
+            "fetched_at": "2026-07-28T07:41:22Z"
+        }"#,
+    )
+    .expect("the stale snapshot should be writable");
+
+    let cached = cache
+        .cached_board(&repo)
+        .await
+        .expect("reading a stale cache must not fail the board");
+
+    assert_eq!(
+        cached, None,
+        "a snapshot from a previous app version must read as a cold cache"
+    );
+
+    let opened = CachedBoardService::new(FakeGitHubPort, cache)
+        .open(&repo)
+        .await
+        .expect("open should fall back to a cold load");
+    assert!(
+        matches!(opened, BoardOpen::Cold(_)),
+        "a discarded cache must cold-load and reseed"
     );
 
     let _ = std::fs::remove_dir_all(root);

@@ -3,6 +3,9 @@
 //! (`tests/fixtures/issues.json`). This pins the live `load_issues` mapping —
 //! the HTTP call is exercised manually, but every field the classifier reads is
 //! asserted here so the projection cannot silently drift.
+//!
+//! The issue side carries no Pull Request data at all (ADR 0008); Linked PRs are
+//! projected from the open-PR sweep instead (see `parse_open_prs.rs`).
 
 use domain::RawIssue;
 use infrastructure::parse_issues_response;
@@ -38,45 +41,12 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     // A native child of the PRD: parent number resolved, parent is `prd`, and
     // an empty body maps to `None`. Native blockers are carried through as-is
     // (including CLOSED blockers) so classifier-level filtering has all facts.
-    // Two open linked PRs are lifted, one with a resolved author and one with a
-    // null author (no login).
     let child = issue_by_number(&issues, 3);
     assert_eq!(child.native_parent, Some(1));
     assert!(child.is_native_child_of_prd);
     assert_eq!(child.body, None);
     assert_eq!(child.native_blockers, vec![2]);
-    assert_eq!(child.linked_prs.len(), 2);
-    assert_eq!(child.linked_prs[0].number, 12);
-    assert_eq!(child.linked_prs[0].author.as_deref(), Some("carlos-verdes"));
-    assert_eq!(child.linked_prs[0].title, "Implement SliceState derivation");
-    assert_eq!(
-        child.linked_prs[0].url,
-        "https://github.com/funkode-io/zfirot/pull/12"
-    );
-    // The approved PR (isDraft=false, reviewDecision=APPROVED) derives Approved.
-    assert_eq!(child.linked_prs[0].pr_status, domain::PrStatus::Approved);
-    // MERGEABLE -> no Conflicts decoration.
-    assert!(!child.linked_prs[0].conflicts);
-    // statusCheckRollup=SUCCESS -> no CI-failing decoration.
-    assert!(!child.linked_prs[0].ci_failing);
-    // One of two review threads is unresolved -> count of 1 (non-blocking).
-    assert_eq!(child.linked_prs[0].unresolved_comment_count, 1);
-    assert_eq!(child.linked_prs[1].number, 13);
-    assert_eq!(child.linked_prs[1].author, None);
-    // The draft follow-up PR (isDraft=true) derives Draft regardless of review.
-    assert_eq!(child.linked_prs[1].pr_status, domain::PrStatus::Draft);
-    // CONFLICTING -> Conflicts decoration is set.
-    assert!(child.linked_prs[1].conflicts);
-    // statusCheckRollup=FAILURE -> CI-failing decoration is set.
-    assert!(child.linked_prs[1].ci_failing);
-    // No review threads -> no unresolved comments.
-    assert_eq!(child.linked_prs[1].unresolved_comment_count, 0);
     assert_eq!(child.assignee.as_deref(), Some("carlos-verdes"));
-    // The fixture also carries a MERGED (#11) and a CLOSED (#10) linked PR;
-    // neither is a Linked PR, so neither is lifted (see the dedicated test
-    // below for why the query alone cannot be trusted to filter them).
-    let lifted: Vec<u64> = child.linked_prs.iter().map(|pr| pr.number).collect();
-    assert_eq!(lifted, vec![12, 13]);
     assert_eq!(
         child.assignee_avatar_url.as_deref(),
         Some("https://avatars.githubusercontent.com/u/1?v=4")
@@ -89,7 +59,6 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     assert_eq!(slice.labels, vec!["slice".to_string()]);
     assert_eq!(slice.native_blockers, vec![3, 2]);
     assert_eq!(slice.native_parent, None);
-    assert!(slice.linked_prs.is_empty());
 
     // An unlabeled issue stays label-free for the heuristic tier.
     let unlabeled = issue_by_number(&issues, 9);
@@ -100,33 +69,4 @@ fn maps_labels_state_and_native_links_into_raw_issues() {
     let closed = issue_by_number(&issues, 2);
     assert!(closed.closed);
     assert!(closed.is_native_child_of_prd);
-}
-
-/// A Linked PR is an **open** Pull Request. GitHub's
-/// `closedByPullRequestsReferences(includeClosedPrs: false)` argument does *not*
-/// deliver that: it drops CLOSED-unmerged PRs but still returns **MERGED** ones
-/// (verified live — an open issue whose only linked PR was merged still comes
-/// back with that PR). Trusting the argument is what kept a Slice sitting in WIP
-/// with a `pr #n` badge long after its PR was merged, since every refresh and
-/// full reconcile re-fetched the same wrong fact. The projection therefore
-/// filters on the PR's own `state` and only `OPEN` survives.
-#[test]
-fn drops_merged_and_closed_pull_requests_from_linked_prs() {
-    let issues = mapped_issues();
-    let child = issue_by_number(&issues, 3);
-
-    let numbers: Vec<u64> = child.linked_prs.iter().map(|pr| pr.number).collect();
-    assert!(
-        !numbers.contains(&11),
-        "a MERGED pull request is not a Linked PR: {numbers:?}"
-    );
-    assert!(
-        !numbers.contains(&10),
-        "a CLOSED pull request is not a Linked PR: {numbers:?}"
-    );
-    assert_eq!(
-        child.linked_prs.len(),
-        2,
-        "only the two OPEN PRs are lifted"
-    );
 }
