@@ -34,12 +34,14 @@ pub fn SliceCard(
     let has_multiple_prs = slice.linked_prs.len() > 1;
     let is_highlighted = highlighted == Some(number);
 
-    // Blocked cards surface their blockers; every other card surfaces what it
-    // unblocks. An empty list renders no badge row.
-    let (deps_label, deps) = if slice.state == SliceState::Blocked {
-        ("Blocked by", slice.blockers.clone())
-    } else {
+    // A card surfaces its blockers when it has any, otherwise what it unblocks.
+    // Keyed on the blockers themselves rather than on Blocked, because a Slice
+    // held back by a label or an External blocker has no blocker issues to show
+    // — and would otherwise lose its "unblocks" badges to an empty row.
+    let (deps_label, deps) = if slice.blockers.is_empty() {
         ("Unblocks", slice.unblocks.clone())
+    } else {
+        ("Blocked by", slice.blockers.clone())
     };
 
     let card_class = if is_highlighted {
