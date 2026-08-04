@@ -152,6 +152,22 @@ pub struct LinkedPrRef {
     pub unresolved_comment_count: u32,
 }
 
+/// A Linked PR exactly as an open-PR **Sweep** reports it: the PR's own facts
+/// plus the numbers of the issues it closes (GitHub's closing references).
+///
+/// This is the raw read model of the PR side of the board. It is *the*
+/// authority on which PRs are open — a merged or closed PR is simply absent
+/// from the next sweep — and the join onto Slices happens at classification
+/// time, by issue number (see ADR 0008). A `closes` number the board does not
+/// hold (a closed issue, or one outside the fetched set) contributes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawLinkedPr {
+    /// The PR's facts, as rendered on a Slice's `pr #n @u` badge.
+    pub pr: LinkedPrRef,
+    /// The issue numbers this PR closes, from its closing references.
+    pub closes: Vec<u64>,
+}
+
 impl LinkedPrRef {
     /// Whether this PR reads as **ready to merge** — Approved with no blocking
     /// Decorations (not conflicting, CI not failing). Unresolved comments do

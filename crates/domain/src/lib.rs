@@ -36,7 +36,7 @@ pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
 pub use slice::{
     order_blocked_column, resolve_unblocks, BlockedReason, BoardSummary, DependencyRef,
-    LinkedPrRef, RawSlice, Slice, SliceState,
+    LinkedPrRef, RawLinkedPr, RawSlice, Slice, SliceState,
 };
 pub use theme::ThemePreference;
 pub use token::GitHubToken;

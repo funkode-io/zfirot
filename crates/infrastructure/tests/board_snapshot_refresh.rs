@@ -4,12 +4,15 @@ use std::sync::Mutex;
 use application::{classify, BoardRefresh, BoardService, GitHubPort};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use domain::{AppAction, AppResult, Project, RawIssue, RepoRef, SliceState};
-use infrastructure::sample_raw_issues;
+use domain::{AppAction, AppResult, Project, RawIssue, RawLinkedPr, RepoRef, SliceState};
+use infrastructure::{sample_open_prs, sample_raw_issues};
 
 struct SequencePort {
     issues: Mutex<VecDeque<Vec<RawIssue>>>,
     deltas: Mutex<VecDeque<Vec<RawIssue>>>,
+    /// The open-PR **Sweep** every refresh path runs; fixed here, since these
+    /// tests are about the issue side of a refresh.
+    open_prs: Vec<RawLinkedPr>,
 }
 
 impl SequencePort {
@@ -17,6 +20,7 @@ impl SequencePort {
         Self {
             issues: Mutex::new(VecDeque::from(issues)),
             deltas: Mutex::new(VecDeque::from(deltas)),
+            open_prs: sample_open_prs(),
         }
     }
 }
@@ -45,6 +49,10 @@ impl GitHubPort for SequencePort {
             .expect("delta sequence should have a value"))
     }
 
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(self.open_prs.clone())
+    }
+
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
         Ok(vec![])
     }
@@ -59,11 +67,13 @@ impl GitHubPort for SequencePort {
 }
 
 #[test]
-fn classify_is_a_pure_projection_over_raw_issues() {
+fn classify_is_a_pure_projection_over_issues_and_swept_prs() {
     let raw_issues = sample_raw_issues();
 
-    let board = classify(&raw_issues);
-    let board_again = classify(&raw_issues);
+    let open_prs = sample_open_prs();
+
+    let board = classify(&raw_issues, &open_prs);
+    let board_again = classify(&raw_issues, &open_prs);
 
     assert_eq!(
         board, board_again,
@@ -108,7 +118,6 @@ async fn refresh_reports_changed_when_snapshot_facts_differ() {
         native_blockers: vec![],
         assignee: None,
         assignee_avatar_url: None,
-        linked_prs: vec![],
         is_native_child_of_prd: true,
     };
     let service = BoardService::new(SequencePort::new(vec![initial], vec![vec![closed_three]]));
@@ -147,7 +156,6 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
         native_blockers: vec![],
         assignee: None,
         assignee_avatar_url: None,
-        linked_prs: vec![],
         is_native_child_of_prd: false,
     };
     let blocked = RawIssue {
@@ -161,7 +169,6 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
         native_blockers: vec![42],
         assignee: None,
         assignee_avatar_url: None,
-        linked_prs: vec![],
         is_native_child_of_prd: false,
     };
     let closed_blocker = RawIssue {

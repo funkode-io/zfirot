@@ -4,7 +4,7 @@ use application::GitHubPort;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RepoRef,
+    AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RawLinkedPr, RepoRef,
     ReviewDecision, Viewer,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
@@ -12,25 +12,15 @@ use serde::Deserialize;
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 
-/// The linked-PR selection every issue-projecting query shares, as a literal so
-/// the three queries below can `concat!` it and cannot drift apart.
+/// One page of issues for classification: **open issues only**, with the labels
+/// and native relationships the two-tier classifier needs.
 ///
-/// `state` is deliberately part of it. GitHub's `includeClosedPrs: false` is
-/// **not** "open PRs only": it drops CLOSED-unmerged references but still
-/// returns **MERGED** ones, so the state has to be fetched and filtered
-/// client-side (see [`map_issue_raw`]). `first: 20` because merged references
-/// still occupy slots in the page — a Slice reworked across several PRs must not
-/// have its one open PR pushed out of the window by its merged predecessors.
-macro_rules! linked_prs_selection {
-    () => {
-        r#"closedByPullRequestsReferences(first: 20, includeClosedPrs: false) { nodes { number url title state author { login } isDraft reviewDecision mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first: 100) { nodes { isResolved } } } }"#
-    };
-}
-
-/// One page of issues for classification: **open issues only**, with the labels,
-/// native relationships, and linked-PR state the two-tier classifier needs.
-const ISSUES_QUERY: &str = concat!(
-    r#"
+/// It deliberately requests **no Pull Request data**. Linked PRs come from the
+/// open-PR sweep ([`OPEN_PRS_QUERY`]) instead, which is what makes this query
+/// shallow (a full board load dropped from a measured 46 GraphQL points to
+/// about 7) and removes the four-deep nesting that once blew GitHub's node
+/// limit (#168). See ADR 0008.
+const ISSUES_QUERY: &str = r#"
 query Issues($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     issues(first: 50, after: $cursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
@@ -45,20 +35,16 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        "#,
-    linked_prs_selection!(),
-    r#"
       }
     }
   }
 }
-"#
-);
+"#;
 
 /// One page of issue deltas for incremental refresh: open and closed issues
-/// updated at or after `since`.
-const ISSUES_SINCE_QUERY: &str = concat!(
-    r#"
+/// updated at or after `since`. Carries no Pull Request data either — see
+/// [`ISSUES_QUERY`].
+const ISSUES_SINCE_QUERY: &str = r#"
 query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: DateTime!) {
   repository(owner: $owner, name: $name) {
     issues(
@@ -79,70 +65,47 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
         blockedBy(first: 50) { nodes { number } }
-        "#,
-    linked_prs_selection!(),
-    r#"
       }
     }
   }
 }
-"#
-);
+"#;
 
-/// Pull requests updated at or after `since` (any state), for healing a
-/// specific blind spot in [`ISSUES_SINCE_QUERY`]: GitHub does **not** bump an
-/// issue's own `updatedAt` when a PR is opened (or changed) with a closing
-/// reference to it, so a Slice's brand-new or just-updated linked PR is
-/// invisible to the issues-since delta for as long as the issue itself stays
-/// otherwise untouched. A pull request's own `updatedAt` *does* advance on
-/// every such change, so walking PRs ordered by `updatedAt` descending and
-/// pulling in the issues each currently closes (`closingIssuesReferences`,
-/// fetched with the exact same shape as the issues queries) closes the gap.
-/// Ordering lets the caller stop as soon as a page reaches a PR older than
-/// `since` — everything after it is older still.
+/// The open-PR **Sweep**: every currently-open Pull Request of the repo with the
+/// facts a Linked PR renders (spine, Decorations) and the issue numbers it
+/// closes.
 ///
-/// The page of 10 is a **node budget**, not a preference. GitHub charges a query
-/// its *possible* node count — the product of the page sizes down each path,
-/// summed over every connection — and rejects anything over 500,000 before
-/// reading a row. Nested four connections deep
-/// (`pullRequests` → `closingIssuesReferences` → `closedByPullRequestsReferences`
-/// → `reviewThreads`), this query cost 1,066,050 nodes at `first: 50` and was
-/// rejected on every call (#168). Page size is the lossless lever: the walk
-/// already stops at the first PR older than `since`, so a smaller page costs at
-/// most a round trip, whereas shrinking `reviewThreads` would under-count
-/// unresolved comments and shrinking `closingIssuesReferences` would drop the
-/// very Slices this query exists to heal. `every_query_fits_githubs_node_limit`
-/// keeps the budget honest.
-const PULL_REQUESTS_SINCE_QUERY: &str = concat!(
-    r#"
-query PullRequestsSince($owner: String!, $name: String!, $cursor: String) {
+/// `states: [OPEN]` is what makes "a Linked PR is an *open* PR" true by
+/// construction: a merged or closed PR is simply not in the answer, so nothing
+/// downstream has to filter it out (the client-side filter this replaces was the
+/// only thing standing between the board and a merged PR holding a Slice in WIP
+/// forever — #161, #179).
+///
+/// The page of 100 is a node budget: `reviewThreads(first: 100)` dominates, so
+/// a page costs ~12k of GitHub's 500,000 possible-node limit, and a repo with
+/// more than 100 open PRs simply pages. `every_query_fits_githubs_node_limit`
+/// keeps that honest.
+const OPEN_PRS_QUERY: &str = r#"
+query OpenPullRequests($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
-    pullRequests(first: 10, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    pullRequests(first: 100, after: $cursor, states: [OPEN], orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        updatedAt
-        closingIssuesReferences(first: 10) {
-          nodes {
-            number
-            title
-            url
-            body
-            state
-            labels(first: 20) { nodes { name } }
-            assignees(first: 1) { nodes { login avatarUrl } }
-            parent { number labels(first: 20) { nodes { name } } }
-            blockedBy(first: 50) { nodes { number } }
-            "#,
-    linked_prs_selection!(),
-    r#"
-          }
-        }
+        number
+        url
+        title
+        author { login }
+        isDraft
+        reviewDecision
+        mergeable
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+        reviewThreads(first: 100) { nodes { isResolved } }
+        closingIssuesReferences(first: 20) { nodes { number } }
       }
     }
   }
 }
-"#
-);
+"#;
 
 /// The viewer's accessible repositories, most-recently-pushed first, for the
 /// home screen. One page of up to 50 is plenty for a recent-projects list;
@@ -350,15 +313,11 @@ impl GitHubClient {
         })
     }
 
-    /// Fetch a single page of pull requests updated since the last poll (any
-    /// state), for [`PULL_REQUESTS_SINCE_QUERY`].
-    async fn fetch_pull_requests_since_page(
-        &self,
-        repo: &RepoRef,
-        cursor: Option<&str>,
-    ) -> AppResult<String> {
+    /// Fetch a single page of the repo's **open** pull requests, for
+    /// [`OPEN_PRS_QUERY`].
+    async fn fetch_open_prs_page(&self, repo: &RepoRef, cursor: Option<&str>) -> AppResult<String> {
         let body = serde_json::json!({
-            "query": PULL_REQUESTS_SINCE_QUERY,
+            "query": OPEN_PRS_QUERY,
             "variables": { "owner": repo.owner, "name": repo.name, "cursor": cursor },
         });
 
@@ -370,7 +329,7 @@ impl GitHubClient {
             .await
             .map_err(|err| {
                 AppError::unavailable("Could not reach GitHub")
-                    .with_operation("GitHubClient::fetch_pull_requests_since_page")
+                    .with_operation("GitHubClient::fetch_open_prs_page")
                     .with_source(err)
             })?;
 
@@ -379,13 +338,13 @@ impl GitHubClient {
             return Err(status_error(
                 status,
                 &response,
-                "GitHubClient::fetch_pull_requests_since_page",
+                "GitHubClient::fetch_open_prs_page",
             ));
         }
 
         response.text().await.map_err(|err| {
             AppError::unavailable("Could not read GitHub's response")
-                .with_operation("GitHubClient::fetch_pull_requests_since_page")
+                .with_operation("GitHubClient::fetch_open_prs_page")
                 .with_source(err)
         })
     }
@@ -632,6 +591,23 @@ impl GitHubPort for GitHubClient {
         Ok(issues)
     }
 
+    async fn sweep_open_prs(&self, repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        let mut linked_prs = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let body = self.fetch_open_prs_page(repo, cursor.as_deref()).await?;
+            let (page, next) = parse_open_prs_response(&body)?;
+            linked_prs.extend(page);
+            match next {
+                Some(end) => cursor = Some(end),
+                None => break,
+            }
+        }
+
+        Ok(linked_prs)
+    }
+
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
         let mut projects = Vec::new();
         let mut cursor: Option<String> = None;
@@ -665,29 +641,6 @@ impl GitHubPort for GitHubClient {
             issues.extend(page);
             match next {
                 Some(end) => cursor = Some(end),
-                None => break,
-            }
-        }
-
-        // Close the blind spot `ISSUES_SINCE_QUERY` has on its own: GitHub does
-        // not bump an issue's own `updatedAt` when a PR opens (or changes) with
-        // a closing reference to it, so a Slice's brand-new or just-updated
-        // linked PR would otherwise stay invisible until a full reconcile. A
-        // PR's own `updatedAt` does advance on such changes, so walk PRs
-        // updated since the same watermark and pull in the issues each
-        // currently closes — fetched fresh, reflecting the PR's current status,
-        // Decorations, or (once merged/abandoned) its absence. Duplicates with
-        // the issues above are harmless: `merge_issues` (application layer)
-        // merges by issue number, last write wins.
-        let mut pr_cursor: Option<String> = None;
-        loop {
-            let body = self
-                .fetch_pull_requests_since_page(repo, pr_cursor.as_deref())
-                .await?;
-            let (page, next) = parse_pull_requests_since_response(&body, &since)?;
-            issues.extend(page);
-            match next {
-                Some(end) => pr_cursor = Some(end),
                 None => break,
             }
         }
@@ -782,37 +735,7 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
     }
 
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
-        let not_found = errors.iter().any(|error| {
-            error.error_type.as_deref() == Some("NOT_FOUND")
-                || error
-                    .message
-                    .to_lowercase()
-                    .contains("could not resolve to a repository")
-        });
-        let forbidden = errors
-            .iter()
-            .any(|error| error.error_type.as_deref() == Some("FORBIDDEN"));
-        let message = errors
-            .into_iter()
-            .map(|error| error.message)
-            .collect::<Vec<_>>()
-            .join("; ");
-        let error = if not_found {
-            AppError::not_found("Repository not found or not visible to the token")
-        } else if forbidden {
-            // The whole repository (not just an optional field) is Forbidden —
-            // e.g. a fine-grained token with no Issues permission at all. Must
-            // classify Forbidden, not Internal, so CredentialFailure::UnderScoped
-            // routes to Rotate instead of a generic error.
-            AppError::forbidden("The token lacks access to this repository")
-        } else if message.to_lowercase().contains("rate limit") {
-            AppError::rate_limited("GitHub rate limit exceeded")
-        } else {
-            AppError::internal("GitHub reported a query error")
-        };
-        return Err(error
-            .with_operation("parse_issues_response")
-            .with_context("errors", message));
+        return Err(repository_query_error(errors, "parse_issues_response"));
     }
 
     Err(
@@ -821,83 +744,76 @@ pub fn parse_issues_response(body: &str) -> AppResult<(Vec<RawIssue>, Option<Str
     )
 }
 
-/// Parse a page of [`PULL_REQUESTS_SINCE_QUERY`] into the raw issues the
-/// returned pull requests currently close, and the next page cursor — `None`
-/// once a PR older than `since` is reached (pull requests are ordered by
-/// `updatedAt` descending, so everything after is older still) or there is no
-/// next page. Pure and offline, mirroring [`parse_issues_response`].
-fn parse_pull_requests_since_response(
-    body: &str,
-    since: &DateTime<Utc>,
-) -> AppResult<(Vec<RawIssue>, Option<String>)> {
-    let response: PullRequestsSinceResponse = serde_json::from_str(body).map_err(|err| {
+/// Map a GraphQL `errors` array from a repository read (issues or the open-PR
+/// sweep) to an [`AppError`] the caller can act on, joining the messages as
+/// diagnostic context.
+///
+/// A whole-repository `FORBIDDEN` (not just an optional field) — e.g. a
+/// fine-grained token with no Issues or Pull requests permission at all — must
+/// classify as Forbidden, not Internal, so `CredentialFailure::UnderScoped`
+/// routes to Rotate instead of a generic error.
+fn repository_query_error(errors: Vec<GraphQlError>, operation: &'static str) -> AppError {
+    let not_found = errors.iter().any(|error| {
+        error.error_type.as_deref() == Some("NOT_FOUND")
+            || error
+                .message
+                .to_lowercase()
+                .contains("could not resolve to a repository")
+    });
+    let forbidden = errors
+        .iter()
+        .any(|error| error.error_type.as_deref() == Some("FORBIDDEN"));
+    let message = errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let error = if not_found {
+        AppError::not_found("Repository not found or not visible to the token")
+    } else if forbidden {
+        AppError::forbidden("The token lacks access to this repository")
+    } else if message.to_lowercase().contains("rate limit") {
+        AppError::rate_limited("GitHub rate limit exceeded")
+    } else {
+        AppError::internal("GitHub reported a query error")
+    };
+    error
+        .with_operation(operation)
+        .with_context("errors", message)
+}
+
+/// Parse a page of [`OPEN_PRS_QUERY`] into the swept [`RawLinkedPr`]s and the
+/// cursor of the next page (if any). Pure and offline, mirroring
+/// [`parse_issues_response`] — including its tolerance of field-level errors
+/// beside the data (e.g. a token that cannot read a repo's CI checks).
+pub fn parse_open_prs_response(body: &str) -> AppResult<(Vec<RawLinkedPr>, Option<String>)> {
+    let response: OpenPrsResponse = serde_json::from_str(body).map_err(|err| {
         AppError::internal("GitHub returned a malformed response")
-            .with_operation("parse_pull_requests_since_response")
+            .with_operation("parse_open_prs_response")
             .with_source(err)
     })?;
 
-    // GitHub returns partial data alongside field-level errors (see
-    // `parse_issues_response`); only when there is no usable repository do the
-    // errors become fatal.
     if let Some(pull_requests) = response
         .data
         .and_then(|data| data.repository)
         .map(|repository| repository.pull_requests)
     {
-        let mut issues = Vec::new();
-        let mut reached_before_since = false;
-        for node in pull_requests.nodes {
-            if node.updated_at < *since {
-                reached_before_since = true;
-                break;
-            }
-            issues.extend(
-                node.closing_issues_references
-                    .nodes
-                    .into_iter()
-                    .map(map_issue_raw),
-            );
-        }
-
-        let next = if reached_before_since {
-            None
-        } else if pull_requests.page_info.has_next_page {
+        let linked_prs = pull_requests.nodes.into_iter().map(map_linked_pr).collect();
+        let next = if pull_requests.page_info.has_next_page {
             pull_requests.page_info.end_cursor
         } else {
             None
         };
-
-        return Ok((issues, next));
+        return Ok((linked_prs, next));
     }
 
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
-        let not_found = errors.iter().any(|error| {
-            error.error_type.as_deref() == Some("NOT_FOUND")
-                || error
-                    .message
-                    .to_lowercase()
-                    .contains("could not resolve to a repository")
-        });
-        let message = errors
-            .into_iter()
-            .map(|error| error.message)
-            .collect::<Vec<_>>()
-            .join("; ");
-        let error = if not_found {
-            AppError::not_found("Repository not found or not visible to the token")
-        } else if message.to_lowercase().contains("rate limit") {
-            AppError::rate_limited("GitHub rate limit exceeded")
-        } else {
-            AppError::internal("GitHub reported a query error")
-        };
-        return Err(error
-            .with_operation("parse_pull_requests_since_response")
-            .with_context("errors", message));
+        return Err(repository_query_error(errors, "parse_open_prs_response"));
     }
 
     Err(
         AppError::not_found("Repository not found or not visible to the token")
-            .with_operation("parse_pull_requests_since_response"),
+            .with_operation("parse_open_prs_response"),
     )
 }
 
@@ -1263,52 +1179,55 @@ fn review_decision(raw: Option<&str>) -> Option<ReviewDecision> {
     }
 }
 
-/// Project one GraphQL issue node into a [`RawIssue`] for the two-tier
-/// classifier: open/closed, labels, native parent number (and whether it is a
-/// `prd`-labelled parent), native blockers (open and closed), assignee, and
-/// linked-PR state. The cross-issue open-set filtering and prose resolution are
-/// left to `classify_board`.
-fn map_issue_raw(node: RawIssueNode) -> RawIssue {
-    // A Linked PR is an **open** Pull Request, and the query cannot guarantee
-    // that on its own: `includeClosedPrs: false` drops CLOSED-unmerged
-    // references but still returns MERGED ones. Filtering on the PR's own
-    // `state` here is what stops a merged PR from keeping a Slice in WIP with a
-    // stale `pr #n` badge — no amount of refreshing or reconciling can heal
-    // that, because every fetch re-reads the same fact. Anything that is not
-    // explicitly `OPEN` (including a payload with no state at all) is not a
-    // Linked PR. A null `author` (e.g. a deleted account) leaves the `@u`
-    // segment off the badge.
-    let linked_prs = node
-        .closed_by_pull_requests_references
-        .nodes
-        .into_iter()
-        .filter(|pr| pr.state.as_deref() == Some("OPEN"))
-        .map(|pr| LinkedPrRef {
-            number: pr.number,
-            author: pr.author.map(|author| author.login),
-            title: pr.title,
-            url: pr.url,
+/// Project one swept pull request node into a [`RawLinkedPr`]: the facts a
+/// `pr #n @u` badge renders (spine + Decorations) plus the issue numbers it
+/// closes.
+///
+/// No open/closed filtering happens here, and none is needed: the sweep asks
+/// for `states: [OPEN]`, so a merged or closed PR never reaches this function.
+/// A null `author` (e.g. a deleted account) leaves the `@u` segment off the
+/// badge.
+fn map_linked_pr(node: OpenPrNode) -> RawLinkedPr {
+    RawLinkedPr {
+        pr: LinkedPrRef {
+            number: node.number,
+            author: node.author.map(|author| author.login),
+            title: node.title,
+            url: node.url,
             pr_status: PrStatus::derive(
-                pr.is_draft,
-                review_decision(pr.review_decision.as_deref()),
+                node.is_draft,
+                review_decision(node.review_decision.as_deref()),
             ),
-            conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
-            ci_failing: pr
+            conflicts: node.mergeable.as_deref() == Some("CONFLICTING"),
+            ci_failing: node
                 .commits
                 .nodes
                 .first()
-                .and_then(|node| node.commit.status_check_rollup.as_ref())
+                .and_then(|commit| commit.commit.status_check_rollup.as_ref())
                 .map(|rollup| matches!(rollup.state.as_str(), "FAILURE" | "ERROR"))
                 .unwrap_or(false),
-            unresolved_comment_count: pr
+            unresolved_comment_count: node
                 .review_threads
                 .nodes
                 .iter()
                 .filter(|thread| !thread.is_resolved)
                 .count() as u32,
-        })
-        .collect();
+        },
+        closes: node
+            .closing_issues_references
+            .nodes
+            .into_iter()
+            .map(|issue| issue.number)
+            .collect(),
+    }
+}
 
+/// Project one GraphQL issue node into a [`RawIssue`] for the two-tier
+/// classifier: open/closed, labels, native parent number (and whether it is a
+/// `prd`-labelled parent), native blockers (open and closed), and assignee. No
+/// Pull Request data: that comes from the open-PR sweep. The cross-issue
+/// open-set filtering and prose resolution are left to `classify`.
+fn map_issue_raw(node: RawIssueNode) -> RawIssue {
     let native_parent = node.parent.as_ref().map(|parent| parent.number);
     let is_native_child_of_prd = node
         .parent
@@ -1351,7 +1270,6 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
             .nodes
             .first()
             .map(|user| user.avatar_url.clone()),
-        linked_prs,
         is_native_child_of_prd,
     }
 }
@@ -1426,22 +1344,38 @@ struct Login {
     avatar_url: String,
 }
 
+// ── Open-PR sweep query ───────────────────────────────────────────────
+
 #[derive(Deserialize)]
-struct LinkedPrConnection {
-    nodes: Vec<LinkedPrNode>,
+struct OpenPrsResponse {
+    data: Option<OpenPrsData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct OpenPrsData {
+    repository: Option<OpenPrsRepository>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LinkedPrNode {
+struct OpenPrsRepository {
+    pull_requests: OpenPrConnection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenPrConnection {
+    page_info: PageInfo,
+    nodes: Vec<OpenPrNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenPrNode {
     number: u64,
     url: String,
     title: String,
-    /// The PR's own state (`OPEN`, `CLOSED`, `MERGED`). Non-null in GitHub's
-    /// schema; `Option` only so a malformed payload fails closed (not a Linked
-    /// PR) instead of failing to deserialize the whole page.
-    #[serde(default)]
-    state: Option<String>,
     author: Option<AuthorNode>,
     #[serde(default)]
     is_draft: bool,
@@ -1451,6 +1385,20 @@ struct LinkedPrNode {
     commits: CommitConnection,
     #[serde(default)]
     review_threads: ReviewThreadConnection,
+    #[serde(default)]
+    closing_issues_references: ClosingIssuesConnection,
+}
+
+/// The issue numbers a pull request closes (its closing references) — the edge
+/// the board joins Linked PRs onto Slices by.
+#[derive(Deserialize, Default)]
+struct ClosingIssuesConnection {
+    nodes: Vec<ClosingIssueNode>,
+}
+
+#[derive(Deserialize)]
+struct ClosingIssueNode {
+    number: u64,
 }
 
 /// The PR's last commit (via `commits(last: 1)`), carrying the aggregated CI
@@ -1531,47 +1479,6 @@ struct RawIssueNode {
     assignees: LoginConnection,
     parent: Option<ParentIssueNode>,
     blocked_by: BlockerConnection,
-    closed_by_pull_requests_references: LinkedPrConnection,
-}
-
-// ── Pull-requests-since query (healing the issues-since delta's blind spot) ────
-
-#[derive(Deserialize)]
-struct PullRequestsSinceResponse {
-    data: Option<PullRequestsSinceData>,
-    errors: Option<Vec<GraphQlError>>,
-}
-
-#[derive(Deserialize)]
-struct PullRequestsSinceData {
-    repository: Option<PullRequestsSinceRepository>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PullRequestsSinceRepository {
-    pull_requests: PullRequestsSinceConnection,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PullRequestsSinceConnection {
-    page_info: PageInfo,
-    nodes: Vec<PullRequestSinceNode>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PullRequestSinceNode {
-    updated_at: DateTime<Utc>,
-    closing_issues_references: ClosingIssuesConnection,
-}
-
-/// The issues one pull request currently closes, in the exact same shape as
-/// [`RawIssueNode`] so [`map_issue_raw`] can project them identically.
-#[derive(Deserialize)]
-struct ClosingIssuesConnection {
-    nodes: Vec<RawIssueNode>,
 }
 
 #[derive(Deserialize)]
@@ -1771,19 +1678,37 @@ mod tests {
     #[test]
     fn every_query_fits_githubs_node_limit() {
         // A query over the limit is rejected outright, so this is not a
-        // performance preference: `PULL_REQUESTS_SINCE_QUERY` shipped at
-        // 1,000,000 possible nodes and *never once* succeeded against real
-        // GitHub, because the parse tests replay recorded bodies (#168).
+        // performance preference: the four-deep PR query this design replaced
+        // shipped at 1,000,000 possible nodes and *never once* succeeded against
+        // real GitHub, because the parse tests replay recorded bodies (#168).
         for (name, query) in [
             ("ISSUES_QUERY", ISSUES_QUERY),
             ("ISSUES_SINCE_QUERY", ISSUES_SINCE_QUERY),
-            ("PULL_REQUESTS_SINCE_QUERY", PULL_REQUESTS_SINCE_QUERY),
+            ("OPEN_PRS_QUERY", OPEN_PRS_QUERY),
             ("PROJECTS_QUERY", PROJECTS_QUERY),
         ] {
             let nodes = worst_case_nodes(query);
             assert!(
                 nodes <= GITHUB_NODE_LIMIT,
                 "{name} requests up to {nodes} possible nodes, over GitHub's limit of {GITHUB_NODE_LIMIT}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_issue_side_query_requests_pull_request_data() {
+        // Linked PRs are read from the PR side by the sweep (ADR 0008). An issue
+        // query that reached back into pull requests would reintroduce both the
+        // node-limit blowout (#168) and the merged-PR-shown-as-open bug (#179),
+        // since a nested connection also returns MERGED references.
+        for (name, query) in [
+            ("ISSUES_QUERY", ISSUES_QUERY),
+            ("ISSUES_SINCE_QUERY", ISSUES_SINCE_QUERY),
+        ] {
+            let lowered = query.to_lowercase();
+            assert!(
+                !lowered.contains("pullrequest"),
+                "{name} must request no Pull Request data"
             );
         }
     }
@@ -1803,9 +1728,9 @@ mod tests {
 
     #[test]
     fn parse_issues_tolerates_partial_field_errors_when_data_is_present() {
-        // GitHub returns the issue data *plus* a field-level FORBIDDEN on
-        // `statusCheckRollup` when the token cannot read a repo's checks. The
-        // board must still load from the data rather than failing wholesale.
+        // GitHub can return the issue data *plus* a field-level error (e.g. a
+        // FORBIDDEN on a field the token cannot read). The board must still load
+        // from the data rather than failing wholesale.
         let body = r#"{
             "data": { "repository": { "issues": {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
@@ -1813,31 +1738,18 @@ mod tests {
                     "number": 1, "title": "A Slice", "url": "https://x/1", "body": "",
                     "state": "OPEN", "labels": { "nodes": [ { "name": "slice" } ] },
                     "assignees": { "nodes": [] }, "parent": null,
-                    "blockedBy": { "nodes": [] },
-                    "closedByPullRequestsReferences": { "nodes": [ {
-                        "number": 9, "url": "https://x/pull/9", "title": "PR",
-                        "state": "OPEN", "author": null,
-                        "isDraft": false, "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
-                        "commits": { "nodes": [ { "commit": { "statusCheckRollup": null } } ] },
-                        "reviewThreads": { "nodes": [] }
-                    } ] }
+                    "blockedBy": { "nodes": [] }
                 } ]
             } } },
             "errors": [ { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token",
-                "path": ["repository","issues","nodes",0,"closedByPullRequestsReferences","nodes",0,"commits","nodes",0,"commit","statusCheckRollup"] } ]
+                "path": ["repository","issues","nodes",0,"assignees"] } ]
         }"#;
 
         let (issues, next) =
             parse_issues_response(body).expect("partial field errors must not fail the board");
         assert_eq!(next, None);
         assert_eq!(issues.len(), 1);
-        // The forbidden statusCheckRollup came back null -> CI simply not failing.
-        assert_eq!(issues[0].linked_prs.len(), 1);
-        assert!(!issues[0].linked_prs[0].ci_failing);
-        assert_eq!(
-            issues[0].linked_prs[0].pr_status,
-            domain::PrStatus::Approved
-        );
+        assert_eq!(issues[0].number, 1);
     }
 
     #[test]
@@ -1859,102 +1771,6 @@ mod tests {
             "errors": [ { "type": "FORBIDDEN", "message": "Resource not accessible by personal access token" } ] }"#;
         let error = parse_issues_response(body).expect_err("a FORBIDDEN response should fail");
         assert_eq!(error.kind(), AppErrorKind::Forbidden);
-    }
-
-    /// A minimal `RawIssueNode`-shaped JSON body, for embedding inside a pull
-    /// request's `closingIssuesReferences`.
-    fn issue_node_json(number: u64) -> String {
-        format!(
-            r#"{{
-                "number": {number},
-                "title": "A Slice",
-                "url": "https://github.com/acme/widgets/issues/{number}",
-                "body": "",
-                "state": "OPEN",
-                "labels": {{ "nodes": [ {{ "name": "slice" }} ] }},
-                "assignees": {{ "nodes": [] }},
-                "parent": null,
-                "blockedBy": {{ "nodes": [] }},
-                "closedByPullRequestsReferences": {{ "nodes": [] }}
-            }}"#
-        )
-    }
-
-    #[test]
-    fn parse_pull_requests_since_extracts_issues_closed_by_recent_prs() {
-        let body = format!(
-            r#"{{
-                "data": {{ "repository": {{ "pullRequests": {{
-                    "pageInfo": {{ "hasNextPage": false, "endCursor": null }},
-                    "nodes": [ {{
-                        "updatedAt": "2026-07-28T07:41:22Z",
-                        "closingIssuesReferences": {{ "nodes": [ {} ] }}
-                    }} ]
-                }} }} }}
-            }}"#,
-            issue_node_json(1233)
-        );
-        let since: DateTime<Utc> = "2026-07-27T00:00:00Z".parse().expect("valid RFC 3339");
-
-        let (issues, next) = parse_pull_requests_since_response(&body, &since)
-            .expect("a clean response should parse");
-
-        assert_eq!(next, None);
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].number, 1233);
-    }
-
-    #[test]
-    fn parse_pull_requests_since_stops_at_the_first_pr_older_than_since() {
-        // Ordered by `updatedAt` descending: the first PR is recent (kept), the
-        // second is older than `since` (excluded, and pagination must stop even
-        // though the page itself claims a next page exists).
-        let body = format!(
-            r#"{{
-                "data": {{ "repository": {{ "pullRequests": {{
-                    "pageInfo": {{ "hasNextPage": true, "endCursor": "CURSOR" }},
-                    "nodes": [
-                        {{
-                            "updatedAt": "2026-07-28T07:41:22Z",
-                            "closingIssuesReferences": {{ "nodes": [ {} ] }}
-                        }},
-                        {{
-                            "updatedAt": "2026-01-01T00:00:00Z",
-                            "closingIssuesReferences": {{ "nodes": [ {} ] }}
-                        }}
-                    ]
-                }} }} }}
-            }}"#,
-            issue_node_json(1233),
-            issue_node_json(9999)
-        );
-        let since: DateTime<Utc> = "2026-07-27T00:00:00Z".parse().expect("valid RFC 3339");
-
-        let (issues, next) = parse_pull_requests_since_response(&body, &since)
-            .expect("a clean response should parse");
-
-        assert_eq!(
-            issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
-            vec![1233],
-            "only the PR at or after `since` should contribute an issue"
-        );
-        assert_eq!(
-            next, None,
-            "pagination must stop once a PR older than `since` is reached, \
-             even though the page reports a next page"
-        );
-    }
-
-    #[test]
-    fn parse_pull_requests_since_still_fails_when_no_repository_data() {
-        let body = r#"{ "data": { "repository": null },
-            "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to a repository" } ] }"#;
-        let since: DateTime<Utc> = "2026-07-27T00:00:00Z".parse().expect("valid RFC 3339");
-
-        let error = parse_pull_requests_since_response(body, &since)
-            .expect_err("absent repository must fail");
-
-        assert_eq!(error.kind(), AppErrorKind::NotFound);
     }
 
     #[test]

@@ -3,7 +3,9 @@
 
 use application::{AccountService, GitHubPort};
 use async_trait::async_trait;
-use domain::{AppAction, AppError, AppErrorKind, AppResult, Project, RawIssue, RepoRef, Viewer};
+use domain::{
+    AppAction, AppError, AppErrorKind, AppResult, Project, RawIssue, RawLinkedPr, RepoRef, Viewer,
+};
 use infrastructure::{FakeBoardCache, FakeProjectStore, FakeSecureStore};
 
 /// A fake that returns a canned Viewer, standing in for a successful GitHub
@@ -14,6 +16,10 @@ struct StubGitHubPort;
 impl GitHubPort for StubGitHubPort {
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(Vec::new())
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -46,6 +52,10 @@ struct FailingViewerPort;
 impl GitHubPort for FailingViewerPort {
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(Vec::new())
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {

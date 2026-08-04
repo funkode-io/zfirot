@@ -2,7 +2,7 @@
 
 use application::{BoardService, ClassifiedBoard};
 use async_trait::async_trait;
-use domain::{AppAction, AppResult, IssueClassification, Project, RawIssue, RepoRef};
+use domain::{AppAction, AppResult, IssueClassification, Project, RawIssue, RawLinkedPr, RepoRef};
 use infrastructure::FakeGitHubPort;
 
 #[tokio::test]
@@ -133,7 +133,7 @@ async fn classify_board_derives_blocked_state_from_native_blockers() {
 }
 
 #[tokio::test]
-async fn classify_board_carries_linked_prs_onto_the_slice() {
+async fn classify_board_joins_swept_linked_prs_onto_the_slice() {
     let service = BoardService::new(FakeGitHubPort);
     let repo = RepoRef::new("funkode-io", "zfirot");
 
@@ -142,8 +142,8 @@ async fn classify_board_carries_linked_prs_onto_the_slice() {
         .await
         .expect("fake port should classify the board");
 
-    // Issue #3 carries an open linked PR in the fake data; classify_board must
-    // copy it through onto the rendered Slice for the `pr #n @u` badge.
+    // The fake sweep returns PR #12, whose closing reference names issue #3;
+    // classify must join it onto that Slice for the `pr #n @u` badge.
     let slice3 = slices
         .iter()
         .find(|s| s.number == 3)
@@ -151,7 +151,7 @@ async fn classify_board_carries_linked_prs_onto_the_slice() {
     assert_eq!(
         slice3.linked_prs.len(),
         1,
-        "issue #3 has one open linked PR"
+        "issue #3 is closed by one open PR in the sweep"
     );
     assert_eq!(slice3.linked_prs[0].number, 12);
     assert_eq!(
@@ -218,7 +218,6 @@ impl application::GitHubPort for ClosedParentFixturePort {
                 native_blockers: vec![],
                 assignee: None,
                 assignee_avatar_url: None,
-                linked_prs: vec![],
                 is_native_child_of_prd: false,
             },
             RawIssue {
@@ -232,10 +231,13 @@ impl application::GitHubPort for ClosedParentFixturePort {
                 native_blockers: vec![],
                 assignee: None,
                 assignee_avatar_url: None,
-                linked_prs: vec![],
                 is_native_child_of_prd: false,
             },
         ])
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(vec![])
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -285,7 +287,6 @@ fn raw_slice_issue(number: u64, body: &str, labels: &[&str], closed: bool) -> Ra
         native_blockers: vec![],
         assignee: None,
         assignee_avatar_url: None,
-        linked_prs: vec![],
         is_native_child_of_prd: false,
     }
 }
@@ -322,6 +323,10 @@ impl application::GitHubPort for BlockedReasonFixturePort {
             // No signal at all.
             raw_slice_issue(105, "Plain body.", &["slice", "enhancement"], false),
         ])
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(vec![])
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
