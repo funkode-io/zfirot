@@ -7,10 +7,17 @@ use dioxus::prelude::*;
 /// When `on_change_token` is set, the banner also renders a "Change token…"
 /// button beneath the message — the actionable treatment an Under-scoped
 /// credential failure gets (per #144) instead of a dead-end plain error.
+///
+/// When `on_dismiss` is set, a close control lets the user clear the banner.
+/// Give it to any banner that sits *above still-usable content*: several are
+/// otherwise cleared only by a later success of the very action that failed, so
+/// a user who reads the error and moves on would keep it forever. Leave it off
+/// where the error *is* the whole view — dismissing there would reveal nothing.
 #[component]
 pub fn ErrorBanner(
     message: String,
     #[props(default)] on_change_token: Option<EventHandler<()>>,
+    #[props(default)] on_dismiss: Option<EventHandler<()>>,
 ) -> Element {
     rsx! {
         div { role: "alert", class: "alert alert-error items-start",
@@ -35,6 +42,17 @@ pub fn ErrorBanner(
                             "Change token…"
                         }
                     }
+                }
+            }
+            if let Some(on_dismiss) = on_dismiss {
+                button {
+                    // Same ghost/square treatment as the tracked-repo remove
+                    // button on Home, so "dismiss" reads the same everywhere.
+                    class: "btn btn-ghost btn-sm btn-square shrink-0",
+                    "aria-label": "Dismiss this error",
+                    title: "Dismiss",
+                    onclick: move |_| on_dismiss.call(()),
+                    span { class: "icon-[lucide--x] size-4 opacity-60" }
                 }
             }
         }

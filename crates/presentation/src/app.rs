@@ -864,7 +864,10 @@ pub fn App() -> Element {
                     on_sign_out,
                 }
                 if let Some(message) = sign_out_error() {
-                    ErrorBanner { message }
+                    ErrorBanner {
+                        message,
+                        on_dismiss: move |_| sign_out_error.set(None),
+                    }
                 }
             },
             (Some(View::NeedToken { reason }), ..) => rsx! {
@@ -928,16 +931,34 @@ pub fn App() -> Element {
                         on_change_token: on_open_change_token,
                         on_sign_out,
                         if let Some(error) = assign_error() {
-                            FeatureActionErrorBanner { error, on_change_token: on_open_change_token }
+                            FeatureActionErrorBanner {
+                                error,
+                                on_change_token: on_open_change_token,
+                                on_dismiss: move |_| assign_error.set(None),
+                            }
                         }
                         if let Some(error) = confirm_error() {
-                            FeatureActionErrorBanner { error, on_change_token: on_open_change_token }
+                            FeatureActionErrorBanner {
+                                error,
+                                on_change_token: on_open_change_token,
+                                on_dismiss: move |_| confirm_error.set(None),
+                            }
                         }
                         if let Some(message) = sign_out_error() {
-                            ErrorBanner { message }
+                            ErrorBanner {
+                                message,
+                                on_dismiss: move |_| sign_out_error.set(None),
+                            }
                         }
+                        // Dismissing only hides the *current* report: a refresh
+                        // or reconcile that fails again re-sets the signal, so a
+                        // still-broken board speaks up on the next cycle rather
+                        // than staying quiet after one dismissal.
                         if let Some(message) = refresh_error() {
-                            ErrorBanner { message }
+                            ErrorBanner {
+                                message,
+                                on_dismiss: move |_| refresh_error.set(None),
+                            }
                         }
                         BoardSummaryBar { summary }
                         Board {
@@ -963,6 +984,9 @@ pub fn App() -> Element {
                     viewer: viewer(),
                     on_change_token: on_open_change_token,
                     on_sign_out,
+                    // No dismiss control: this error *is* the view (the board
+                    // never loaded), so clearing it would reveal an empty shell
+                    // rather than content. Home and Refresh are the way out.
                     ErrorBanner { message: message.clone() }
                 }
             },
@@ -1543,18 +1567,21 @@ fn BoardSummaryBar(summary: BoardSummary) -> Element {
 /// The banner for a feature-action failure (assign self, confirm
 /// classification): `UnderScoped` renders the actionable treatment (a
 /// "Change token…" button wired to `on_change_token`), `Plain` the same
-/// banner without one. See [`FeatureActionError`].
+/// banner without one. Both are dismissable — the backing signal is otherwise
+/// cleared only by a later *successful* action, so a user who reads the error
+/// and moves on would keep it forever. See [`FeatureActionError`].
 #[component]
 fn FeatureActionErrorBanner(
     error: FeatureActionError,
     on_change_token: EventHandler<()>,
+    on_dismiss: EventHandler<()>,
 ) -> Element {
     match error {
         FeatureActionError::UnderScoped(message) => rsx! {
-            ErrorBanner { message, on_change_token }
+            ErrorBanner { message, on_change_token, on_dismiss }
         },
         FeatureActionError::Plain(message) => rsx! {
-            ErrorBanner { message }
+            ErrorBanner { message, on_dismiss }
         },
     }
 }
