@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
     classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AppAction,
-    AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken, IssueClassification, Prd,
-    PrdRef, Project, RawIssue, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
+    AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken, IssueClassification,
+    LinkedPrRef, Prd, PrdRef, Project, RawIssue, RawLinkedPr, RawSlice, RepoRef, Slice,
+    ThemePreference, Viewer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,8 +27,19 @@ pub trait GitHubPort: Send + Sync {
     /// The adapter provides both the native-link fields (`native_parent`,
     /// `native_blockers`, `is_native_child_of_prd`) and the raw `body` for the
     /// prose-fallback parsing. Closed issues are included (`RawIssue.closed`);
-    /// `classify_board` is responsible for omitting them.
+    /// `classify_board` is responsible for omitting them. It carries **no Pull
+    /// Request data**: that is what [`sweep_open_prs`](Self::sweep_open_prs) is
+    /// for.
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>>;
+
+    /// **Sweep** every currently-open Pull Request of the repo, with the facts a
+    /// Linked PR renders and the issue numbers it closes.
+    ///
+    /// The result is *authoritative* over the open-PR set: a PR that has been
+    /// merged or closed is simply absent from it, so nothing has to filter it
+    /// out afterwards (ADR 0008). Every refresh path runs it alongside its issue
+    /// fetch, and [`classify`] joins the two by issue number.
+    async fn sweep_open_prs(&self, repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>>;
 
     /// Load issues updated at or after `since`, including closed ones so close
     /// transitions can be removed from retained snapshots.
@@ -77,6 +89,10 @@ pub trait GitHubPort: Send + Sync {
 impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
     async fn load_issues(&self, repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         (**self).load_issues(repo).await
+    }
+
+    async fn sweep_open_prs(&self, repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        (**self).sweep_open_prs(repo).await
     }
 
     async fn load_issues_since(
@@ -133,18 +149,65 @@ pub struct ClassifiedBoard {
     pub other: Vec<OtherIssue>,
 }
 
+/// The stored format of a [`BoardSnapshot`].
+///
+/// Bumped whenever the snapshot's serde shape changes. A cached snapshot from
+/// another version fails to deserialize, so the cache adapter discards it and
+/// the board cold-loads instead of being mis-read (ADR 0008). Version 2 is the
+/// split into two independently-owned collections — issues and Linked PRs.
+const SNAPSHOT_FORMAT_VERSION: u32 = 2;
+
+/// Reject a stored snapshot written by another version of the format, so an
+/// older shape is discarded rather than silently half-read.
+fn deserialize_format_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != SNAPSHOT_FORMAT_VERSION {
+        return Err(serde::de::Error::custom(format!(
+            "cached board snapshot format {version} is not {SNAPSHOT_FORMAT_VERSION}"
+        )));
+    }
+    Ok(version)
+}
+
 /// A retained fetch snapshot of a board, used to decide whether a refresh would
 /// repaint anything.
+///
+/// It holds the board's two independently-owned collections — the open issues
+/// and the open Linked PRs swept from GitHub — joined only at paint time by the
+/// pure [`classify`]. Keeping them apart is what stops a slower issue write from
+/// reverting a fresher PR sweep (ADR 0008).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardSnapshot {
+    /// The stored format version, checked on read (see
+    /// [`SNAPSHOT_FORMAT_VERSION`]).
+    #[serde(deserialize_with = "deserialize_format_version")]
+    version: u32,
     raw_issues: Vec<RawIssue>,
+    /// Every open Linked PR of the repo, as the last sweep reported it.
+    linked_prs: Vec<RawLinkedPr>,
     /// The UTC timestamp captured at fetch start.
     pub fetched_at: DateTime<Utc>,
 }
 
 impl BoardSnapshot {
+    fn new(
+        raw_issues: Vec<RawIssue>,
+        linked_prs: Vec<RawLinkedPr>,
+        fetched_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            version: SNAPSHOT_FORMAT_VERSION,
+            raw_issues,
+            linked_prs,
+            fetched_at,
+        }
+    }
+
     fn same_facts_as(&self, other: &Self) -> bool {
-        self.raw_issues == other.raw_issues
+        self.raw_issues == other.raw_issues && self.linked_prs == other.linked_prs
     }
 }
 
@@ -227,8 +290,31 @@ fn resolve_open_blockers(
         .collect()
 }
 
-/// Pure projection from a raw issue set to a classified board.
-pub fn classify(raw_issues: &[RawIssue]) -> ClassifiedBoard {
+/// Index the swept open Linked PRs by the issue numbers they close, so each
+/// Slice can pick up its own badges in sweep order. A PR closing several issues
+/// appears under each of them; a PR closing nothing contributes nothing.
+fn linked_prs_by_issue(linked_prs: &[RawLinkedPr]) -> HashMap<u64, Vec<LinkedPrRef>> {
+    let mut by_issue: HashMap<u64, Vec<LinkedPrRef>> = HashMap::new();
+    for linked in linked_prs {
+        for issue in &linked.closes {
+            by_issue.entry(*issue).or_default().push(linked.pr.clone());
+        }
+    }
+    by_issue
+}
+
+/// Pure projection from the board's two authoritative collections — the open
+/// raw issues and the open Linked PRs of the last **Sweep** — to a classified
+/// board.
+///
+/// The two are joined by issue number: a Slice's `pr #n @u` badges, its **WIP**
+/// state, its **Best PR** and its Decorations all come from the PRs whose
+/// closing references name it. A PR closing an issue the board does not hold is
+/// ignored, and a Slice no PR closes simply has none — which is how a merged PR
+/// disappears, since it is absent from the sweep (ADR 0008).
+pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> ClassifiedBoard {
+    let mut prs_by_issue = linked_prs_by_issue(linked_prs);
+
     // The numbers of issues that are still open in this board, so prose
     // blockers (which carry no open/closed state of their own) and native
     // blockers (which may include closed issues) can be filtered to open
@@ -300,7 +386,7 @@ pub fn classify(raw_issues: &[RawIssue]) -> ClassifiedBoard {
                     prd,
                     assignee: raw.assignee,
                     assignee_avatar_url: raw.assignee_avatar_url,
-                    linked_prs: raw.linked_prs,
+                    linked_prs: prs_by_issue.remove(&raw.number).unwrap_or_default(),
                     blockers,
                     // Filled by `resolve_unblocks` once the board is mapped.
                     unblocks: Vec::new(),
@@ -560,6 +646,9 @@ impl<P: GitHubPort> BoardService<P> {
 
     /// Load the project's board view plus a retained snapshot captured at fetch
     /// start, to support unchanged refresh decisions.
+    ///
+    /// Both collections are fetched: the open issues, and the **Sweep** of open
+    /// Linked PRs the board joins onto them.
     pub async fn load(&self, repo: &RepoRef) -> AppResult<LoadedBoard> {
         let fetched_at = Utc::now();
         let raw_issues = self
@@ -567,17 +656,27 @@ impl<P: GitHubPort> BoardService<P> {
             .load_issues(repo)
             .await
             .map_err(|err| err.with_context("repo", repo))?;
+        let linked_prs = self.sweep_open_prs(repo).await?;
 
         Ok(LoadedBoard {
-            board: classify(&raw_issues),
-            snapshot: BoardSnapshot {
-                raw_issues,
-                fetched_at,
-            },
+            board: classify(&raw_issues, &linked_prs),
+            snapshot: BoardSnapshot::new(raw_issues, linked_prs, fetched_at),
         })
     }
 
+    /// The open-PR sweep for `repo`, the authority on which Linked PRs exist.
+    async fn sweep_open_prs(&self, repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        self.port
+            .sweep_open_prs(repo)
+            .await
+            .map_err(|err| err.with_context("repo", repo))
+    }
+
     /// Refresh against a retained snapshot and report whether the board changed.
+    ///
+    /// The issue side is a delta merged onto the retained issues; the Linked PR
+    /// side is replaced wholesale by the sweep, which is authoritative — so a
+    /// PR that merged or closed since the last refresh is gone by absence.
     pub async fn refresh(
         &self,
         repo: &RepoRef,
@@ -593,12 +692,10 @@ impl<P: GitHubPort> BoardService<P> {
                     .with_context("since", snapshot.fetched_at)
             })?;
         let raw_issues = merge_issues(&snapshot.raw_issues, &delta);
+        let linked_prs = self.sweep_open_prs(repo).await?;
         let loaded = LoadedBoard {
-            board: classify(&raw_issues),
-            snapshot: BoardSnapshot {
-                raw_issues,
-                fetched_at,
-            },
+            board: classify(&raw_issues, &linked_prs),
+            snapshot: BoardSnapshot::new(raw_issues, linked_prs, fetched_at),
         };
         if loaded.snapshot.same_facts_as(snapshot) {
             return Ok(BoardRefresh::Unchanged(loaded.snapshot));
@@ -647,7 +744,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             .map_err(|err| err.with_operation("CachedBoardService::open"))?
         {
             return Ok(BoardOpen::Cached(LoadedBoard {
-                board: classify(&snapshot.raw_issues),
+                board: classify(&snapshot.raw_issues, &snapshot.linked_prs),
                 snapshot,
             }));
         }

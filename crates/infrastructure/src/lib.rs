@@ -7,7 +7,7 @@
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use domain::{AppResult, LinkedPrRef, Project, RawIssue, RepoRef, Viewer};
+use domain::{AppResult, LinkedPrRef, Project, RawIssue, RawLinkedPr, RepoRef, Viewer};
 
 mod board_cache;
 mod github;
@@ -15,11 +15,14 @@ mod project_store;
 mod secure_store;
 
 pub use board_cache::{FakeBoardCache, FileBoardCache};
-pub use github::{parse_issues_response, parse_projects_response, GitHubClient};
+pub use github::{
+    parse_issues_response, parse_open_prs_response, parse_projects_response, GitHubClient,
+};
 pub use project_store::{FakeProjectStore, FileProjectStore};
 pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
 
-/// A fake [`GitHubPort`] that returns a fixed set of raw issues.
+/// A fake [`GitHubPort`] that returns a fixed set of raw issues and a fixed
+/// open-PR sweep.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FakeGitHubPort;
 
@@ -27,6 +30,10 @@ pub struct FakeGitHubPort;
 impl GitHubPort for FakeGitHubPort {
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(sample_raw_issues())
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(sample_open_prs())
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -79,6 +86,25 @@ pub fn sample_projects() -> Vec<Project> {
     ]
 }
 
+/// Canned open Linked PRs for the fake: the open-PR **Sweep** a repo whose
+/// Slice #3 is being worked on would return. Joined onto the sample issues by
+/// `classify`, so #3 renders a `pr #12 @carlos-verdes` badge and derives WIP.
+pub fn sample_open_prs() -> Vec<RawLinkedPr> {
+    vec![RawLinkedPr {
+        pr: LinkedPrRef {
+            number: 12,
+            author: Some("carlos-verdes".to_string()),
+            title: "Derive SliceState as a pure domain function".to_string(),
+            url: "https://github.com/funkode-io/zfirot/pull/12".to_string(),
+            pr_status: domain::PrStatus::AwaitingReview,
+            conflicts: false,
+            ci_failing: false,
+            unresolved_comment_count: 0,
+        },
+        closes: vec![3],
+    }]
+}
+
 /// Canned raw issues for the fake, covering all classification tiers:
 /// - Tier-1 PRD (prd label)
 /// - Tier-1 Slices (ready-for-agent / slice labels, native child of PRD)
@@ -104,7 +130,6 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_blockers: vec![],
             assignee: None,
             assignee_avatar_url: None,
-            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Tier-1: confirmed Slice (ready-for-agent label) ──────────────────
@@ -124,16 +149,6 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_blockers: vec![2],
             assignee: Some("carlos-verdes".to_string()),
             assignee_avatar_url: Some("https://avatars.githubusercontent.com/u/1?v=4".to_string()),
-            linked_prs: vec![LinkedPrRef {
-                number: 12,
-                author: Some("carlos-verdes".to_string()),
-                title: "Derive SliceState as a pure domain function".to_string(),
-                url: "https://github.com/funkode-io/zfirot/pull/12".to_string(),
-                pr_status: domain::PrStatus::AwaitingReview,
-                conflicts: false,
-                ci_failing: false,
-                unresolved_comment_count: 0,
-            }],
             is_native_child_of_prd: true,
         },
         // ── Tier-1: confirmed Slice (slice label, prose parent fallback) ─────
@@ -154,7 +169,6 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_blockers: vec![3, 2],
             assignee: None,
             assignee_avatar_url: None,
-            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Tier-2: suggested PRD (no label, but PRD headings) ───────────────
@@ -173,7 +187,6 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_blockers: vec![],
             assignee: None,
             assignee_avatar_url: None,
-            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Tier-2: suggested Slice (no label, but Slice headings) ───────────
@@ -192,7 +205,6 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_blockers: vec![],
             assignee: None,
             assignee_avatar_url: None,
-            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Tier-3: unclassified ─────────────────────────────────────────────
@@ -207,7 +219,6 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_blockers: vec![],
             assignee: None,
             assignee_avatar_url: None,
-            linked_prs: vec![],
             is_native_child_of_prd: false,
         },
         // ── Closed: omitted by classify_board ────────────────────────────────
@@ -222,7 +233,6 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             native_blockers: vec![],
             assignee: Some("carlos-verdes".to_string()),
             assignee_avatar_url: Some("https://avatars.githubusercontent.com/u/1?v=4".to_string()),
-            linked_prs: vec![],
             is_native_child_of_prd: true,
         },
     ]

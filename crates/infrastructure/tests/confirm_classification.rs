@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use application::{BoardService, GitHubPort};
 use async_trait::async_trait;
 use domain::{
-    AppAction, AppError, AppErrorKind, AppResult, IssueClassification, Project, RawIssue, RepoRef,
+    AppAction, AppError, AppErrorKind, AppResult, IssueClassification, Project, RawIssue,
+    RawLinkedPr, RepoRef,
 };
 
 /// A fake that records each `(issue_number, label)` it was asked to label, so
@@ -23,6 +24,10 @@ struct RecordingPort {
 impl GitHubPort for RecordingPort {
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(Vec::new())
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -50,6 +55,10 @@ struct FailingPort;
 impl GitHubPort for FailingPort {
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(vec![])
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(Vec::new())
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {

@@ -7,7 +7,9 @@ use application::{
     RecentProjectsService,
 };
 use async_trait::async_trait;
-use domain::{AppAction, AppResult, BoardViewMode, Project, RawIssue, RepoRef, ThemePreference};
+use domain::{
+    AppAction, AppResult, BoardViewMode, Project, RawIssue, RawLinkedPr, RepoRef, ThemePreference,
+};
 use infrastructure::FakeProjectStore;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -98,6 +100,10 @@ struct UnsortedGitHubPort;
 #[async_trait]
 impl GitHubPort for UnsortedGitHubPort {
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        Ok(Vec::new())
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
         Ok(Vec::new())
     }
 

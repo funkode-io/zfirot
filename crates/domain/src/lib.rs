@@ -34,7 +34,8 @@ pub use project::Project;
 pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
 pub use slice::{
-    resolve_unblocks, BoardSummary, DependencyRef, LinkedPrRef, RawSlice, Slice, SliceState,
+    resolve_unblocks, BoardSummary, DependencyRef, LinkedPrRef, RawLinkedPr, RawSlice, Slice,
+    SliceState,
 };
 pub use theme::ThemePreference;
 pub use token::GitHubToken;

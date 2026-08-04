@@ -1,6 +1,6 @@
 use application::{GitHubPort, ProjectStorePort, TrackedProjectsService};
 use async_trait::async_trait;
-use domain::{AppAction, AppError, AppResult, Project, RawIssue, RepoRef};
+use domain::{AppAction, AppError, AppResult, Project, RawIssue, RawLinkedPr, RepoRef};
 use infrastructure::FakeProjectStore;
 use std::sync::Arc;
 
@@ -85,6 +85,10 @@ impl GitHubPort for StubGitHubPort {
         } else {
             Err(AppError::not_found("Repository not found."))
         }
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(Vec::new())
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
