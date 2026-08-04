@@ -206,6 +206,45 @@ The project the user was viewing when the app last closed, persisted on the
 local device only so the app reopens there on next launch.
 _Avoid_: recent, history
 
+## Freshness
+
+**Sweep**:
+An authoritative listing of everything of one kind that currently exists on
+GitHub — every **open PR** with its full status (every 15s), and every **open
+issue number** with its `updatedAt` (every 60s). A sweep is not a change feed and
+asks no "what's new?" question: its answer *is* the truth, so anything missing
+from it no longer exists and is dropped. Sweeps are affordable because they are
+shallow — they carry no nested detail — and their cost tracks the number of open
+PRs and issues, not the size of the repo.
+_Avoid_: poll, delta, sync
+
+**Hydrate**:
+Fetch the full detail of specific issues **by number** — body, labels, assignee,
+Parent, blockers — for the ones a **Sweep** reports as new or changed. The
+expensive part of a refresh happens only for things known to have moved, so an
+idle board pays almost nothing.
+_Avoid_: fetch, load, enrich
+
+**Cascade**:
+A **Hydrate** triggered by a **Sweep** result instead of by a clock. Any change
+to the open-PR set immediately hydrates the issues those PRs close: a PR merges,
+its Slice reads closed, and every Slice it was blocking becomes **Ready** in the
+same repaint — no extra fetch, because blocker openness is derived from what the
+board already holds.
+_Avoid_: chain, trigger, ripple
+
+**Freshness contract**:
+The promised maximum staleness per class of fact, and the thing to hold the app
+to: **15s** for anything on a PR (new comments, CI, conflicts, approvals, a PR
+appearing, a PR merging and its dependents unblocking), **60s** for issue
+structure (a new PRD or Slice from grooming, a retitle, a relabel, a manual
+close), **5 min** for what GitHub silently fails to timestamp (deleted or
+transferred issues, edited relationships), and **instant** for opening the app or
+switching project, which paints from cache first. PR facts are the critical path
+because they are the ones nobody tells you about; grooming output can lag,
+because you already know it is coming.
+_Avoid_: refresh rate, TTL, SLA
+
 ## Identity and authentication
 
 **Viewer**:
