@@ -100,11 +100,24 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
 /// fetched with the exact same shape as the issues queries) closes the gap.
 /// Ordering lets the caller stop as soon as a page reaches a PR older than
 /// `since` — everything after it is older still.
+///
+/// The page of 10 is a **node budget**, not a preference. GitHub charges a query
+/// its *possible* node count — the product of the page sizes down each path,
+/// summed over every connection — and rejects anything over 500,000 before
+/// reading a row. Nested four connections deep
+/// (`pullRequests` → `closingIssuesReferences` → `closedByPullRequestsReferences`
+/// → `reviewThreads`), this query cost 1,066,050 nodes at `first: 50` and was
+/// rejected on every call (#168). Page size is the lossless lever: the walk
+/// already stops at the first PR older than `since`, so a smaller page costs at
+/// most a round trip, whereas shrinking `reviewThreads` would under-count
+/// unresolved comments and shrinking `closingIssuesReferences` would drop the
+/// very Slices this query exists to heal. `every_query_fits_githubs_node_limit`
+/// keeps the budget honest.
 const PULL_REQUESTS_SINCE_QUERY: &str = concat!(
     r#"
 query PullRequestsSince($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
-    pullRequests(first: 50, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    pullRequests(first: 10, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         updatedAt
@@ -1664,6 +1677,116 @@ mod tests {
     //! without a test catching it.
     use super::*;
     use domain::AppErrorKind;
+
+    /// GitHub's static cap on a single query: it charges the **possible** node
+    /// count — the product of the page sizes along each path through the
+    /// selection set, summed over every connection — and rejects the query with
+    /// `MAX_NODE_LIMIT_EXCEEDED` before reading a single row.
+    const GITHUB_NODE_LIMIT: u64 = 500_000;
+
+    /// The worst-case node count GitHub charges `query`, computed the way GitHub
+    /// does: every connection (a field carrying a `first:`/`last:` page size)
+    /// contributes `enclosing page sizes x its own page size`, and the
+    /// contributions are summed.
+    ///
+    /// Reading the query text rather than restating its page sizes is what makes
+    /// this a guard: a field added to a shared selection is priced automatically.
+    fn worst_case_nodes(query: &str) -> u64 {
+        let mut total = 0;
+        // Multiplier of the selection set currently open; the outermost one
+        // (the query root) returns a single object.
+        let mut multipliers = vec![1_u64];
+        // Page size of the field whose selection set is about to open, if it is
+        // a connection.
+        let mut pending: Option<u64> = None;
+        let mut rest = query;
+
+        while let Some(index) = rest.find(['(', '{', '}']) {
+            let after = &rest[index..];
+            match after.as_bytes()[0] {
+                // An argument list. Skipped whole, so braces *inside* it
+                // (`orderBy: {…}`, `filterBy: {…}`) are never mistaken for a
+                // selection set.
+                b'(' => {
+                    let end = after.find(')').map_or(after.len(), |end| end + 1);
+                    pending = page_size(&after[..end]);
+                    rest = &after[end..];
+                }
+                b'{' => {
+                    let enclosing = *multipliers.last().expect("the root is never popped");
+                    // A plain object field (`nodes`, `parent`, `commit`) has no
+                    // page size: it neither multiplies nor is charged.
+                    let multiplier = enclosing * pending.unwrap_or(1);
+                    if pending.take().is_some() {
+                        total += multiplier;
+                    }
+                    multipliers.push(multiplier);
+                    rest = &after[1..];
+                }
+                _ => {
+                    multipliers.pop();
+                    rest = &after[1..];
+                }
+            }
+        }
+
+        total
+    }
+
+    /// The `first:`/`last:` page size in a GraphQL argument list, if it has one.
+    fn page_size(arguments: &str) -> Option<u64> {
+        ["first:", "last:"].iter().find_map(|key| {
+            let start = arguments.find(key)? + key.len();
+            let digits: String = arguments[start..]
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
+    }
+
+    #[test]
+    fn the_node_estimator_prices_nesting_the_way_github_does() {
+        // 10 issues, each with 5 labels: 10 + 10 x 5. `nodes` and `parent` are
+        // plain object fields and cost nothing; the `orderBy` braces sit inside
+        // an argument list and are not a selection set.
+        let query = r#"
+            query Sample($cursor: String) {
+              repository(owner: "acme", name: "widgets") {
+                issues(first: 10, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
+                  nodes {
+                    number
+                    parent { number }
+                    labels(first: 5) { nodes { name } }
+                  }
+                }
+              }
+            }
+        "#;
+
+        assert_eq!(worst_case_nodes(query), 60);
+    }
+
+    #[test]
+    fn every_query_fits_githubs_node_limit() {
+        // A query over the limit is rejected outright, so this is not a
+        // performance preference: `PULL_REQUESTS_SINCE_QUERY` shipped at
+        // 1,000,000 possible nodes and *never once* succeeded against real
+        // GitHub, because the parse tests replay recorded bodies (#168).
+        for (name, query) in [
+            ("ISSUES_QUERY", ISSUES_QUERY),
+            ("ISSUES_SINCE_QUERY", ISSUES_SINCE_QUERY),
+            ("PULL_REQUESTS_SINCE_QUERY", PULL_REQUESTS_SINCE_QUERY),
+            ("PROJECTS_QUERY", PROJECTS_QUERY),
+        ] {
+            let nodes = worst_case_nodes(query);
+            assert!(
+                nodes <= GITHUB_NODE_LIMIT,
+                "{name} requests up to {nodes} possible nodes, over GitHub's limit of {GITHUB_NODE_LIMIT}"
+            );
+        }
+    }
 
     #[test]
     fn issues_since_query_requests_assignee_avatar_url() {
