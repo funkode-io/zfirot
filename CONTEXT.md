@@ -17,7 +17,9 @@ _Avoid_: epic, story ("spec" is now an accepted alias, not forbidden)
 **Slice**:
 A thin vertical tracer-bullet unit of work that cuts end-to-end through every
 layer and is independently grabbable. Represented as a GitHub Issue, child of a
-PRD.
+PRD. Having a **Parent** that resolves to a PRD is enough to make an issue a
+Slice, whatever its labels — a Slice is not required to be workable, and the
+not-yet-workable ones matter most (they are the plan's unfinished edges).
 _Avoid_: task, ticket, subtask
 
 **Parent**:
@@ -38,7 +40,7 @@ an agent to pick up.
 _Avoid_: open, available, todo
 
 **WIP**:
-A Slice with an open Pull Request linked to it (via the PR's closing reference). Its finer substate is its Best PR's PR status, decorated with any of that PR's Decorations.
+A Slice with an open Pull Request linked to it (via the PR's closing reference). Its finer substate is its Best PR's PR status, decorated with any of that PR's Decorations. An open PR is live evidence of work and outranks any Blocked reason — except an unstacked PR on a **Dependency**-blocked Slice, where GitHub's own branch topology says the work started out of order.
 _Avoid_: in progress, active, doing
 
 **Linked PR**:
@@ -79,13 +81,43 @@ _Avoid_: open comments, review comments
 A Linked PR whose check rollup is failing or errored (`statusCheckRollup = FAILURE | ERROR`). Pending checks are transient and not flagged.
 _Avoid_: build broken, checks red
 
+**Stacked PR**:
+A Linked PR branched on another open PR instead of the default branch — its base
+branch is another open PR's head branch. It marks work deliberately begun on top
+of unfinished work, so a Slice blocked by a **Dependency** whose PR is stacked is
+being worked *correctly*, not out of order. The marker names the PR it sits on.
+_Avoid_: chained PR, dependent PR
+
 **Ready to merge**:
 Not a stored state — the plain-English reading of an **Approved** PR carrying no red Decorations (no Conflicts, CI not failing). Unresolved comments do not disqualify it, since they do not block a merge.
 _Avoid_: mergeable (that is one GitHub field, not this synthesis)
 
 **Blocked**:
-A Slice with at least one open "blocked by" dependency.
-_Avoid_: waiting, stuck
+A Slice that is **not workable** — nobody, human or Agent, can pick it up right
+now. Every Blocked Slice carries a **Blocked reason** saying why. An open
+dependency is only the most common reason; a Slice can be Blocked with no
+blocker badges at all.
+_Avoid_: waiting, stuck, deferred (that is one reason, not the state)
+
+**Blocked reason**:
+Why a Blocked Slice cannot be picked up, shown as a chip on its card. Five
+exist: **Dependency** (an open "blocked by" issue), **Needs triage** (a
+maintainer must decide keep / refine / close), **Deferred** (deliberately put
+off), **External blocker** (waiting on something that is not a GitHub issue),
+and **Labelled blocked** (a human said so and gave no other evidence). Only
+**Dependency** is self-updating — it disappears by itself when the blocking issue
+closes. The other four are human-authored and sticky: they persist until someone
+edits the issue, so they can go stale and are outranked by live evidence of work.
+When several apply at once they rank by how much they say about *what must
+change* — Dependency > External blocker > Needs triage > Deferred > Labelled
+blocked — and the top one is the Slice's reason for display and ordering.
+_Avoid_: block type, blocked kind
+
+**External blocker**:
+A prose "blocked by" entry that names no GitHub issue — e.g. "a prod values file
+existing for this app". Real enough to stop the work, but invisible to the
+dependency graph, so it can never be an edge and never closes itself.
+_Avoid_: soft blocker, non-issue dependency
 
 **Done**:
 A closed Slice or PRD. Hidden from the active board.
@@ -110,6 +142,25 @@ An open GitHub Issue the app cannot confidently map to a PRD or Slice. Surfaced
 on the dashboard as "other open issues" with no further action.
 _Avoid_: misc, unknown, orphan
 
+**Suggested PRD**:
+An issue that reads like a PRD by its headings alone, with no `prd` label to say
+so. It heads a Lane like any PRD, marked as unconfirmed, and its Slices are found
+the same way — so a plan is visible before anyone has labelled it.
+_Avoid_: maybe-PRD, candidate
+
+**Confirm**:
+Accept a suggestion by adding the label it lacks (`prd`), turning a guess into a
+fact everyone shares. The app only ever records decisions on GitHub — it keeps no
+local memory of what the user has judged.
+_Avoid_: approve, accept
+
+**Veto** (label: `not-a-prd`):
+Reject a suggestion outright, so the app stops guessing about that issue. The
+negative counterpart of **Confirm**, and deliberately also a GitHub label: a
+rejection is worth as much to a teammate as an acceptance, and holding it locally
+would be private, cache-fragile state that fights whatever GitHub later says.
+_Avoid_: dismiss, ignore, hide
+
 **Lane**:
 A horizontal swimlane on the board grouping every Slice that belongs to one PRD.
 Each lane has a header linking to its PRD Issue and contains the Ready / WIP /
@@ -121,9 +172,13 @@ _Avoid_: row, group, section
 Two ways to render a Lane. **Columns view** (the default) lays a PRD's Slices
 out in Ready / WIP / Blocked columns. **Graph view** draws them as a
 left-to-right **Blocked by** graph — dependency roots on the left, so a stacked
-chain reads as `first → next → last`. A single global toggle switches the whole
-board between the two and the choice is remembered across launches. Both render
-the same Slices with the same states; only the arrangement differs.
+chain reads as `first → next → last`. Because the horizontal axis *is* dependency
+order, a Slice with no dependency edge at all that is also not workable has no
+honest position on it, and sits in a detached **rail** on the right rather than
+among the roots — the left edge must only ever mean "start here". A single global
+toggle switches the whole board between the two and the choice is remembered
+across launches. Both render the same Slices with the same states; only the
+arrangement differs.
 _Avoid_: DAG view, tree view, pipeline, flow
 
 **Tracked repo**:
