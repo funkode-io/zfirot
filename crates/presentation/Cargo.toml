@@ -19,6 +19,10 @@ dioxus = { version = "0.7", features = ["desktop"] }
 tokio = { workspace = true, features = ["time", "sync"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true }
+# Rolling log files, so a bundled `.app` (whose stderr launchd discards) still
+# leaves a diagnosable trail. See `src/logging.rs`.
+tracing-appender.workspace = true
+dirs.workspace = true
 chrono = "0.4"
 # Decodes the bundled PNG window icon into RGBA at startup. Only the `png`
 # decoder is needed, so default features (every other format) are disabled.
