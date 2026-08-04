@@ -1,6 +1,16 @@
 # Spec 0001 — Incremental board refresh + local board cache
 
-**Status:** Draft
+**Status:** Partly superseded by **ADR 0008** (refresh by authoritative sweeps
+and targeted hydration). The per-project **local cache**, the instant
+stale-while-revalidate paint on open/switch, and the cache-usage / Clean Cache
+controls below all stand and shipped. What ADR 0008 replaces is the *refresh
+mechanism*: the `since`-watermark delta (`load_issues_since`,
+`filterBy: { since }`), the merge-by-number of a change feed, and the slow
+full-load **background reconcile** that existed to heal what a delta could not
+see. GitHub does not bump an issue's `updatedAt` for the changes that matter most
+(a PR opening against it, a PR merging and unblocking its dependents), so the
+change feed could never be made correct — sweeps ask what *exists* instead. Read
+the delta and reconcile sections below as history.
 **Relates to:** ADR 0001 (read directly from GitHub, no backend), ADR 0002
 (aggregates as state, replay deferred), ADR 0003 (agents live-discovered)
 **Source:** Architecture review — board responsiveness & latency
