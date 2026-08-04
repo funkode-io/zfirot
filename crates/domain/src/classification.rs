@@ -148,6 +148,23 @@ pub fn parse_blockers_from_body(body: &str) -> Vec<u64> {
         .collect()
 }
 
+/// Whether an issue body has a `## Blocked by` section that names **no** issue
+/// at all — the **External blocker** signal.
+///
+/// The planning skills emit this section for every Slice, so prose in it ("a
+/// prod values file existing for this app") is a real, stated wait on something
+/// GitHub cannot link. A section naming issues is *not* an External blocker,
+/// whether those issues are open, closed, or outside the fetched board: the
+/// references speak for themselves, and treating a satisfied dependency as an
+/// external wait would strand a Slice that has become workable. An empty section
+/// is no evidence of anything.
+pub fn has_unreferenced_blocked_by(body: &str) -> bool {
+    let Some(section) = extract_section_ci(body, "## blocked by") else {
+        return false;
+    };
+    !section.is_empty() && parse_blockers_from_body(body).is_empty()
+}
+
 // ── Heuristic heading matchers ───────────────────────────────────────────────
 
 fn has_prd_headings(body: &str) -> bool {
@@ -380,6 +397,53 @@ mod tests {
                 expected,
                 "{classification:?} should map to {expected:?}"
             );
+        }
+    }
+
+    // ── Prose-fallback: has_unreferenced_blocked_by ───────────────────────────
+
+    /// A `## Blocked by` section that names no issue is a real wait on something
+    /// the dependency graph cannot see (dxp-data-loom#1250: "a prod values file
+    /// existing for this app"). A section that *does* name issues is not — those
+    /// references speak for themselves, whether they are open, closed, or absent
+    /// from the fetched board.
+    #[test]
+    fn detects_a_blocked_by_section_that_names_no_issue() {
+        let cases: [(&str, bool, &str); 6] = [
+            (
+                "## Blocked by\n\n- A prod values file / prod environment existing for this app.\n",
+                true,
+                "prose naming no issue",
+            ),
+            (
+                "## What to build\n\nStuff\n\n## Blocked by\n\nWaiting on the platform team.\n\n## Notes\n\nx",
+                true,
+                "prose section between other sections",
+            ),
+            (
+                "## Blocked by\n\n- #5\n",
+                false,
+                "names an issue",
+            ),
+            (
+                "## Blocked by\n\n- funkode-io/zfirot#5 — and also a prod environment\n",
+                false,
+                "names an issue alongside prose",
+            ),
+            (
+                "## What to build\n\nStuff\n",
+                false,
+                "no section at all",
+            ),
+            (
+                "## Blocked by\n\n## Acceptance criteria\n\n- [ ] x",
+                false,
+                "an empty section is no evidence of a wait",
+            ),
+        ];
+
+        for (body, expected, name) in cases {
+            assert_eq!(has_unreferenced_blocked_by(body), expected, "{name}");
         }
     }
 

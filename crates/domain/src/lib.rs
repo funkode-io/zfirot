@@ -21,7 +21,8 @@ mod view_mode;
 mod viewer;
 
 pub use classification::{
-    classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
+    classify_issue, has_unreferenced_blocked_by, parse_blockers_from_body, parse_parent_from_body,
+    IssueClassification, RawIssue,
 };
 pub use credential_failure::CredentialFailure;
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
@@ -34,7 +35,8 @@ pub use project::Project;
 pub use prose::{parse_prose, ProseLinks};
 pub use repo::RepoRef;
 pub use slice::{
-    resolve_unblocks, BoardSummary, DependencyRef, LinkedPrRef, RawSlice, Slice, SliceState,
+    order_blocked_column, resolve_unblocks, BlockedReason, BoardSummary, DependencyRef,
+    LinkedPrRef, RawSlice, Slice, SliceState,
 };
 pub use theme::ThemePreference;
 pub use token::GitHubToken;

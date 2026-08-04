@@ -1,8 +1,9 @@
 use dioxus::prelude::*;
-use domain::{Slice, SliceState};
+use domain::{BlockedReason, Slice, SliceState};
 
 use super::{
-    pr_headline_color, pr_headline_icon_class, pr_headline_label, state_badge_class, state_label,
+    blocked_reason_badge_class, blocked_reason_label, blocked_reasons_tooltip, pr_headline_color,
+    pr_headline_icon_class, pr_headline_label, state_badge_class, state_label,
 };
 
 /// A card for a single Slice. Emits `on_assign` with the issue number when the
@@ -23,7 +24,11 @@ pub fn SliceCard(
 ) -> Element {
     let number = slice.number;
     let is_ready = slice.state == SliceState::Ready;
-    let is_blocked = slice.state == SliceState::Blocked;
+    // Only a real open dependency means "this PR started out of order"; a Slice
+    // held back by a label or a prose wait says nothing about its PR.
+    let blocked_by_dependency = slice.primary_blocked_reason() == Some(BlockedReason::Dependency);
+    let blocked_reason = slice.primary_blocked_reason();
+    let reasons_tooltip = blocked_reasons_tooltip(&slice.blocked_reasons);
     // With more than one open PR, each badge shows its own status + Decorations
     // so it is obvious which redundant PR to close; a lone PR badge stays plain.
     let has_multiple_prs = slice.linked_prs.len() > 1;
@@ -67,6 +72,15 @@ pub fn SliceCard(
             div { class: "flex items-center gap-2 mt-1.5",
                 span { class: "text-xs text-base-content/50 shrink-0",
                     "#{slice.number}"
+                }
+                // Why this Slice is not workable: the strongest reason leads,
+                // the rest are one hover away.
+                if let Some(reason) = blocked_reason {
+                    span {
+                        class: "badge badge-xs badge-soft {blocked_reason_badge_class(reason)} shrink-0",
+                        title: "{reasons_tooltip}",
+                        "{blocked_reason_label(reason)}"
+                    }
                 }
                 if let Some(assignee) = slice.assignee.as_deref() {
                     // The visible "@handle" already names the assignee, so the
@@ -132,7 +146,7 @@ pub fn SliceCard(
                             class: "badge badge-sm badge-outline link link-hover no-underline hover:underline",
                             title: "{pr.title}",
                             href: "{pr.url}",
-                            if is_blocked {
+                            if blocked_by_dependency {
                                 span {
                                     class: "icon-[lucide--triangle-alert] text-warning size-3",
                                     title: "This Slice is Blocked — the PR is in progress while a dependency Slice is still open",

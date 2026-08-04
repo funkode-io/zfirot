@@ -2,6 +2,43 @@ use serde::{Deserialize, Serialize};
 
 use crate::PrdRef;
 
+/// Why a Blocked Slice cannot be picked up.
+///
+/// Ranked by how much the reason says about *what must change*, weakest first,
+/// so a Slice's primary reason is the `max` of the reasons that apply — the same
+/// shape as [`crate::PrStatus`] and `best_pr`. Only [`BlockedReason::Dependency`]
+/// is self-updating (it disappears when the blocking issue closes); the rest are
+/// human-authored and sticky, which is why the weakest of them is the bare
+/// `blocked` label. See ADR 0006.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum BlockedReason {
+    /// Carries the `blocked` label and gives no other evidence.
+    LabelledBlocked,
+    /// Carries the `deferred` label — deliberately put off.
+    Deferred,
+    /// Carries the `needs-triage` label — a maintainer must decide.
+    NeedsTriage,
+    /// Has a `## Blocked by` section that names no issue at all, so the wait is
+    /// on something the dependency graph cannot see.
+    ExternalBlocker,
+    /// Has at least one open "blocked by" dependency.
+    Dependency,
+}
+
+impl BlockedReason {
+    /// The sticky, label-borne reason a label carries, if any. The label
+    /// vocabulary lives here beside the rest of the classification vocabulary
+    /// (`prd`, `slice`, `ready-for-agent`).
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "needs-triage" => Some(BlockedReason::NeedsTriage),
+            "deferred" => Some(BlockedReason::Deferred),
+            "blocked" => Some(BlockedReason::LabelledBlocked),
+            _ => None,
+        }
+    }
+}
+
 /// The derived state of a [`Slice`].
 ///
 /// Precedence among active states is Blocked > WIP > Ready. `Done` (a closed
@@ -140,6 +177,10 @@ pub struct Slice {
     /// Avatar URL of the assignee, when assigned and available.
     pub assignee_avatar_url: Option<String>,
     pub state: SliceState,
+    /// Why this Slice is not workable, strongest reason first; empty unless the
+    /// Slice is [`SliceState::Blocked`]. The first is shown as the card's chip
+    /// and orders the Blocked column; the rest are surfaced on hover.
+    pub blocked_reasons: Vec<BlockedReason>,
     /// The still-open issues this Slice is blocked by, for the blocker badges.
     pub blockers: Vec<DependencyRef>,
     /// The issues this Slice unblocks (the reverse "blocked by" edge), for the
@@ -151,6 +192,12 @@ pub struct Slice {
 }
 
 impl Slice {
+    /// The strongest reason this Slice is not workable — its chip, and its
+    /// position in the Blocked column. `None` when the Slice is workable.
+    pub fn primary_blocked_reason(&self) -> Option<BlockedReason> {
+        self.blocked_reasons.first().copied()
+    }
+
     /// The **Best PR** — the open Linked PR with the highest [`PrStatus`], whose
     /// status and Decorations drive the Slice's WIP headline. `None` when the
     /// Slice has no open PR. On a tie the later PR in input order wins, which is
@@ -184,6 +231,11 @@ pub struct RawSlice {
     /// The still-open "blocked by" dependencies, with their references. A
     /// non-empty list makes the Slice Blocked.
     pub blockers: Vec<DependencyRef>,
+    /// `true` when the issue has a `## Blocked by` section that names no issue
+    /// at all — a real wait on something outside GitHub's dependency graph.
+    pub external_blocker: bool,
+    /// The issue's labels, from which the sticky Blocked reasons are read.
+    pub labels: Vec<String>,
     /// The issues this Slice unblocks, derived across the board by
     /// [`resolve_unblocks`]; empty until then.
     pub unblocks: Vec<DependencyRef>,
@@ -192,7 +244,8 @@ pub struct RawSlice {
 impl RawSlice {
     /// Project this raw issue into a [`Slice`] with its derived [`SliceState`].
     pub fn into_slice(self) -> Slice {
-        let state = self.derive_state();
+        let blocked_reasons = self.derive_blocked_reasons();
+        let state = self.derive_state(&blocked_reasons);
         Slice {
             number: self.number,
             title: self.title,
@@ -201,25 +254,49 @@ impl RawSlice {
             assignee: self.assignee,
             assignee_avatar_url: self.assignee_avatar_url,
             state,
+            blocked_reasons,
             blockers: self.blockers,
             unblocks: self.unblocks,
             linked_prs: self.linked_prs,
         }
     }
 
+    /// Every reason this Slice is not workable, strongest first.
+    ///
+    /// Pure, and total: an empty result *is* the statement that the Slice is
+    /// workable, which is what [`RawSlice::derive_state`] reads.
+    fn derive_blocked_reasons(&self) -> Vec<BlockedReason> {
+        let mut reasons = Vec::new();
+        if !self.blockers.is_empty() {
+            reasons.push(BlockedReason::Dependency);
+        }
+        if self.external_blocker {
+            reasons.push(BlockedReason::ExternalBlocker);
+        }
+        for label in &self.labels {
+            if let Some(reason) = BlockedReason::from_label(label) {
+                reasons.push(reason);
+            }
+        }
+        // Strongest first, so the head is the chip and the column's sort key.
+        reasons.sort_unstable_by(|a, b| b.cmp(a));
+        reasons.dedup();
+        reasons
+    }
+
     /// The pure `SliceState` derivation.
     ///
     /// A closed Slice is always `Done`. Otherwise precedence is
     /// Blocked > WIP > Ready:
-    /// - **Blocked**: at least one open "blocked by" dependency.
+    /// - **Blocked**: not workable for any reason (see [`BlockedReason`]).
     /// - **WIP**: an open linked PR, or an assignee has claimed it to start work
     ///   (an assigned Slice is by definition no longer Ready).
-    /// - **Ready**: all blockers closed, no open linked PR, and no assignee.
-    fn derive_state(&self) -> SliceState {
+    /// - **Ready**: workable, no open linked PR, and no assignee.
+    fn derive_state(&self, blocked_reasons: &[BlockedReason]) -> SliceState {
         if self.closed {
             return SliceState::Done;
         }
-        if !self.blockers.is_empty() {
+        if !blocked_reasons.is_empty() {
             return SliceState::Blocked;
         }
         if !self.linked_prs.is_empty() || self.assignee.is_some() {
@@ -227,6 +304,18 @@ impl RawSlice {
         }
         SliceState::Ready
     }
+}
+
+/// Order the Blocked column so it reads top-down as "soonest to free up":
+/// strongest [`BlockedReason`] first, so `Dependency` Slices (which free
+/// themselves when their blocker closes) lead and the ones awaiting a human
+/// decision trail. The sort is **stable**, so Slices sharing a reason keep the
+/// board's own order.
+///
+/// A pure derivation over already-derived reasons, so the column's order and
+/// each card's chip can never disagree — they read the same rank.
+pub fn order_blocked_column(slices: &mut [Slice]) {
+    slices.sort_by_key(|slice| std::cmp::Reverse(slice.primary_blocked_reason()));
 }
 
 /// Derive each Slice's reverse **"unblocks"** edge from the blocker edges across
@@ -282,6 +371,8 @@ mod tests {
             assignee_avatar_url: None,
             linked_prs: vec![],
             blockers: vec![],
+            external_blocker: false,
+            labels: vec![],
             unblocks: vec![],
         }
     }
@@ -416,6 +507,127 @@ mod tests {
     }
 
     #[test]
+    fn an_unreferenced_blocked_by_section_blocks_the_slice() {
+        let raw = RawSlice {
+            external_blocker: true,
+            ..ready_raw()
+        };
+
+        let slice = raw.into_slice();
+
+        assert_eq!(
+            slice.state,
+            SliceState::Blocked,
+            "a Slice waiting on something that is not an issue is not workable"
+        );
+        assert_eq!(
+            slice.blocked_reasons,
+            vec![BlockedReason::ExternalBlocker],
+            "and it says so"
+        );
+    }
+
+    #[test]
+    fn derives_every_blocked_reason_and_ranks_them() {
+        struct Case {
+            name: &'static str,
+            blocker_count: u64,
+            external_blocker: bool,
+            labels: &'static [&'static str],
+            expected: Vec<BlockedReason>,
+        }
+        let cases = [
+            Case {
+                name: "no signal at all -> workable",
+                blocker_count: 0,
+                external_blocker: false,
+                labels: &[],
+                expected: vec![],
+            },
+            Case {
+                name: "an unrelated label is not a signal",
+                blocker_count: 0,
+                external_blocker: false,
+                labels: &["enhancement", "layer:domain"],
+                expected: vec![],
+            },
+            Case {
+                name: "open dependency",
+                blocker_count: 1,
+                external_blocker: false,
+                labels: &[],
+                expected: vec![BlockedReason::Dependency],
+            },
+            Case {
+                name: "needs-triage label",
+                blocker_count: 0,
+                external_blocker: false,
+                labels: &["needs-triage"],
+                expected: vec![BlockedReason::NeedsTriage],
+            },
+            Case {
+                name: "deferred label",
+                blocker_count: 0,
+                external_blocker: false,
+                labels: &["deferred"],
+                expected: vec![BlockedReason::Deferred],
+            },
+            Case {
+                name: "bare blocked label",
+                blocker_count: 0,
+                external_blocker: false,
+                labels: &["blocked"],
+                expected: vec![BlockedReason::LabelledBlocked],
+            },
+            Case {
+                // dxp-data-loom#1250: deferred + blocked labels and a prose
+                // `## Blocked by` naming no issue. The most informative reason
+                // leads; the rest stay for the tooltip.
+                name: "several signals rank strongest first",
+                blocker_count: 0,
+                external_blocker: true,
+                labels: &["deferred", "blocked", "severity:low"],
+                expected: vec![
+                    BlockedReason::ExternalBlocker,
+                    BlockedReason::Deferred,
+                    BlockedReason::LabelledBlocked,
+                ],
+            },
+            Case {
+                name: "an open dependency outranks every sticky signal",
+                blocker_count: 2,
+                external_blocker: true,
+                labels: &["needs-triage", "deferred", "blocked"],
+                expected: vec![
+                    BlockedReason::Dependency,
+                    BlockedReason::ExternalBlocker,
+                    BlockedReason::NeedsTriage,
+                    BlockedReason::Deferred,
+                    BlockedReason::LabelledBlocked,
+                ],
+            },
+        ];
+
+        for case in cases {
+            let slice = RawSlice {
+                blockers: blockers(case.blocker_count),
+                external_blocker: case.external_blocker,
+                labels: case.labels.iter().map(|l| l.to_string()).collect(),
+                ..ready_raw()
+            }
+            .into_slice();
+
+            assert_eq!(slice.blocked_reasons, case.expected, "{}", case.name);
+            assert_eq!(
+                slice.primary_blocked_reason(),
+                case.expected.first().copied(),
+                "{} — the chip is the strongest reason",
+                case.name
+            );
+        }
+    }
+
+    #[test]
     fn derives_each_state_including_done() {
         struct Case {
             name: &'static str,
@@ -423,6 +635,7 @@ mod tests {
             assignee: Option<&'static str>,
             has_open_linked_pr: bool,
             open_blocker_count: u64,
+            labels: &'static [&'static str],
             expected: SliceState,
         }
         let cases = [
@@ -432,6 +645,7 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: false,
                 open_blocker_count: 0,
+                labels: &[],
                 expected: SliceState::Ready,
             },
             Case {
@@ -440,6 +654,7 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: true,
                 open_blocker_count: 0,
+                labels: &[],
                 expected: SliceState::Wip,
             },
             Case {
@@ -448,6 +663,7 @@ mod tests {
                 assignee: Some("octocat"),
                 has_open_linked_pr: false,
                 open_blocker_count: 0,
+                labels: &[],
                 expected: SliceState::Wip,
             },
             Case {
@@ -456,6 +672,7 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: false,
                 open_blocker_count: 1,
+                labels: &[],
                 expected: SliceState::Blocked,
             },
             Case {
@@ -464,6 +681,7 @@ mod tests {
                 assignee: Some("octocat"),
                 has_open_linked_pr: true,
                 open_blocker_count: 2,
+                labels: &[],
                 expected: SliceState::Blocked,
             },
             Case {
@@ -472,6 +690,7 @@ mod tests {
                 assignee: Some("octocat"),
                 has_open_linked_pr: false,
                 open_blocker_count: 0,
+                labels: &[],
                 expected: SliceState::Wip,
             },
             Case {
@@ -480,6 +699,7 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: false,
                 open_blocker_count: 0,
+                labels: &[],
                 expected: SliceState::Done,
             },
             Case {
@@ -488,6 +708,34 @@ mod tests {
                 assignee: None,
                 has_open_linked_pr: false,
                 open_blocker_count: 3,
+                labels: &[],
+                expected: SliceState::Done,
+            },
+            Case {
+                name: "a deferred label alone -> Blocked",
+                closed: false,
+                assignee: None,
+                has_open_linked_pr: false,
+                open_blocker_count: 0,
+                labels: &["deferred"],
+                expected: SliceState::Blocked,
+            },
+            Case {
+                name: "a sticky reason still outranks WIP (flat precedence, ADR 0006)",
+                closed: false,
+                assignee: Some("octocat"),
+                has_open_linked_pr: true,
+                open_blocker_count: 0,
+                labels: &["needs-triage"],
+                expected: SliceState::Blocked,
+            },
+            Case {
+                name: "closed wins over a reason label — Done stays hidden",
+                closed: true,
+                assignee: None,
+                has_open_linked_pr: false,
+                open_blocker_count: 0,
+                labels: &["deferred", "blocked"],
                 expected: SliceState::Done,
             },
         ];
@@ -502,10 +750,11 @@ mod tests {
                     vec![]
                 },
                 blockers: blockers(case.open_blocker_count),
+                labels: case.labels.iter().map(|l| l.to_string()).collect(),
                 ..ready_raw()
             };
 
-            assert_eq!(raw.derive_state(), case.expected, "{}", case.name);
+            assert_eq!(raw.into_slice().state, case.expected, "{}", case.name);
         }
     }
 
@@ -665,10 +914,39 @@ mod tests {
             assignee: None,
             assignee_avatar_url: None,
             state,
+            blocked_reasons: vec![],
             blockers: vec![],
             unblocks: vec![],
             linked_prs: vec![],
         }
+    }
+
+    /// The Blocked column reads top-down as "soonest to free up": Slices whose
+    /// blocker will clear itself first, the ones needing a human decision last.
+    /// Within one reason the board's own order is preserved.
+    #[test]
+    fn order_blocked_column_sorts_by_reason_rank_and_is_stable() {
+        let blocked_with = |number: u64, reasons: Vec<BlockedReason>| Slice {
+            blocked_reasons: reasons,
+            ..slice_in(number, SliceState::Blocked)
+        };
+
+        let mut column = vec![
+            blocked_with(1, vec![BlockedReason::Deferred]),
+            blocked_with(2, vec![BlockedReason::Dependency]),
+            blocked_with(3, vec![BlockedReason::LabelledBlocked]),
+            blocked_with(4, vec![BlockedReason::Deferred]),
+            blocked_with(5, vec![BlockedReason::ExternalBlocker]),
+            blocked_with(6, vec![BlockedReason::NeedsTriage]),
+        ];
+
+        order_blocked_column(&mut column);
+
+        assert_eq!(
+            column.iter().map(|s| s.number).collect::<Vec<_>>(),
+            vec![2, 5, 6, 1, 4, 3],
+            "ranked strongest first, with #1 before #4 since both are Deferred"
+        );
     }
 
     #[test]
