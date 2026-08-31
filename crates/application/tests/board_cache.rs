@@ -476,9 +476,12 @@ async fn reconcile_full_load_noops_when_cache_is_aligned() {
 
     match reconcile {
         BoardRefresh::Unchanged(returned) => {
-            assert_eq!(
-                returned, snapshot,
-                "aligned reconcile should keep the cached snapshot"
+            // `Unchanged` already says the facts are aligned; what matters is
+            // that the full load's watermark comes back, since that is where
+            // the next delta window starts.
+            assert!(
+                returned.fetched_at > snapshot.fetched_at,
+                "aligned reconcile should still advance the issue-side watermark"
             );
         }
         BoardRefresh::Changed(_) => panic!("aligned reconcile should be a no-op"),

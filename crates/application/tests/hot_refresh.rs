@@ -417,6 +417,54 @@ async fn an_identical_open_pr_set_repaints_nothing_and_rewrites_no_cache() {
 }
 
 #[tokio::test]
+async fn an_identical_open_pr_set_writes_nothing_even_when_the_issue_side_moved_on() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(18)], vec![vec![], vec![]])
+            .with_deltas(vec![vec![slice_issue(19)]]),
+        cache.clone(),
+    );
+
+    // A structural refresh lands while the hot loop is still holding the
+    // snapshot it started its sweep from.
+    let opened = seeded(&service).await;
+    changed(
+        service
+            .refresh_cached(&repo(), &opened)
+            .await
+            .expect("structural refresh should succeed"),
+        "a new issue changes the board",
+    );
+    let writes_before_sweep = cache.writes();
+
+    let hot = service
+        .hot_refresh_cached(&repo(), &opened)
+        .await
+        .expect("hot refresh should succeed");
+
+    let cached = cache
+        .cached_board(&repo())
+        .await
+        .expect("cache read should succeed")
+        .expect("the cache holds the structural refresh's snapshot");
+    match hot {
+        BoardRefresh::Unchanged(unchanged) => assert_eq!(
+            unchanged, cached,
+            "an unchanged sweep still carries the freshest issue facts forward",
+        ),
+        BoardRefresh::Changed(_) => panic!(
+            "only a changed open-PR set may repaint: issue facts the hot path merely carried \
+             forward are not its news",
+        ),
+    }
+    assert_eq!(
+        cache.writes(),
+        writes_before_sweep,
+        "an unchanged hot refresh must not rewrite the cache, whatever the issue side did",
+    );
+}
+
+#[tokio::test]
 async fn a_hot_refresh_leaves_the_issue_side_watermark_where_it_was() {
     let cache = Arc::new(CountingBoardCache::default());
     let service = CachedBoardService::new(

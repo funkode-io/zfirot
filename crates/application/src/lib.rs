@@ -850,11 +850,14 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
         let linked_prs = self.board.sweep_open_prs(repo).await?;
-        let refreshed = self
-            .freshest_snapshot(repo, snapshot)
-            .await
-            .with_linked_prs(linked_prs);
-        let refresh = refresh_outcome(refreshed, snapshot);
+        let freshest = self.freshest_snapshot(repo, snapshot).await;
+        let refreshed = freshest.with_linked_prs(linked_prs);
+        // Judged against the facts it built on, not against the caller's
+        // possibly-staler base: the hot path owns the Linked PRs and nothing
+        // else, so only a changed open-PR set is its news. Issue facts it
+        // merely carried forward were already painted and cached by the path
+        // that fetched them.
+        let refresh = refresh_outcome(refreshed, &freshest);
         if let BoardRefresh::Changed(loaded) = &refresh {
             self.cache
                 .cache_board(repo, &loaded.snapshot)
@@ -910,7 +913,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// cannot observe (for example, hard-deleted or transferred issues). Like
     /// every issue-side path it writes no PR facts of its own, adopting the hot
     /// path's instead. Repaints and rewrites cache only when facts differ;
-    /// aligned snapshots are a no-op.
+    /// aligned snapshots are a no-op — but even then the reload's `fetched_at`
+    /// comes back, so the caller's next delta window starts from the moment
+    /// this full load proved the board correct rather than from an older one.
     pub async fn reconcile_cached(
         &self,
         repo: &RepoRef,
@@ -920,7 +925,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         let refresh = self.with_freshest_linked_prs(repo, snapshot, refresh).await;
         let loaded = match refresh {
             BoardRefresh::Changed(loaded) => loaded,
-            BoardRefresh::Unchanged(_) => return Ok(BoardRefresh::Unchanged(snapshot.clone())),
+            unchanged => return Ok(unchanged),
         };
         self.cache
             .cache_board(repo, &loaded.snapshot)

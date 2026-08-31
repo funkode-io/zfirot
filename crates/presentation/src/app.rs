@@ -1394,7 +1394,7 @@ async fn hot_refresh(
 async fn authoritative_reconcile(
     repo: RepoRef,
     base: BoardSnapshot,
-    board_snapshot: Signal<Option<BoardSnapshot>>,
+    mut board_snapshot: Signal<Option<BoardSnapshot>>,
     prefetched_board: Signal<Option<View>>,
     reload: Signal<u32>,
     mut syncing: Signal<bool>,
@@ -1407,8 +1407,13 @@ async fn authoritative_reconcile(
             repaint_board(repo, loaded, board_snapshot, prefetched_board, reload);
         }
         // A reconcile that found nothing to heal still confirms the connection
-        // is healthy, so it clears a previous failure too.
-        Ok(BoardRefresh::Unchanged(_)) => refresh_error.set(None),
+        // is healthy, so it clears a previous failure too. Nothing to repaint,
+        // but adopt the snapshot so its advanced `fetched_at` moves the next
+        // delta window on from this full load.
+        Ok(BoardRefresh::Unchanged(unchanged)) => {
+            refresh_error.set(None);
+            board_snapshot.set(Some(unchanged));
+        }
         Err(error) => refresh_error.set(Some(surface_error("board_reconcile", &error))),
     }
     syncing.set(false);
