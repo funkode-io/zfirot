@@ -322,6 +322,15 @@ impl application::GitHubPort for BlockedReasonFixturePort {
             raw_slice_issue(104, "Done and dusted.", &["slice"], true),
             // No signal at all.
             raw_slice_issue(105, "Plain body.", &["slice", "enhancement"], false),
+            // The "no blockers" placeholder the planning skills emit for every
+            // unblocked Slice: it asserts the opposite of a wait, so it must
+            // not read as an External blocker.
+            raw_slice_issue(
+                106,
+                "## What to build\n\nShip it.\n\n## Blocked by\n\n- None — can start immediately.\n",
+                &["slice"],
+                false,
+            ),
         ])
     }
 
@@ -388,6 +397,11 @@ async fn classify_board_derives_blocked_reasons_and_keeps_them_out_of_ready() {
         },
         Case {
             issue: 105,
+            expected_state: SliceState::Ready,
+            expected_reasons: vec![],
+        },
+        Case {
+            issue: 106,
             expected_state: SliceState::Ready,
             expected_reasons: vec![],
         },

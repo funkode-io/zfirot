@@ -150,20 +150,49 @@ pub fn parse_blockers_from_body(body: &str) -> Vec<u64> {
 }
 
 /// Whether an issue body has a `## Blocked by` section that names **no** issue
-/// at all — the **External blocker** signal.
+/// yet still states a wait — the **External blocker** signal.
 ///
 /// The planning skills emit this section for every Slice, so prose in it ("a
 /// prod values file existing for this app") is a real, stated wait on something
-/// GitHub cannot link. A section naming issues is *not* an External blocker,
-/// whether those issues are open, closed, or outside the fetched board: the
-/// references speak for themselves, and treating a satisfied dependency as an
-/// external wait would strand a Slice that has become workable. An empty section
-/// is no evidence of anything.
+/// GitHub cannot link. Three shapes are *not* the signal:
+///
+/// - A section naming issues, whether those issues are open, closed, or outside
+///   the fetched board: the references speak for themselves, and treating a
+///   satisfied dependency as an external wait would strand a Slice that has
+///   become workable.
+/// - A section holding only a "no blockers" placeholder ("None — can start
+///   immediately."), which the same skills emit for every unblocked Slice and
+///   which asserts the opposite of a wait.
+/// - An empty section, which is no evidence of anything.
 pub fn has_unreferenced_blocked_by(body: &str) -> bool {
     let Some(section) = extract_section_ci(body, "## blocked by") else {
         return false;
     };
-    !section.is_empty() && parse_blockers_from_body(body).is_empty()
+    if !parse_blockers_from_body(body).is_empty() {
+        return false;
+    }
+    section.lines().any(states_a_wait)
+}
+
+/// Whether one line of a `## Blocked by` section states a wait, as opposed to
+/// being blank or a "no blockers" placeholder (`None`, `N/A`, and the phrases
+/// they lead: "None — can start immediately.").
+///
+/// A placeholder is recognised by its opening word only, so "Nonexistent prod
+/// values file" still reads as a wait. Prose that merely *starts* "None ..."
+/// is read as a placeholder: leaving an ambiguous line in Ready matches the
+/// behaviour before this signal existed.
+fn states_a_wait(line: &str) -> bool {
+    let text = line.trim_start_matches(|c: char| c == '-' || c == '*' || c.is_whitespace());
+    let lower = text.to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    !["none", "n/a"].iter().any(|placeholder| {
+        lower
+            .strip_prefix(placeholder)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()))
+    })
 }
 
 // ── Heuristic heading matchers ───────────────────────────────────────────────
@@ -406,10 +435,12 @@ mod tests {
     /// the dependency graph cannot see (dxp-data-loom#1250: "a prod values file
     /// existing for this app"). A section that *does* name issues is not — those
     /// references speak for themselves, whether they are open, closed, or absent
-    /// from the fetched board.
+    /// from the fetched board. Nor is the "no blockers" placeholder the planning
+    /// skills emit for every unblocked Slice, which asserts the opposite of a
+    /// wait.
     #[test]
     fn detects_a_blocked_by_section_that_names_no_issue() {
-        let cases: [(&str, bool, &str); 6] = [
+        let cases: [(&str, bool, &str); 12] = [
             (
                 "## Blocked by\n\n- A prod values file / prod environment existing for this app.\n",
                 true,
@@ -439,6 +470,36 @@ mod tests {
                 "## Blocked by\n\n## Acceptance criteria\n\n- [ ] x",
                 false,
                 "an empty section is no evidence of a wait",
+            ),
+            (
+                "## Blocked by\n\n- None — can start immediately.\n",
+                false,
+                "the skills' bulleted no-blockers placeholder",
+            ),
+            (
+                "## Blocked by\n\nNone - can start immediately\n",
+                false,
+                "the same placeholder unbulleted, with an ASCII dash",
+            ),
+            (
+                "## Blocked by\n\nNone.\n",
+                false,
+                "a bare None",
+            ),
+            (
+                "## Blocked by\n\nN/A\n",
+                false,
+                "N/A is the same assertion",
+            ),
+            (
+                "## Blocked by\n\n- Nonexistent prod values file for this app.\n",
+                true,
+                "a wait whose first word merely starts with 'none'",
+            ),
+            (
+                "## Blocked by\n\n- None of this is the point.\n- Waiting on the platform team.\n",
+                true,
+                "one placeholder line does not cancel a stated wait",
             ),
         ];
 

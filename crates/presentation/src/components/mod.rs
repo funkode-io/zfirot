@@ -69,8 +69,12 @@ pub fn blocked_reasons_tooltip(reasons: &[BlockedReason]) -> String {
 
 /// daisyUI badge classes for a Blocked reason chip. The self-updating
 /// `Dependency` reads as strongly as the state badge; the sticky, human-authored
-/// reasons fade with their rank, so the weakest (`blocked` label, which can go
-/// stale unnoticed) is the quietest thing on the card.
+/// reasons step down through two quieter tiers, so the ones that can go stale
+/// unnoticed (`deferred`, `blocked`) are the quietest thing on the card.
+///
+/// The tiers are coarser than the five ranks on purpose — five near-identical
+/// weights would not read as an order. Visual strength never *increases* with
+/// rank, and the Blocked column's own ordering carries the exact rank.
 pub fn blocked_reason_badge_class(reason: BlockedReason) -> &'static str {
     match reason {
         BlockedReason::Dependency => "badge-error",

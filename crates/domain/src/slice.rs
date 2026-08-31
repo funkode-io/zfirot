@@ -242,10 +242,12 @@ pub struct RawSlice {
     /// Avatar URL of the assignee, when assigned and available.
     pub assignee_avatar_url: Option<String>,
     /// The open Pull Requests linked to the issue via their closing reference.
-    /// A non-empty list makes the Slice WIP.
+    /// A non-empty list makes the Slice WIP, unless it is Blocked — Blocked
+    /// outranks WIP.
     pub linked_prs: Vec<LinkedPrRef>,
     /// The still-open "blocked by" dependencies, with their references. A
-    /// non-empty list makes the Slice Blocked.
+    /// non-empty list is one of the signals that makes the Slice Blocked — the
+    /// strongest, [`BlockedReason::Dependency`] — but not the only one.
     pub blockers: Vec<DependencyRef>,
     /// `true` when the issue has a `## Blocked by` section that names no issue
     /// at all — a real wait on something outside GitHub's dependency graph.
@@ -260,7 +262,13 @@ pub struct RawSlice {
 impl RawSlice {
     /// Project this raw issue into a [`Slice`] with its derived [`SliceState`].
     pub fn into_slice(self) -> Slice {
-        let blocked_reasons = self.derive_blocked_reasons();
+        // A closed Slice is Done and carries no reason, however it is
+        // labelled — the work is finished, so nothing is waiting on anything.
+        let blocked_reasons = if self.closed {
+            Vec::new()
+        } else {
+            self.derive_blocked_reasons()
+        };
         let state = self.derive_state(&blocked_reasons);
         Slice {
             number: self.number,
@@ -277,10 +285,11 @@ impl RawSlice {
         }
     }
 
-    /// Every reason this Slice is not workable, strongest first.
+    /// Every reason this open Slice is not workable, strongest first.
     ///
     /// Pure, and total: an empty result *is* the statement that the Slice is
-    /// workable, which is what [`RawSlice::derive_state`] reads.
+    /// workable, which is what [`RawSlice::derive_state`] reads. Only called for
+    /// an open Slice; see [`RawSlice::into_slice`].
     fn derive_blocked_reasons(&self) -> Vec<BlockedReason> {
         let mut reasons = Vec::new();
         if !self.blockers.is_empty() {
@@ -772,6 +781,30 @@ mod tests {
 
             assert_eq!(raw.into_slice().state, case.expected, "{}", case.name);
         }
+    }
+
+    /// `Slice::blocked_reasons` is documented as empty unless the Slice is
+    /// Blocked, and a Done Slice must honour that: the work is finished, so a
+    /// stale `deferred` label is not a reason for anything and must not leak a
+    /// chip onto any view that renders a closed Slice.
+    #[test]
+    fn a_done_slice_carries_no_blocked_reason() {
+        let raw = RawSlice {
+            closed: true,
+            external_blocker: true,
+            blockers: blockers(1),
+            labels: vec!["deferred".to_string(), "blocked".to_string()],
+            ..ready_raw()
+        };
+
+        let slice = raw.into_slice();
+
+        assert_eq!(slice.state, SliceState::Done);
+        assert!(
+            slice.blocked_reasons.is_empty(),
+            "a finished Slice is not waiting on anything"
+        );
+        assert_eq!(slice.primary_blocked_reason(), None, "so it has no chip");
     }
 
     #[test]
