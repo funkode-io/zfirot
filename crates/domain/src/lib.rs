@@ -26,7 +26,7 @@ pub use classification::{
 };
 pub use credential_failure::CredentialFailure;
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
-pub use freshness::{PollInterval, ReconcileInterval};
+pub use freshness::{HotInterval, PollInterval, ReconcileInterval};
 pub use home_filter::{filter_home, visible_tracked_repos, HomeFilter};
 pub use lane::{derive_lane_graph, group_into_lanes, LaneGraph, LaneGraphEdge, PrdLane};
 pub use pr::{PrStatus, ReviewDecision};

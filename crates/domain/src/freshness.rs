@@ -52,6 +52,54 @@ impl Default for PollInterval {
     }
 }
 
+/// How long the board waits between **hot** refreshes — the open-PR **Sweep**
+/// that carries every fact on the critical path (a PR appearing or vanishing, a
+/// new unresolved review comment, CI turning red, a conflict, an approval).
+///
+/// This is the 15-second half of the Freshness contract (ADR 0008): the facts
+/// nobody tells the user about, so the board must go and look. Constructed
+/// through [`HotInterval::from_secs`], which clamps to a sane range so a
+/// misconfiguration can neither hammer GitHub's rate limit (too short) nor let
+/// the promise of "within 15 seconds" quietly become minutes (too long).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotInterval {
+    secs: u64,
+}
+
+impl HotInterval {
+    /// The shortest allowed hot cadence. A floor keeps a misconfiguration from
+    /// spending the whole GraphQL budget on one board.
+    pub const MIN_SECS: u64 = 5;
+    /// The longest allowed hot cadence, so PR facts cannot drift far past the
+    /// contract they promise.
+    pub const MAX_SECS: u64 = 300;
+    /// The default cadence: fifteen seconds, the Freshness contract's hot tier.
+    pub const DEFAULT_SECS: u64 = 15;
+
+    /// A hot interval of `secs` seconds, clamped to `[MIN_SECS, MAX_SECS]`.
+    pub fn from_secs(secs: u64) -> Self {
+        Self {
+            secs: secs.clamp(Self::MIN_SECS, Self::MAX_SECS),
+        }
+    }
+
+    /// The interval in whole seconds.
+    pub fn as_secs(&self) -> u64 {
+        self.secs
+    }
+
+    /// The interval as a [`Duration`], for handing to a timer.
+    pub fn as_duration(&self) -> Duration {
+        Duration::from_secs(self.secs)
+    }
+}
+
+impl Default for HotInterval {
+    fn default() -> Self {
+        Self::from_secs(Self::DEFAULT_SECS)
+    }
+}
+
 /// How long the board waits between full-load reconcile passes.
 ///
 /// Constructed through [`ReconcileInterval::from_secs`], which clamps to a sane
@@ -141,6 +189,56 @@ mod tests {
         for case in cases {
             assert_eq!(
                 PollInterval::from_secs(case.secs).as_secs(),
+                case.expected,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn hot_default_is_fifteen_seconds() {
+        assert_eq!(HotInterval::default().as_secs(), 15);
+        assert_eq!(
+            HotInterval::default().as_duration(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn hot_interval_is_clamped_to_its_allowed_band() {
+        struct Case {
+            name: &'static str,
+            secs: u64,
+            expected: u64,
+        }
+
+        let cases = [
+            Case {
+                name: "zero is raised to the minimum so the sweep never busy-loops",
+                secs: 0,
+                expected: HotInterval::MIN_SECS,
+            },
+            Case {
+                name: "below the floor is raised to the minimum",
+                secs: HotInterval::MIN_SECS - 1,
+                expected: HotInterval::MIN_SECS,
+            },
+            Case {
+                name: "a value in range is kept as-is",
+                secs: 20,
+                expected: 20,
+            },
+            Case {
+                name: "above the ceiling is lowered to the maximum",
+                secs: HotInterval::MAX_SECS + 1,
+                expected: HotInterval::MAX_SECS,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                HotInterval::from_secs(case.secs).as_secs(),
                 case.expected,
                 "{}",
                 case.name

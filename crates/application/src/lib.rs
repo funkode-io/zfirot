@@ -37,8 +37,8 @@ pub trait GitHubPort: Send + Sync {
     ///
     /// The result is *authoritative* over the open-PR set: a PR that has been
     /// merged or closed is simply absent from it, so nothing has to filter it
-    /// out afterwards (ADR 0008). Every refresh path runs it alongside its issue
-    /// fetch, and [`classify`] joins the two by issue number.
+    /// out afterwards (ADR 0008). The **hot** refresh runs it every 15 seconds,
+    /// and [`classify`] joins its result onto the issues by issue number.
     async fn sweep_open_prs(&self, repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>>;
 
     /// Load issues updated at or after `since`, including closed ones so close
@@ -209,6 +209,29 @@ impl BoardSnapshot {
     fn same_facts_as(&self, other: &Self) -> bool {
         self.raw_issues == other.raw_issues && self.linked_prs == other.linked_prs
     }
+
+    /// This snapshot with its **issue** collection replaced — the write of the
+    /// structural and safety-net paths, which own the issues and nothing else.
+    /// `fetched_at` moves with it, since it is the issue-side watermark.
+    fn with_issues(&self, raw_issues: Vec<RawIssue>, fetched_at: DateTime<Utc>) -> Self {
+        Self::new(raw_issues, self.linked_prs.clone(), fetched_at)
+    }
+
+    /// This snapshot with its **Linked PR** collection replaced — the only write
+    /// the hot path makes. `fetched_at` deliberately does not move: the hot path
+    /// fetches no issues, so advancing the issue-side watermark would skip issue
+    /// changes the structural path has not seen yet (ADR 0008).
+    fn with_linked_prs(&self, linked_prs: Vec<RawLinkedPr>) -> Self {
+        Self::new(self.raw_issues.clone(), linked_prs, self.fetched_at)
+    }
+
+    /// The board this snapshot paints: the pure join of its two collections.
+    fn loaded(self) -> LoadedBoard {
+        LoadedBoard {
+            board: classify(&self.raw_issues, &self.linked_prs),
+            snapshot: self,
+        }
+    }
 }
 
 /// Cache usage for one project snapshot file.
@@ -242,6 +265,17 @@ pub enum BoardRefresh {
     /// `since` window forward (in memory and on disk) instead of re-fetching the
     /// same growing window every time.
     Unchanged(BoardSnapshot),
+}
+
+/// Whether a freshly-written snapshot is worth repainting, given the retained
+/// one it was derived from. Each refresh path writes exactly one of the two
+/// collections and hands the result here, so "did anything change?" is decided
+/// in one place for all of them.
+fn refresh_outcome(refreshed: BoardSnapshot, retained: &BoardSnapshot) -> BoardRefresh {
+    if refreshed.same_facts_as(retained) {
+        return BoardRefresh::Unchanged(refreshed);
+    }
+    BoardRefresh::Changed(refreshed.loaded())
 }
 
 fn merge_issues(retained: &[RawIssue], delta: &[RawIssue]) -> Vec<RawIssue> {
@@ -672,6 +706,7 @@ impl<P: GitHubPort> BoardService<P> {
     }
 
     /// The open-PR sweep for `repo`, the authority on which Linked PRs exist.
+    /// The hot refresh path's only fetch (ADR 0008).
     async fn sweep_open_prs(&self, repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
         self.port
             .sweep_open_prs(repo)
@@ -681,9 +716,11 @@ impl<P: GitHubPort> BoardService<P> {
 
     /// Refresh against a retained snapshot and report whether the board changed.
     ///
-    /// The issue side is a delta merged onto the retained issues; the Linked PR
-    /// side is replaced wholesale by the sweep, which is authoritative — so a
-    /// PR that merged or closed since the last refresh is gone by absence.
+    /// This is the **issue side** of a refresh, and it writes only issues: a
+    /// delta merged onto the retained ones, joined with the Linked PRs the
+    /// snapshot already carries. It runs no sweep of its own, so a structural
+    /// refresh can never overwrite the hot path's fresher PR facts with an older
+    /// list of its own (ADR 0008).
     pub async fn refresh(
         &self,
         repo: &RepoRef,
@@ -699,15 +736,31 @@ impl<P: GitHubPort> BoardService<P> {
                     .with_context("since", snapshot.fetched_at)
             })?;
         let raw_issues = merge_issues(&snapshot.raw_issues, &delta);
-        let linked_prs = self.sweep_open_prs(repo).await?;
-        let loaded = LoadedBoard {
-            board: classify(&raw_issues, &linked_prs),
-            snapshot: BoardSnapshot::new(raw_issues, linked_prs, fetched_at),
-        };
-        if loaded.snapshot.same_facts_as(snapshot) {
-            return Ok(BoardRefresh::Unchanged(loaded.snapshot));
-        }
-        Ok(BoardRefresh::Changed(loaded))
+        Ok(refresh_outcome(
+            snapshot.with_issues(raw_issues, fetched_at),
+            snapshot,
+        ))
+    }
+
+    /// Re-read every open issue and replace the snapshot's issue collection
+    /// wholesale, healing drift a delta cannot observe (a hard-deleted or
+    /// transferred issue). Like [`BoardService::refresh`] it writes only issues,
+    /// carrying the snapshot's Linked PRs through untouched.
+    async fn reload_issues(
+        &self,
+        repo: &RepoRef,
+        snapshot: &BoardSnapshot,
+    ) -> AppResult<BoardRefresh> {
+        let fetched_at = Utc::now();
+        let raw_issues = self
+            .port
+            .load_issues(repo)
+            .await
+            .map_err(|err| err.with_context("repo", repo))?;
+        Ok(refresh_outcome(
+            snapshot.with_issues(raw_issues, fetched_at),
+            snapshot,
+        ))
     }
 
     /// Load and classify all open issues for a project, returning only the board
@@ -766,12 +819,17 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
 
     /// Refresh a retained snapshot and rewrite the cache after a successful
     /// refresh.
+    ///
+    /// Issue-side only: whatever the hot path wrote while this refresh was in
+    /// flight is adopted before the result is returned or cached, so a slower
+    /// structural write can never revert 15-second-fresh PR facts (ADR 0008).
     pub async fn refresh_cached(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
         let refresh = self.board.refresh(repo, snapshot).await?;
+        let refresh = self.with_freshest_linked_prs(repo, snapshot, refresh).await;
         let snapshot_to_cache = match &refresh {
             BoardRefresh::Changed(loaded) => &loaded.snapshot,
             BoardRefresh::Unchanged(snapshot) => snapshot,
@@ -783,20 +841,99 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         Ok(refresh)
     }
 
+    /// The **hot** refresh: sweep the repo's open Pull Requests, replace the
+    /// board's Linked PR collection with the result, and rewrite the cache
+    /// **only** when the open-PR set actually changed — an identical sweep
+    /// repaints nothing and writes nothing.
+    ///
+    /// This is the 15-second path of the Freshness contract, and the only writer
+    /// of PR facts. It fetches no issues at all, so it can neither be delayed by
+    /// a structural refresh walking a large repo nor advance the issue-side
+    /// watermark; it writes its sweep onto the freshest issues known rather than
+    /// onto the ones its caller happened to be holding (ADR 0008).
+    pub async fn hot_refresh_cached(
+        &self,
+        repo: &RepoRef,
+        snapshot: &BoardSnapshot,
+    ) -> AppResult<BoardRefresh> {
+        let linked_prs = self.board.sweep_open_prs(repo).await?;
+        let freshest = self.freshest_snapshot(repo, snapshot).await;
+        let refreshed = freshest.with_linked_prs(linked_prs);
+        // Judged against the facts it built on, not against the caller's
+        // possibly-staler base: the hot path owns the Linked PRs and nothing
+        // else, so only a changed open-PR set is its news. Issue facts it
+        // merely carried forward were already painted and cached by the path
+        // that fetched them.
+        let refresh = refresh_outcome(refreshed, &freshest);
+        if let BoardRefresh::Changed(loaded) = &refresh {
+            self.cache
+                .cache_board(repo, &loaded.snapshot)
+                .await
+                .map_err(|err| err.with_operation("CachedBoardService::hot_refresh_cached"))?;
+        }
+        Ok(refresh)
+    }
+
+    /// The freshest board facts known for `repo`: the last write any refresh
+    /// path made to the cache they share, falling back to `base` when the cache
+    /// holds nothing (or cannot be read). Each path rebuilds its result on top
+    /// of this before writing, so whichever finishes last keeps the other's
+    /// collection instead of reverting it — a cache miss is not a failure, it
+    /// only means there is nothing fresher than the caller already held.
+    async fn freshest_snapshot(&self, repo: &RepoRef, base: &BoardSnapshot) -> BoardSnapshot {
+        match self.cache.cached_board(repo).await {
+            Ok(Some(cached)) => cached,
+            Ok(None) => base.clone(),
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    "board cache unreadable while merging a refresh; carrying the caller's facts forward",
+                );
+                base.clone()
+            }
+        }
+    }
+
+    /// Re-decide an issue-side refresh's outcome against the freshest Linked PRs
+    /// available, so its result carries the hot path's PR facts rather than the
+    /// (possibly older) ones its base snapshot was captured with.
+    async fn with_freshest_linked_prs(
+        &self,
+        repo: &RepoRef,
+        base: &BoardSnapshot,
+        refresh: BoardRefresh,
+    ) -> BoardRefresh {
+        let refreshed = match &refresh {
+            BoardRefresh::Changed(loaded) => &loaded.snapshot,
+            BoardRefresh::Unchanged(snapshot) => snapshot,
+        };
+        let linked_prs = self.freshest_snapshot(repo, base).await.linked_prs;
+        if linked_prs == refreshed.linked_prs {
+            return refresh;
+        }
+        refresh_outcome(refreshed.with_linked_prs(linked_prs), base)
+    }
+
     /// Full-load reconcile against a retained snapshot.
     ///
-    /// Runs a complete board load (not delta) to heal cache drift that deltas
-    /// cannot observe (for example, hard-deleted or transferred issues). Repaints
-    /// and rewrites cache only when facts differ; aligned snapshots are a no-op.
+    /// Runs a complete issue load (not delta) to heal cache drift that deltas
+    /// cannot observe (for example, hard-deleted or transferred issues). Like
+    /// every issue-side path it writes no PR facts of its own, adopting the hot
+    /// path's instead. Repaints and rewrites cache only when facts differ;
+    /// aligned snapshots are a no-op — but even then the reload's `fetched_at`
+    /// comes back, so the caller's next delta window starts from the moment
+    /// this full load proved the board correct rather than from an older one.
     pub async fn reconcile_cached(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
-        let loaded = self.board.load(repo).await?;
-        if loaded.snapshot.same_facts_as(snapshot) {
-            return Ok(BoardRefresh::Unchanged(snapshot.clone()));
-        }
+        let refresh = self.board.reload_issues(repo, snapshot).await?;
+        let refresh = self.with_freshest_linked_prs(repo, snapshot, refresh).await;
+        let loaded = match refresh {
+            BoardRefresh::Changed(loaded) => loaded,
+            unchanged => return Ok(unchanged),
+        };
         self.cache
             .cache_board(repo, &loaded.snapshot)
             .await
