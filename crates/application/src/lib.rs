@@ -7,10 +7,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AppAction,
-    AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken, IssueClassification,
-    LinkedPrRef, Prd, PrdRef, Project, RawIssue, RawLinkedPr, RawSlice, RepoRef, Slice,
-    ThemePreference, Viewer,
+    classify_issue, has_unreferenced_blocked_by, parse_blockers_from_body, parse_parent_from_body,
+    resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken,
+    IssueClassification, LinkedPrRef, Prd, PrdRef, Project, RawIssue, RawLinkedPr, RawSlice,
+    RepoRef, Slice, ThemePreference, Viewer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -388,6 +388,13 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
                     assignee_avatar_url: raw.assignee_avatar_url,
                     linked_prs: prs_by_issue.remove(&raw.number).unwrap_or_default(),
                     blockers,
+                    // A `## Blocked by` section naming no issue is a real wait
+                    // the dependency graph cannot see. Native links are checked
+                    // first: an issue GitHub already links is never "external",
+                    // however its blockers resolve.
+                    external_blocker: raw.native_blockers.is_empty()
+                        && has_unreferenced_blocked_by(body_str),
+                    labels: raw.labels,
                     // Filled by `resolve_unblocks` once the board is mapped.
                     unblocks: Vec::new(),
                 });
