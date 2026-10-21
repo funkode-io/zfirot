@@ -247,35 +247,61 @@ _Avoid_: refresh rate, TTL, SLA
 
 ## Identity and authentication
 
+**Sign-in method**:
+How the user grants the app a token. There are two, and both yield a token that
+acts as a **Viewer**; everything downstream of sign-in treats them alike.
+- **Device sign-in** (UI: "Sign in with GitHub"), the default: the app shows a
+  short code, the user enters it on GitHub and authorises the Zfirot GitHub App,
+  and the app receives a token it keeps fresh on its own. The token reaches only
+  repos where the app has an **Installation** and the Viewer also has access.
+- **Personal Access Token** (UI: "Use a personal access token instead"), the
+  fallback: the user creates a fine-grained token on GitHub and pastes it in.
+_Avoid_: login type, OAuth, auth mode
+
+**Installation**:
+The Zfirot GitHub App installed on a GitHub account or organisation, granting it
+access to all or selected repos there. Installing is a one-time act by that
+account's owner (or an org owner, on request), separate from signing in. Under
+Device sign-in, a repo outside every Installation is unreachable however much
+access the Viewer has, so the app offers to install rather than calling it an
+error.
+_Avoid_: authorisation (that is the per-user grant), connection, integration
+
 **Viewer**:
-The authenticated GitHub user the stored token acts as. The app reads the
-Viewer's `login`, `name`, and `avatarUrl` (GitHub's `viewer`) to show an account
-menu; the token itself carries no profile.
+The authenticated GitHub user the stored token acts as, whichever **Sign-in
+method** produced it. The app reads the Viewer's `login`, `name`, and
+`avatarUrl` (GitHub's `viewer`) to show an account menu; the token itself
+carries no profile.
 _Avoid_: current user, account, me
 
 **Rotate** (UI label: "Change token"):
 Replace the stored token with a freshly-granted one for the **same Viewer**,
 atomically — the old token stays valid until the new one is validated and saved,
 and all account-scoped local state is preserved. The action used when the app's
-required grants grow (a new feature needs a new permission).
+required grants grow (a new feature needs a new permission) under the Personal
+Access Token method. Switching **Sign-in method** as the same Viewer is also a
+Rotate. A Device sign-in token being kept fresh in the background is not.
 _Avoid_: renew, refresh (refresh is the board action)
 
 **Sign out**:
 Remove the token **and** all account-scoped local state (tracked repos,
 last-opened project, cached recent projects, cached boards), resetting the app to
 its first-run, no-token state. UI preferences (theme, view mode) survive because
-they are not tied to the Viewer.
+they are not tied to the Viewer. Signing out is local: it does not revoke the
+grant on GitHub, which the user does from their GitHub settings.
 _Avoid_: log out, disconnect
 
 **Invalid token**:
 A stored token GitHub rejects as unusable — revoked, expired, or malformed
-(Unauthorized / 401). It is useless, so the app clears it and routes to the
-paste-token screen.
+(Unauthorized / 401) — including a Device sign-in that can no longer be kept
+fresh. It is useless, so the app clears it and routes to the sign-in screen.
 _Avoid_: bad token, expired (only one of the causes)
 
 **Under-scoped token**:
 A token that is valid but missing a grant an operation needs (Forbidden / 403).
-It still works elsewhere, so the app **never clears it**; instead it offers to
-Rotate, carrying the specific missing permission so the required-permissions list
-can highlight the exact grant to add.
+It still works elsewhere, so the app **never clears it**. Under the Personal
+Access Token method it offers to Rotate, carrying the specific missing permission
+so the required-permissions list can highlight the exact grant to add. Under
+Device sign-in the grant belongs to the **Installation**, so the app points the
+user to the Installation's owner to accept the app's updated permissions.
 _Avoid_: insufficient token, unauthorized (that is the Invalid case)
