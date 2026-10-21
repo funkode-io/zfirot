@@ -210,6 +210,21 @@ pub async fn refresh_board(repo: &RepoRef, snapshot: &BoardSnapshot) -> AppResul
         .await
 }
 
+/// The **hot** refresh of the open board: sweep its open Pull Requests and
+/// report whether the Linked PR facts changed. This is the 15-second path of
+/// the Freshness contract, and the only writer of PR facts — it fetches no
+/// issues, so it neither waits on nor is reverted by the issue-side refreshes.
+pub async fn hot_refresh_board(
+    repo: &RepoRef,
+    snapshot: &BoardSnapshot,
+) -> AppResult<BoardRefresh> {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
+    CachedBoardService::new(port, board_cache()?)
+        .hot_refresh_cached(repo, snapshot)
+        .await
+}
+
 /// The local board cache usage grouped per project with a global byte total.
 pub async fn cache_usage() -> AppResult<BoardCacheUsage> {
     board_cache()?.cache_usage().await
