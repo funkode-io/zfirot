@@ -1271,10 +1271,30 @@ fn snapshot_hms(fetched_at: chrono::DateTime<chrono::Utc>) -> String {
 /// costs one fetch, not two (refresh + reload). Returns the adopted snapshot,
 /// for callers that carry on from it. Every refresh path — hot, structural,
 /// safety net and the manual Refresh — repaints through here, so they cannot
-/// drift apart.
+/// drift apart. "Last updated" reads now, since the board was just fetched.
 fn repaint_board(
     repo: RepoRef,
     loaded: LoadedBoard,
+    board_snapshot: Signal<Option<BoardSnapshot>>,
+    prefetched_board: Signal<Option<View>>,
+    reload: Signal<u32>,
+) -> BoardSnapshot {
+    repaint_board_at(
+        repo,
+        loaded,
+        now_hms(),
+        board_snapshot,
+        prefetched_board,
+        reload,
+    )
+}
+
+/// [`repaint_board`] with "last updated" reading `loaded_at`, for a board that
+/// may not have been fetched just now.
+fn repaint_board_at(
+    repo: RepoRef,
+    loaded: LoadedBoard,
+    loaded_at: String,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     mut prefetched_board: Signal<Option<View>>,
     mut reload: Signal<u32>,
@@ -1283,7 +1303,7 @@ fn repaint_board(
     prefetched_board.set(Some(View::Board {
         repo,
         board: loaded.board,
-        loaded_at: now_hms(),
+        loaded_at,
         snapshot: Box::new(loaded.snapshot.clone()),
         from_cache: false,
     }));
@@ -1428,7 +1448,8 @@ async fn safety_net_refresh(
 /// only a repaint is sure to leave the screen matching the cache; an unchanged
 /// board repaints identically. PR facts the hot pass changed are painted the
 /// moment it finishes, not after the slower issue passes, so the 15-second
-/// contract holds through a manual refresh too. The banner shows the first failed pass, and
+/// contract holds through a manual refresh too. When a pass failed, "last
+/// updated" shows the board's own fetch time rather than now. The banner shows the first failed pass, and
 /// every failure is logged with its full cause chain; a refresh with no failure
 /// clears the banner. A pass that failed wrote nothing, so the board on screen
 /// and the cache stay the last good ones.
@@ -1463,7 +1484,21 @@ async fn full_refresh(
     };
     match full_refresh_board(&repo, &snapshot, hot_pass_done).await {
         Ok(FullRefresh { board, failures }) => {
-            repaint_board(repo, board, board_snapshot, prefetched_board, reload);
+            // A pass that failed fetched nothing, so "last updated" must not
+            // claim it did: it then reads when the board's issues were last read.
+            let loaded_at = if failures.is_empty() {
+                now_hms()
+            } else {
+                snapshot_hms(board.snapshot.fetched_at)
+            };
+            repaint_board_at(
+                repo,
+                board,
+                loaded_at,
+                board_snapshot,
+                prefetched_board,
+                reload,
+            );
             let surfaced: Vec<String> = failures
                 .iter()
                 .map(|error| surface_error("board_manual_refresh", error))
