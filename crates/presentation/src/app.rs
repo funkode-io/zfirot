@@ -1347,13 +1347,14 @@ async fn delta_refresh(
 /// The **hot** half of the board's freshness: an open-PR **Sweep** that repaints
 /// the moment the PR facts change (`prefetched_board` + `reload`) and does
 /// nothing at all when they do not — no repaint, no cache write, and no
-/// advancing of the issue-side `since` watermark, since it fetches no issues.
+/// advancing of the issue-side `since` watermark, since it sweeps no issues.
 /// Shared by the revalidate-on-open effect and the 15-second hot loop, so both
 /// apply the same rule.
 ///
 /// This is the path that carries everything nobody tells the user about: a new
 /// unresolved review thread, CI turning red, a conflict, an approval, and a PR
-/// appearing on (or leaving) a Slice. Returns the resulting snapshot on success
+/// appearing on (or leaving) a Slice, with the **Cascade** that closes a merged
+/// PR's Slice and readies its dependents. Returns the resulting snapshot on success
 /// (changed or not), for a caller that wants to continue from it; `None` on a
 /// failed sweep, so the caller keeps the snapshot it already had. Clears
 /// `refresh_error` on success and sets a client-safe message on failure — one
