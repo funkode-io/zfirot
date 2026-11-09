@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+/// The label recording a **Veto**: the app guessed this issue was a PRD, and someone
+/// said on GitHub that it is not. The board reads this label and never adds it.
+pub const NOT_A_PRD_LABEL: &str = "not-a-prd";
+
 /// How an open GitHub issue has been classified by the two-tier strategy.
 ///
 /// - **Tier 1 (confident, automatic):** `prd` label → [`IssueClassification::Prd`];
@@ -109,11 +113,16 @@ pub struct IssueStamp {
 /// 1. **Tier 1 – confident:** `prd` label → [`IssueClassification::Prd`];
 ///    `is_native_child_of_prd` or `slice`/`ready-for-agent` label →
 ///    [`IssueClassification::Slice`].
-/// 2. **Tier 2 – heuristic:** score the body against planning-skill template
+///    An explicit `prd` wins over [`NOT_A_PRD_LABEL`], which only suppresses the
+///    suggestion below.
+/// 2. **Veto:** a [`NOT_A_PRD_LABEL`] label → [`IssueClassification::Unclassified`],
+///    so the app stops guessing about the issue. Removing the label brings the
+///    suggestion back.
+/// 3. **Tier 2 – heuristic:** score the body against planning-skill template
 ///    headings: *Problem Statement* + *User Stories* → [`IssueClassification::SuggestedPrd`];
 ///    *What to build* + (*Acceptance criteria* | *Blocked by* | *Parent*) →
 ///    [`IssueClassification::SuggestedSlice`].
-/// 3. **Tier 3:** [`IssueClassification::Unclassified`].
+/// 4. **Tier 3:** [`IssueClassification::Unclassified`].
 pub fn classify_issue(raw: &RawIssue) -> IssueClassification {
     // Tier 1: confident, based on labels or native parent link.
     if raw.labels.iter().any(|l| l == "prd") {
@@ -128,6 +137,11 @@ pub fn classify_issue(raw: &RawIssue) -> IssueClassification {
         return IssueClassification::Slice;
     }
 
+    // A Veto is checked before the heuristic it overrides.
+    if has_veto(raw) {
+        return IssueClassification::Unclassified;
+    }
+
     // Tier 2: heuristic, scored from template headings in the issue body.
     let body = raw.body.as_deref().unwrap_or("");
     if has_prd_headings(body) {
@@ -138,6 +152,11 @@ pub fn classify_issue(raw: &RawIssue) -> IssueClassification {
     }
 
     IssueClassification::Unclassified
+}
+
+/// Whether an issue carries a **Veto**.
+pub fn has_veto(raw: &RawIssue) -> bool {
+    raw.labels.iter().any(|l| l == NOT_A_PRD_LABEL)
 }
 
 /// The issue number of an issue's Parent: the native sub-issue link when present,
@@ -170,9 +189,12 @@ pub fn lane_parent_of(raw: &RawIssue, open_plan: &HashSet<u64>) -> Option<u64> {
 /// its [`parent_of`] is:
 ///
 /// - an open PRD or Suggested PRD, which puts it on that PRD's Lane;
-/// - an open Slice, which keeps a Slice split into sub-issues visible under it; or
+/// - an open Slice, which keeps a Slice split into sub-issues visible under it;
 /// - not an open issue on the board (closed, or never fetched), which puts it in
-///   the "No PRD" Lane rather than losing planned work.
+///   the "No PRD" Lane rather than losing planned work; or
+/// - an open issue with a Veto ([`has_veto`]), when the link is native. When in
+///   doubt the board shows: a Veto says the Parent is no PRD, not that the work under
+///   it stops existing, and a prose `## Parent` is too weak to hold a Slice alone.
 ///
 /// A Parent that is an open issue of any other kind promotes nothing, so a bug's
 /// sub-task stays off the board. Tier-1 classifications are never changed, and nor
@@ -182,6 +204,7 @@ pub fn classify_on_board(
     raw: &RawIssue,
     open_issues: &HashSet<u64>,
     open_plan: &HashSet<u64>,
+    open_vetoed: &HashSet<u64>,
 ) -> IssueClassification {
     let first_pass = classify_issue(raw);
     if matches!(
@@ -189,6 +212,12 @@ pub fn classify_on_board(
         IssueClassification::Prd | IssueClassification::Slice | IssueClassification::SuggestedPrd
     ) {
         return first_pass;
+    }
+    if raw
+        .native_parent
+        .is_some_and(|parent| open_vetoed.contains(&parent))
+    {
+        return IssueClassification::Slice;
     }
     match parent_of(raw) {
         Some(parent) if open_plan.contains(&parent) || !open_issues.contains(&parent) => {
