@@ -7,12 +7,14 @@
 //! whether the cache was rewritten. All offline.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use application::{
     BoardCachePort, BoardCacheUsage, BoardOpen, BoardRefresh, BoardSnapshot, CachedBoardService,
-    GitHubPort, LoadedBoard,
+    ClassifiedBoard, GitHubPort, LoadedBoard,
 };
 use async_trait::async_trait;
 use domain::{
@@ -78,6 +80,9 @@ struct LiveGitHub {
     hydrated: Mutex<Vec<Vec<u64>>>,
     sweep_fails: AtomicBool,
     hydrate_fails: AtomicBool,
+    /// Run once, after the next index sweep has read GitHub and before it returns:
+    /// whatever lands here happens while that refresh is in flight.
+    during_sweep: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>,
 }
 
 impl LiveGitHub {
@@ -99,6 +104,12 @@ impl LiveGitHub {
     /// `number` is deleted or transferred out of the repo.
     fn remove(&self, number: u64) {
         self.issues.lock().expect("lock poisoned").remove(&number);
+    }
+
+    /// `meanwhile` runs to completion while the next index sweep is in flight, after
+    /// that sweep has already read GitHub.
+    fn during_next_sweep(&self, meanwhile: impl Future<Output = ()> + Send + 'static) {
+        *self.during_sweep.lock().expect("lock poisoned") = Some(Box::pin(meanwhile));
     }
 
     /// The hydrate calls so far, one entry per call, and forget them.
@@ -140,6 +151,10 @@ impl GitHubPort for LiveGitHub {
             })
             .collect();
         index.extend(self.listed_but_gone.lock().expect("lock poisoned").clone());
+        let meanwhile = self.during_sweep.lock().expect("lock poisoned").take();
+        if let Some(meanwhile) = meanwhile {
+            meanwhile.await;
+        }
         Ok(index)
     }
 
@@ -559,4 +574,128 @@ async fn a_failing_structural_refresh_does_not_stop_pr_facts_from_refreshing() {
         panic!("the new PR changes the board");
     };
     assert_eq!(slice(&after, 27).state, SliceState::Wip);
+}
+
+/// Start a structural refresh from `start`, and while its index sweep is in flight,
+/// after it read GitHub, let `edit` change GitHub and a reconcile land its full
+/// load in the shared cache. The structural refresh finishes last.
+async fn structural_outlived_by_a_reconcile(
+    github: &Arc<LiveGitHub>,
+    cache: &Arc<CountingCache>,
+    service: &Service,
+    start: &BoardSnapshot,
+    edit: impl FnOnce(&LiveGitHub) + Send + 'static,
+) -> (BoardRefresh, LoadedBoard) {
+    let reconciler = CachedBoardService::new(github.clone(), cache.clone());
+    let (reconciled_tx, reconciled_rx) = std::sync::mpsc::channel();
+    let (edited_github, reconcile_from) = (github.clone(), start.clone());
+    github.during_next_sweep(async move {
+        edit(&edited_github);
+        let reconciled = reconciler
+            .reconcile_cached(&repo(), &reconcile_from)
+            .await
+            .expect("reconcile should succeed");
+        let BoardRefresh::Changed(reconciled) = reconciled else {
+            panic!("the reconcile finds what GitHub changed");
+        };
+        reconciled_tx
+            .send(reconciled)
+            .expect("the test is still listening");
+    });
+
+    let structural = service
+        .structural_refresh_cached(&repo(), start)
+        .await
+        .expect("structural refresh should succeed");
+    let reconciled = reconciled_rx
+        .try_recv()
+        .expect("the reconcile landed while the structural refresh was in flight");
+    (structural, reconciled)
+}
+
+/// The board a refresh repaints: here it always differs from where it started.
+fn painted(refresh: &BoardRefresh) -> ClassifiedBoard {
+    match refresh {
+        BoardRefresh::Changed(loaded) => loaded.board.clone(),
+        BoardRefresh::Unchanged(_) => {
+            panic!("the refresh repainted the board it started from, undoing the reconcile")
+        }
+    }
+}
+
+/// The board a reopen paints from the cache.
+async fn reopened(service: &Service) -> ClassifiedBoard {
+    match service.open(&repo()).await.expect("open should succeed") {
+        BoardOpen::Cached(loaded) => loaded.board,
+        BoardOpen::Cold(_) => panic!("the project is cached"),
+    }
+}
+
+/// A structural refresh read the index before a reconcile dropped an issue GitHub
+/// had just closed. Finishing last, it must not bring that issue back: not on the
+/// board it returns, and not in the cache a reopen paints from.
+#[tokio::test]
+async fn a_structural_refresh_finishing_after_a_reconcile_does_not_resurrect_what_it_dropped() {
+    let (github, cache, service, loaded) = opened(vec![issue(30), issue(31)]).await;
+
+    let (structural, reconciled) =
+        structural_outlived_by_a_reconcile(&github, &cache, &service, &loaded.snapshot, |github| {
+            github.put(edited(issue(30), |issue| issue.closed = true));
+        })
+        .await;
+    assert!(
+        !on_board(&reconciled, 30),
+        "the reconcile drops the closed issue"
+    );
+
+    let board = painted(&structural);
+    assert!(
+        !board.slices.iter().any(|slice| slice.number == 30),
+        "the older index read must not put the closed issue back on the board",
+    );
+    assert!(board.slices.iter().any(|slice| slice.number == 31));
+    let cached = reopened(&service).await;
+    assert!(
+        !cached.slices.iter().any(|slice| slice.number == 30),
+        "nor back in the cache",
+    );
+}
+
+/// A reconcile heals what GitHub did not stamp, such as an edited dependency. A
+/// structural refresh that read the index before that heal still holds the old
+/// issue, since its stamp never moved, and finishing last must not revert it.
+#[tokio::test]
+async fn a_structural_refresh_finishing_after_a_reconcile_keeps_the_issue_it_corrected() {
+    let (github, cache, service, loaded) = opened(vec![issue(32), issue(33)]).await;
+    assert_eq!(slice(&loaded, 33).state, SliceState::Ready);
+
+    let (structural, reconciled) =
+        structural_outlived_by_a_reconcile(&github, &cache, &service, &loaded.snapshot, |github| {
+            // A dependency edit GitHub does not stamp on the issue.
+            github.put(RawIssue {
+                native_blockers: vec![32],
+                ..issue(33)
+            });
+        })
+        .await;
+    assert_eq!(slice(&reconciled, 33).state, SliceState::Blocked);
+
+    let blocked = |board: &ClassifiedBoard| {
+        board
+            .slices
+            .iter()
+            .find(|slice| slice.number == 33)
+            .map(|slice| slice.state)
+    };
+    assert_eq!(
+        blocked(&painted(&structural)),
+        Some(SliceState::Blocked),
+        "the older issue must not overwrite the reconcile's correction",
+    );
+    let cached = reopened(&service).await;
+    assert_eq!(
+        blocked(&cached),
+        Some(SliceState::Blocked),
+        "nor in the cache"
+    );
 }
