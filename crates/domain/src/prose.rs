@@ -111,8 +111,9 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
 
 /// The text a reader of `body` sees as prose: Markdown rendered by a CommonMark
 /// parser, without HTML, code or link text, since `[#12](url)` may name another
-/// repository's issue. Each block ends its own line, since a phrase and its
-/// references must share one.
+/// repository's issue. Each block and each hidden span ends its own line, since a
+/// phrase and its references must share one, so text either side of a span never
+/// joins into a keyword or a reference.
 fn rendered_prose(body: &str) -> String {
     let mut prose = String::new();
     let mut hidden = 0_usize;
@@ -121,10 +122,10 @@ fn rendered_prose(body: &str) -> String {
             Event::Start(Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. }) => hidden += 1,
             Event::End(TagEnd::CodeBlock | TagEnd::Link | TagEnd::Image) => {
                 hidden = hidden.saturating_sub(1);
+                prose.push('\n');
             }
             Event::Text(text) if hidden == 0 => prose.push_str(&text),
-            // A boundary, so text either side of it does not join into a keyword.
-            Event::Code(_) => prose.push(' '),
+            Event::Code(_) => prose.push('\n'),
             // Inline tags stay on their line: `**Closes:** #12`.
             Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {}
             Event::SoftBreak | Event::HardBreak | Event::End(_) => prose.push('\n'),
@@ -393,7 +394,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_body_says_it_closes() {
-        let cases: [(&str, &str, Vec<u64>); 34] = [
+        let cases: [(&str, &str, Vec<u64>); 38] = [
             ("the reported wording", "- Closes #2217", vec![2217]),
             ("a colon", "- Closes: #2217", vec![2217]),
             ("any case", "FIXES #12.", vec![12]),
@@ -420,6 +421,22 @@ mod tests {
             ("a bare mention", "Follow-up to #12", vec![]),
             ("inline code", "Use `Closes #12` to link", vec![]),
             ("a keyword split by inline code", "Fi`x`xes #12", vec![]),
+            ("inline code before a reference", "Closes `x` #12", vec![]),
+            (
+                "a keyword split by a link",
+                "Fi[x](https://example.com)xes #12",
+                vec![],
+            ),
+            (
+                "a reference split by a link",
+                "Closes [other/repo](https://github.com/other/repo)#12",
+                vec![],
+            ),
+            (
+                "a reference split by an image",
+                "Closes ![x](a.png)#12",
+                vec![],
+            ),
             (
                 "a link to another repository",
                 "Closes [#12](https://github.com/other/repo/issues/12)",
@@ -469,7 +486,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_relates_to_without_closing_them() {
-        let cases: [(&str, &str, Vec<u64>); 34] = [
+        let cases: [(&str, &str, Vec<u64>); 38] = [
             ("the reported wording", "Related to #12", vec![12]),
             ("any case", "RELATES TO #12.", vec![12]),
             ("the word issue", "related to issue #12", vec![12]),
