@@ -139,7 +139,11 @@ fn references_after_relation(text: &str) -> Vec<u64> {
     let mut rest = text.trim_start_matches(is_gap);
     let mut hash_required = true;
     for word in ["issues", "issue"] {
-        if let Some(after_word) = rest.strip_prefix(word) {
+        // `issue 12` or `issue#12`, but `issues12` is just a word.
+        if let Some(after_word) = rest
+            .strip_prefix(word)
+            .filter(|after| after.starts_with(is_gap) || after.starts_with('#'))
+        {
             rest = after_word.trim_start_matches(is_gap);
             hash_required = false;
             break;
@@ -333,7 +337,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_relates_to_without_closing_them() {
-        let cases: [(&str, &str, Vec<u64>); 32] = [
+        let cases: [(&str, &str, Vec<u64>); 34] = [
             ("the reported wording", "Related to #12", vec![12]),
             ("any case", "RELATES TO #12.", vec![12]),
             ("the word issue", "related to issue #12", vec![12]),
@@ -378,6 +382,16 @@ mod tests {
             ),
             ("a repository path", "Related to other/refs#12", vec![]),
             ("a URL", "https://example.com/refs#12", vec![]),
+            (
+                "the word issue run into a number",
+                "Related to issues12",
+                vec![],
+            ),
+            (
+                "the word issue before a hash",
+                "Related to issue#12",
+                vec![12],
+            ),
             ("an identifier", "add related_issue_12 fixture", vec![]),
             ("a short identifier", "add ref_issue_12 fixture", vec![]),
             (
