@@ -1,11 +1,15 @@
 //! Application layer: use-cases and the port traits that infrastructure
 //! implements (dependency inversion). Depends only on `domain`.
 
+mod pending_decisions;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+pub use pending_decisions::PendingDecisions;
+
 use domain::{
     classify_issue, classify_on_board, has_unreferenced_blocked_by, lane_parent_of,
     parse_blockers_from_body, resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode,

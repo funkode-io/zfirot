@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use application::{BoardService, GitHubPort};
+use application::{BoardService, GitHubPort, PendingDecisions};
 use async_trait::async_trait;
 use domain::{
     AppAction, AppError, AppErrorKind, AppResult, IssueClassification, Project, RawIssue,
@@ -208,4 +208,21 @@ async fn veto_surfaces_an_under_scoped_token_with_context() {
             "error should carry {context}: {diagnostic}"
         );
     }
+}
+
+/// A refused label changed nothing, so the decision ends and the user may retry.
+#[tokio::test]
+async fn a_rejected_decision_can_be_tried_again() {
+    let service = BoardService::new(FailingPort);
+    let repo = RepoRef::new("funkode-io", "zfirot");
+    let mut pending = PendingDecisions::default();
+
+    assert!(pending.begin(&repo, 7));
+    service
+        .veto_suggested_prd(&repo, 7)
+        .await
+        .expect_err("a rejected labelling should surface an error");
+    pending.rejected(&repo, 7);
+
+    assert!(pending.begin(&repo, 7));
 }

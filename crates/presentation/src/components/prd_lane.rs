@@ -19,8 +19,8 @@ use super::{state_badge_class, state_label, BoardColumn, SliceCard};
 ///
 /// A Suggested PRD's header also offers **Confirm** and **Veto**, emitted through
 /// `on_confirm` and `on_veto` with no dialog: each costs one label on GitHub, and
-/// removing that label undoes it. `deciding` disables both while a decision is in
-/// flight.
+/// removing that label undoes it. `deciding` disables both while a decision on this
+/// PRD is outstanding.
 ///
 /// `highlighted` / `on_highlight` carry the board-wide "highlighted issue" so a
 /// dependency badge can highlight its referenced card even in another lane.
@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn both_decisions_are_disabled_only_while_one_is_in_flight() {
+    fn both_decisions_are_disabled_only_while_one_is_outstanding() {
         assert_eq!(disabled_buttons(true), 2);
         assert_eq!(disabled_buttons(false), 0);
     }

@@ -8,7 +8,7 @@
 
 use application::{
     AuthService, BoardCacheUsage, BoardOpen, BoardRefresh, BoardSnapshot, ClassifiedBoard,
-    LoadedBoard, OtherIssue, ProjectsRefresh, SecureStorePort,
+    LoadedBoard, OtherIssue, PendingDecisions, ProjectsRefresh, SecureStorePort,
 };
 use dioxus::prelude::*;
 use domain::{
@@ -159,10 +159,9 @@ pub fn App() -> Element {
     // fails, shown above the board; cleared on a successful confirm. Same
     // Invalid-never-lands-here rule as `assign_error`.
     let mut confirm_error = use_signal(|| Option::<FeatureActionError>::None);
-    // `true` from a Confirm or Veto click until its label and refresh have landed.
-    // Confirm then Veto in that window would add both labels, and `prd` would
-    // silently beat the later Veto, so only one decision runs at a time.
-    let mut deciding = use_signal(|| false);
+    // The issues with a Confirm or Veto outstanding, whose buttons stay disabled
+    // until the board on screen stops suggesting them (see `PendingDecisions`).
+    let mut pending_decisions = use_signal(PendingDecisions::default);
     // Set to a client-safe message when signing out fails, shown above the
     // current screen (Home or Board); cleared on a successful sign-out.
     let mut sign_out_error = use_signal(|| Option::<String>::None);
@@ -276,6 +275,18 @@ pub fn App() -> Element {
     use_effect(move || match view.read().as_ref() {
         Some(View::Board { snapshot, .. }) => board_snapshot.set(Some((**snapshot).clone())),
         _ => board_snapshot.set(None),
+    });
+
+    // End the decisions the board on screen has caught up with, whichever refresh
+    // path painted it. `peek`, so this only reruns when the board changes.
+    use_effect(move || {
+        if let Some(View::Board { repo, board, .. }) = view.read().as_ref() {
+            let mut settled = pending_decisions.peek().clone();
+            settled.settle(repo, board);
+            if settled != *pending_decisions.peek() {
+                pending_decisions.set(settled);
+            }
+        }
     });
 
     // Keep the top-bar cache indicator in sync with local cache writes/clears.
@@ -792,9 +803,6 @@ pub fn App() -> Element {
 
     let on_confirm = use_callback(
         move |(number, classification): (u64, IssueClassification)| {
-            if *deciding.peek() {
-                return;
-            }
             // Taken together and before the mutation: the user may have opened
             // another board by the time GitHub answers.
             let open_board = match view.read_unchecked().as_ref() {
@@ -804,7 +812,9 @@ pub fn App() -> Element {
                 _ => None,
             };
             if let Some((repo, snapshot)) = open_board {
-                deciding.set(true);
+                if !pending_decisions.write().begin(&repo, number) {
+                    return;
+                }
                 spawn(async move {
                     match confirm_classification(&repo, number, &classification).await {
                         Ok(()) => {
@@ -821,10 +831,12 @@ pub fn App() -> Element {
                             )
                             .await;
                         }
-                        Err(error) => confirm_error
-                            .set(feature_action_error(error, token_error, nav, reload).await),
+                        Err(error) => {
+                            pending_decisions.write().rejected(&repo, number);
+                            confirm_error
+                                .set(feature_action_error(error, token_error, nav, reload).await)
+                        }
                     }
-                    deciding.set(false);
                 });
             }
         },
@@ -832,15 +844,14 @@ pub fn App() -> Element {
 
     // The negative counterpart of `on_confirm`, sharing its error banner.
     let on_veto = use_callback(move |number: u64| {
-        if *deciding.peek() {
-            return;
-        }
         let open_board = match view.read_unchecked().as_ref() {
             Some(View::Board { repo, snapshot, .. }) => Some((repo.clone(), (**snapshot).clone())),
             _ => None,
         };
         if let Some((repo, snapshot)) = open_board {
-            deciding.set(true);
+            if !pending_decisions.write().begin(&repo, number) {
+                return;
+            }
             spawn(async move {
                 match veto_suggested_prd(&repo, number).await {
                     Ok(()) => {
@@ -857,10 +868,12 @@ pub fn App() -> Element {
                         )
                         .await;
                     }
-                    Err(error) => confirm_error
-                        .set(feature_action_error(error, token_error, nav, reload).await),
+                    Err(error) => {
+                        pending_decisions.write().rejected(&repo, number);
+                        confirm_error
+                            .set(feature_action_error(error, token_error, nav, reload).await)
+                    }
                 }
-                deciding.set(false);
             });
         }
     });
@@ -881,6 +894,7 @@ pub fn App() -> Element {
                     prefetched_board.set(None);
                     board_revalidated.set(None);
                     revalidated.set(false);
+                    pending_decisions.set(PendingDecisions::default());
                     nav.set(Nav::Auto);
                     reload += 1;
                 }
@@ -1077,7 +1091,7 @@ pub fn App() -> Element {
                             on_assign,
                             on_confirm,
                             on_veto,
-                            deciding: deciding(),
+                            deciding: pending_decisions.read().issues_in(repo),
                         }
                         if !board.unlinked_prs.is_empty() {
                             UnlinkedPrs { prs: board.unlinked_prs.clone() }
@@ -1876,7 +1890,7 @@ fn Board(
     on_assign: EventHandler<u64>,
     on_confirm: EventHandler<(u64, IssueClassification)>,
     on_veto: EventHandler<u64>,
-    deciding: bool,
+    deciding: Vec<u64>,
 ) -> Element {
     let lanes = group_into_lanes(slices);
     // The board-wide "highlighted issue", shared across lanes so a dependency
@@ -1895,13 +1909,13 @@ fn Board(
             for lane in lanes {
                 PrdLane {
                     key: "{lane.prd.as_ref().map(|prd| prd.number).unwrap_or(0)}",
+                    deciding: lane.prd.as_ref().is_some_and(|prd| deciding.contains(&prd.number)),
                     prd: lane.prd,
                     slices: lane.slices,
                     graph_view,
                     on_assign,
                     on_confirm,
                     on_veto,
-                    deciding,
                     highlighted: highlighted(),
                     on_highlight,
                 }

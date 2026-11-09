@@ -1,11 +1,13 @@
 //! Integration test: the classify-board use-case runs end-to-end against the fake port.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use application::{BoardRefresh, BoardService, ClassifiedBoard};
+use application::{BoardRefresh, BoardService, ClassifiedBoard, PendingDecisions};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use domain::{
-    group_into_lanes, AppAction, AppResult, IssueClassification, Project, RawIssue, RawLinkedPr,
+    group_into_lanes, AppAction, AppError, AppResult, IssueClassification, Project, RawIssue, RawLinkedPr,
     RepoRef,
 };
 use infrastructure::FakeGitHubPort;
@@ -973,11 +975,19 @@ async fn classify_board_resolves_prd_and_not_a_prd_in_favour_of_prd() {
 /// The issues on "GitHub", which only ever change through `add_label` or a
 /// teammate, so a decision has nowhere else to live.
 #[derive(Clone)]
-struct LabellingPort(Arc<Mutex<Vec<RawIssue>>>);
+struct LabellingPort(Arc<Mutex<Vec<RawIssue>>>, Arc<AtomicBool>);
 
 impl LabellingPort {
     fn new(issues: Vec<RawIssue>) -> Self {
-        Self(Arc::new(Mutex::new(issues)))
+        Self(
+            Arc::new(Mutex::new(issues)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Make the board's delta refresh fail or recover; labelling is unaffected.
+    fn set_refresh_fails(&self, fails: bool) {
+        self.1.store(fails, Ordering::SeqCst);
     }
 
     /// A fresh service on the same GitHub facts, like a restart after a cache clear.
@@ -1003,6 +1013,17 @@ impl LabellingPort {
 impl application::GitHubPort for LabellingPort {
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
         Ok(self.0.lock().unwrap().clone())
+    }
+
+    async fn load_issues_since(
+        &self,
+        repo: &RepoRef,
+        _since: DateTime<Utc>,
+    ) -> AppResult<Vec<RawIssue>> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err(AppError::unavailable("GitHub is temporarily unavailable"));
+        }
+        self.load_issues(repo).await
     }
 
     async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
@@ -1062,6 +1083,126 @@ async fn refreshing_from_the_retained_snapshot_shows_a_veto() {
         ),
         BoardRefresh::Unchanged(_) => panic!("a new label should change the board"),
     }
+}
+
+fn labels_of(port: &LabellingPort, number: u64) -> Vec<String> {
+    let issues = port.0.lock().unwrap();
+    let issue = issues.iter().find(|issue| issue.number == number);
+    issue.expect("the fixture should hold this issue").labels.clone()
+}
+
+/// An accepted decision whose refresh fails leaves the guess on screen. It must not
+/// be open to a second decision then: Confirm would add `prd`, which beats the
+/// accepted `not-a-prd`. A later refresh showing the new board ends it.
+#[tokio::test]
+async fn a_failed_refresh_keeps_an_accepted_veto_from_being_undone() {
+    let port = LabellingPort::new(suggested_prd_issues(PRD_TEMPLATE));
+    let service = BoardService::new(port.clone());
+    let shown = service.load(&repo()).await.expect("the board should load");
+    let mut pending = PendingDecisions::default();
+
+    assert!(pending.begin(&repo(), SUGGESTED_PRD));
+    service
+        .veto_suggested_prd(&repo(), SUGGESTED_PRD)
+        .await
+        .expect("the port should accept the labelling");
+
+    port.set_refresh_fails(true);
+    service
+        .refresh(&repo(), &shown.snapshot)
+        .await
+        .expect_err("the refresh should fail");
+    pending.settle(&repo(), &shown.board);
+
+    assert_eq!(pending.issues_in(&repo()), vec![SUGGESTED_PRD]);
+    assert!(
+        !pending.begin(&repo(), SUGGESTED_PRD),
+        "a Confirm on the stale board must not reach GitHub"
+    );
+    assert_eq!(labels_of(&port, SUGGESTED_PRD), vec![NOT_A_PRD_LABEL]);
+
+    port.set_refresh_fails(false);
+    let BoardRefresh::Changed(refreshed) = service
+        .refresh(&repo(), &shown.snapshot)
+        .await
+        .expect("the refresh should recover")
+    else {
+        panic!("a new label should change the board");
+    };
+    pending.settle(&repo(), &refreshed.board);
+
+    assert!(pending.issues_in(&repo()).is_empty());
+}
+
+/// The same the other way round: an accepted Confirm is not open to a Veto until
+/// the board shows it.
+#[tokio::test]
+async fn a_failed_refresh_keeps_an_accepted_confirm_from_being_contradicted() {
+    let port = LabellingPort::new(suggested_prd_issues(PRD_TEMPLATE));
+    let service = BoardService::new(port.clone());
+    let shown = service.load(&repo()).await.expect("the board should load");
+    let mut pending = PendingDecisions::default();
+
+    assert!(pending.begin(&repo(), SUGGESTED_PRD));
+    service
+        .confirm_classification(&repo(), SUGGESTED_PRD, &IssueClassification::SuggestedPrd)
+        .await
+        .expect("the port should accept the labelling");
+
+    port.set_refresh_fails(true);
+    service
+        .refresh(&repo(), &shown.snapshot)
+        .await
+        .expect_err("the refresh should fail");
+    pending.settle(&repo(), &shown.board);
+
+    assert!(!pending.begin(&repo(), SUGGESTED_PRD));
+
+    port.set_refresh_fails(false);
+    let BoardRefresh::Changed(refreshed) = service
+        .refresh(&repo(), &shown.snapshot)
+        .await
+        .expect("the refresh should recover")
+    else {
+        panic!("a new label should change the board");
+    };
+    pending.settle(&repo(), &refreshed.board);
+
+    assert!(pending.issues_in(&repo()).is_empty());
+}
+
+/// A refresh that succeeds but still shows the guess, such as a poll that read
+/// GitHub before the label landed, does not end the decision either.
+#[tokio::test]
+async fn a_decision_outlasts_a_board_still_showing_the_guess() {
+    let board = classify_issues(suggested_prd_issues(PRD_TEMPLATE)).await;
+    let mut pending = PendingDecisions::default();
+
+    assert!(pending.begin(&repo(), SUGGESTED_PRD));
+    pending.settle(&repo(), &board);
+
+    assert_eq!(pending.issues_in(&repo()), vec![SUGGESTED_PRD]);
+}
+
+/// A decision belongs to its repo's board: another board on screen neither ends nor
+/// blocks it, and other issues on the same board stay decidable.
+#[tokio::test]
+async fn a_decision_is_scoped_to_its_repo_and_issue() {
+    let other_repo = RepoRef::new("funkode-io", "other");
+    let empty = classify_issues(vec![]).await;
+    let mut pending = PendingDecisions::default();
+
+    assert!(pending.begin(&repo(), SUGGESTED_PRD));
+    assert!(pending.begin(&repo(), CONFIDENT_PRD));
+    assert!(pending.begin(&other_repo, SUGGESTED_PRD));
+
+    pending.settle(&other_repo, &empty);
+
+    assert_eq!(
+        pending.issues_in(&repo()),
+        vec![SUGGESTED_PRD, CONFIDENT_PRD]
+    );
+    assert!(pending.issues_in(&other_repo).is_empty());
 }
 
 /// Confirm turns the guess into a fact: on the next refresh the Lane is a confident
