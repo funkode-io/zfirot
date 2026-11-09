@@ -788,17 +788,24 @@ pub fn App() -> Element {
 
     let on_confirm = use_callback(
         move |(number, classification): (u64, IssueClassification)| {
-            let open_repo = match view.read_unchecked().as_ref() {
-                Some(View::Board { repo, .. }) => Some(repo.clone()),
+            // Taken together and before the mutation: the user may have opened
+            // another board by the time GitHub answers.
+            let open_board = match view.read_unchecked().as_ref() {
+                Some(View::Board { repo, snapshot, .. }) => {
+                    Some((repo.clone(), (**snapshot).clone()))
+                }
                 _ => None,
             };
-            if let Some(repo) = open_repo {
+            if let Some((repo, snapshot)) = open_board {
                 spawn(async move {
                     match confirm_classification(&repo, number, &classification).await {
                         Ok(()) => {
                             confirm_error.set(None);
                             repaint_after_decision(
                                 repo,
+                                snapshot,
+                                view,
+                                nav,
                                 board_snapshot,
                                 prefetched_board,
                                 reload,
@@ -816,17 +823,20 @@ pub fn App() -> Element {
 
     // The negative counterpart of `on_confirm`, sharing its error banner.
     let on_veto = use_callback(move |number: u64| {
-        let open_repo = match view.read_unchecked().as_ref() {
-            Some(View::Board { repo, .. }) => Some(repo.clone()),
+        let open_board = match view.read_unchecked().as_ref() {
+            Some(View::Board { repo, snapshot, .. }) => Some((repo.clone(), (**snapshot).clone())),
             _ => None,
         };
-        if let Some(repo) = open_repo {
+        if let Some((repo, snapshot)) = open_board {
             spawn(async move {
                 match veto_suggested_prd(&repo, number).await {
                     Ok(()) => {
                         confirm_error.set(None);
                         repaint_after_decision(
                             repo,
+                            snapshot,
+                            view,
+                            nav,
                             board_snapshot,
                             prefetched_board,
                             reload,
@@ -1350,12 +1360,32 @@ fn repaint_board(
 async fn delta_refresh(
     repo: RepoRef,
     snapshot: BoardSnapshot,
+    board_snapshot: Signal<Option<BoardSnapshot>>,
+    prefetched_board: Signal<Option<View>>,
+    reload: Signal<u32>,
+    refresh_error: Signal<Option<String>>,
+) -> Option<BoardSnapshot> {
+    adopt_refresh(
+        refresh_board(&repo, &snapshot).await,
+        repo,
+        board_snapshot,
+        prefetched_board,
+        reload,
+        refresh_error,
+    )
+}
+
+/// Apply a delta refresh's result to the board on screen, by the rule
+/// [`delta_refresh`] describes.
+fn adopt_refresh(
+    refreshed: domain::AppResult<BoardRefresh>,
+    repo: RepoRef,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     prefetched_board: Signal<Option<View>>,
     reload: Signal<u32>,
     mut refresh_error: Signal<Option<String>>,
 ) -> Option<BoardSnapshot> {
-    match refresh_board(&repo, &snapshot).await {
+    match refreshed {
         Ok(BoardRefresh::Changed(loaded)) => {
             refresh_error.set(None);
             Some(repaint_board(
@@ -1384,27 +1414,50 @@ async fn delta_refresh(
 /// `reload` would only reopen the warm cache, which predates the label, and leave
 /// the decided Lane on screen until the next poll, so this fetches the change the
 /// way the manual Refresh does. A failed fetch surfaces through `refresh_error`.
+///
+/// `snapshot` is `repo`'s, taken before the mutation. The refresh runs and lands
+/// only while `repo` is still the board on screen: the retained snapshot belongs to
+/// whichever board is open, so adopting this result on another would corrupt the
+/// next refresh of that one. A board left in the meantime revalidates when reopened.
+#[allow(clippy::too_many_arguments)]
 async fn repaint_after_decision(
     repo: RepoRef,
+    snapshot: BoardSnapshot,
+    view: Resource<View>,
+    nav: Signal<Nav>,
     board_snapshot: Signal<Option<BoardSnapshot>>,
     prefetched_board: Signal<Option<View>>,
-    mut reload: Signal<u32>,
+    reload: Signal<u32>,
     refresh_error: Signal<Option<String>>,
 ) {
-    match board_snapshot() {
-        Some(snapshot) => {
-            delta_refresh(
-                repo,
-                snapshot,
-                board_snapshot,
-                prefetched_board,
-                reload,
-                refresh_error,
-            )
-            .await;
-        }
-        None => reload += 1,
+    // Each read's guard ends here, so none is held across the await below.
+    let showing = |repo: &RepoRef| {
+        let shown = match &*view.peek() {
+            Some(View::Board { repo, .. }) => Some(repo.clone()),
+            _ => None,
+        };
+        board_is_showing(shown.as_ref(), &nav.peek(), repo)
+    };
+    if !showing(&repo) {
+        return;
     }
+    let refreshed = refresh_board(&repo, &snapshot).await;
+    if showing(&repo) {
+        adopt_refresh(
+            refreshed,
+            repo,
+            board_snapshot,
+            prefetched_board,
+            reload,
+            refresh_error,
+        );
+    }
+}
+
+/// Whether `repo` is the board on screen (`shown`) and the user has not already
+/// navigated away from it (`nav`, which moves before the view resolves).
+fn board_is_showing(shown: Option<&RepoRef>, nav: &Nav, repo: &RepoRef) -> bool {
+    shown == Some(repo) && nav_wants_board(nav, repo)
 }
 
 /// The **hot** half of the board's freshness: an open-PR **Sweep** that repaints
@@ -1906,7 +1959,7 @@ fn OtherIssues(
 
 #[cfg(test)]
 mod tests {
-    use super::{clipboard_script, nav_wants_board, Nav};
+    use super::{board_is_showing, clipboard_script, nav_wants_board, Nav};
     use domain::RepoRef;
 
     #[test]
@@ -1921,6 +1974,30 @@ mod tests {
         assert!(!nav_wants_board(&Nav::Home, &open));
         assert!(!nav_wants_board(&Nav::Project(other.clone()), &open));
         assert!(!nav_wants_board(&Nav::GoTo(other), &open));
+    }
+
+    /// A decision's refresh must not land on a board other than the one decided on,
+    /// including while the view is still catching up with a navigation.
+    #[test]
+    fn a_decision_on_a_board_left_behind_is_not_shown() {
+        let decided = RepoRef::new("funkode-io", "zfirot");
+        let other = RepoRef::new("funkode-io", "other");
+
+        assert!(board_is_showing(Some(&decided), &Nav::Auto, &decided));
+        assert!(board_is_showing(
+            Some(&decided),
+            &Nav::Project(decided.clone()),
+            &decided
+        ));
+
+        assert!(!board_is_showing(None, &Nav::Auto, &decided));
+        assert!(!board_is_showing(Some(&other), &Nav::Auto, &decided));
+        assert!(!board_is_showing(
+            Some(&decided),
+            &Nav::Project(other),
+            &decided
+        ));
+        assert!(!board_is_showing(Some(&decided), &Nav::Home, &decided));
     }
 
     #[test]
