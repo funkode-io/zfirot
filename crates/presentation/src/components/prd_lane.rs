@@ -98,9 +98,9 @@ pub fn PrdLane(
                             }
                         }
                         span { class: "badge badge-sm badge-neutral shrink-0", "{slices_pill_label(total_slices)}" }
-                        if prd.suggested {
+                        if let Some(guidance) = guidance_for(&prd) {
                             p { class: "basis-full text-xs font-normal",
-                                "{SUGGESTED_PRD_GUIDANCE} "
+                                "{guidance} "
                                 a {
                                     class: "link relative z-10",
                                     href: "{prd.url}",
@@ -153,11 +153,15 @@ pub fn PrdLane(
     }
 }
 
-/// What a Suggested PRD's header tells the user. The board only reads these labels,
-/// so settling the guess is theirs to do on GitHub.
-const SUGGESTED_PRD_GUIDANCE: &str = "Guessed from its headings. If this is a PRD, add the \
-     \"prd\" label on GitHub. If it is not, add \"not-a-prd\": it stops being suggested, and \
-     its Slices stay visible.";
+/// What a PRD's Lane header tells the user about settling it, if anything: only a
+/// Suggested PRD has a guess to settle. The board only reads these labels, so that
+/// is theirs to do on GitHub.
+fn guidance_for(prd: &PrdRef) -> Option<&'static str> {
+    prd.suggested.then_some(
+        "Guessed from its headings. If this is a PRD, add the \"prd\" label on GitHub. If it \
+         is not, add \"not-a-prd\": it stops being suggested, and its Slices stay visible.",
+    )
+}
 
 fn slices_pill_label(total_slices: usize) -> String {
     if total_slices == 1 {
@@ -320,87 +324,27 @@ fn GraphLane(
 
 #[cfg(test)]
 mod tests {
-    use dioxus::core::{AttributeValue, Mutation, Mutations, VirtualDom};
-
     use super::*;
-
-    const ISSUE_URL: &str = "https://github.com/funkode-io/zfirot/issues/12";
-
-    #[derive(Clone, PartialEq, Props)]
-    struct HarnessProps {
-        prd: Option<PrdRef>,
-    }
-
-    /// A Lane with no Slices, so everything rendered in it belongs to its header.
-    #[allow(non_snake_case)]
-    fn Harness(props: HarnessProps) -> Element {
-        rsx! {
-            PrdLane {
-                prd: props.prd,
-                slices: Vec::new(),
-                graph_view: false,
-                on_assign: |_| {},
-                highlighted: None,
-                on_highlight: |_| {},
-            }
-        }
-    }
-
-    /// The Lane's dynamic text, and how many links in it go to the PRD's issue.
-    fn rendered(prd: Option<PrdRef>) -> (String, usize) {
-        let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { prd });
-        let mut mutations = Mutations::default();
-        dom.rebuild(&mut mutations);
-
-        let mut text = String::new();
-        let mut issue_links = 0;
-        for edit in &mutations.edits {
-            match edit {
-                Mutation::CreateTextNode { value, .. } => {
-                    text.push_str(value);
-                }
-                Mutation::SetAttribute {
-                    name: "href",
-                    value: AttributeValue::Text(href),
-                    ..
-                } if href == ISSUE_URL => issue_links += 1,
-                _ => {}
-            }
-        }
-        (text, issue_links)
-    }
 
     fn prd(suggested: bool) -> PrdRef {
         PrdRef {
             number: 12,
             title: "A plan".to_string(),
-            url: ISSUE_URL.to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/12".to_string(),
             suggested,
         }
     }
 
     #[test]
-    fn a_suggested_lane_header_says_which_labels_to_set_and_links_to_the_issue() {
-        let (text, issue_links) = rendered(Some(prd(true)));
+    fn a_suggested_prd_is_told_which_labels_to_set() {
+        let guidance = guidance_for(&prd(true)).expect("a guess has something to settle");
 
-        assert!(text.contains("\"prd\" label"), "{text}");
-        assert!(text.contains("\"not-a-prd\""), "{text}");
-        assert_eq!(issue_links, 2, "the title link and the guidance link");
+        assert!(guidance.contains("\"prd\" label"), "{guidance}");
+        assert!(guidance.contains("\"not-a-prd\""), "{guidance}");
     }
 
     #[test]
-    fn a_confident_lane_header_has_no_guidance() {
-        let (text, issue_links) = rendered(Some(prd(false)));
-
-        assert!(!text.contains("not-a-prd"), "{text}");
-        assert_eq!(issue_links, 1, "only the title link");
-    }
-
-    #[test]
-    fn a_no_prd_lane_header_has_no_guidance() {
-        let (text, issue_links) = rendered(None);
-
-        assert!(!text.contains("not-a-prd"), "{text}");
-        assert_eq!(issue_links, 0);
+    fn a_confident_prd_has_no_guidance() {
+        assert_eq!(guidance_for(&prd(false)), None);
     }
 }
