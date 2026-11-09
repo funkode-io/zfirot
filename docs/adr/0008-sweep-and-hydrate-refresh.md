@@ -51,6 +51,14 @@ issues are hydrated → they read closed → and their dependents flip Blocked �
 Ready in the same repaint, with **no further fetch**, because blocker openness is
 derived from the snapshot rather than fetched.
 
+A merged PR leaves the open-PR set at once, but GitHub closes its issues 1–3s
+later (measured across 26 merges in this repo), so a sweep landing in that gap
+hydrates them still open, and the sweep after it looks unchanged. An issue a
+vanished PR leaves reading open is therefore hydrated **once more** on the next
+hot tick. That read costs at most a point per vanished PR, and it repaints only
+if the issue moved, which it does not after a PR closed without merging. It
+bounds this rare path at 15s plus the gap (~18s), not 60s.
+
 ## Considered options
 
 - **Keep the delta design and just budget the node count** (what #169 did).
