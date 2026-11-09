@@ -6,8 +6,7 @@ use application::{
     BoardCachePort, BoardCacheUsage, BoardOpen, BoardRefresh, CachedBoardService, GitHubPort,
 };
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use domain::{AppAction, AppError, AppResult, Project, RawIssue, RawLinkedPr, RepoRef};
+use domain::{AppAction, AppError, AppResult, IssueStamp, Project, RawIssue, RawLinkedPr, RepoRef};
 
 #[derive(Default)]
 struct CountingBoardCache {
@@ -63,16 +62,18 @@ impl BoardCachePort for CountingBoardCache {
     }
 }
 
+/// A GitHub answering each full load from `issues` in order. Its index lists the
+/// open issues of `indexed`, the issues as a later **Sweep** finds them.
 struct SequencePort {
     issues: Mutex<VecDeque<Vec<RawIssue>>>,
-    deltas: Mutex<VecDeque<Vec<RawIssue>>>,
+    indexed: Vec<RawIssue>,
 }
 
 impl SequencePort {
-    fn new(issues: Vec<Vec<RawIssue>>, deltas: Vec<Vec<RawIssue>>) -> Self {
+    fn new(issues: Vec<Vec<RawIssue>>, indexed: Vec<RawIssue>) -> Self {
         Self {
             issues: Mutex::new(VecDeque::from(issues)),
-            deltas: Mutex::new(VecDeque::from(deltas)),
+            indexed,
         }
     }
 }
@@ -94,17 +95,16 @@ impl GitHubPort for SequencePort {
         Ok(vec![])
     }
 
-    async fn load_issues_since(
-        &self,
-        _repo: &RepoRef,
-        _since: DateTime<Utc>,
-    ) -> AppResult<Vec<RawIssue>> {
+    async fn sweep_open_issues(&self, _repo: &RepoRef) -> AppResult<Vec<IssueStamp>> {
         Ok(self
-            .deltas
-            .lock()
-            .expect("lock poisoned")
-            .pop_front()
-            .expect("delta sequence should have a value"))
+            .indexed
+            .iter()
+            .filter(|issue| !issue.closed)
+            .map(|issue| IssueStamp {
+                number: issue.number,
+                updated_at: issue.updated_at.clone(),
+            })
+            .collect())
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -120,7 +120,7 @@ impl GitHubPort for SequencePort {
     }
 }
 
-/// A [`GitHubPort`] whose delta/full-load calls always fail (a connectivity
+/// A [`GitHubPort`] whose sweep and full-load calls always fail (a connectivity
 /// blip), for asserting that a failed fetch never advances `fetched_at` or
 /// rewrites the cache.
 struct FailingPort;
@@ -135,11 +135,7 @@ impl GitHubPort for FailingPort {
         Err(AppError::unavailable("GitHub is temporarily unavailable"))
     }
 
-    async fn load_issues_since(
-        &self,
-        _repo: &RepoRef,
-        _since: DateTime<Utc>,
-    ) -> AppResult<Vec<RawIssue>> {
+    async fn sweep_open_issues(&self, _repo: &RepoRef) -> AppResult<Vec<IssueStamp>> {
         Err(AppError::unavailable("GitHub is temporarily unavailable"))
     }
 
@@ -169,6 +165,7 @@ fn open_issue(number: u64, title: &str) -> RawIssue {
         assignee: None,
         assignee_avatar_url: None,
         is_native_child_of_prd: false,
+        updated_at: String::new(),
     }
 }
 
@@ -177,7 +174,7 @@ async fn cold_cache_falls_back_to_load_and_seeds_cache() {
     let repo = RepoRef::new("funkode-io", "zfirot");
     let cache = Arc::new(CountingBoardCache::default());
     let service = CachedBoardService::new(
-        SequencePort::new(vec![vec![open_issue(10, "Cold")]], vec![vec![]]),
+        SequencePort::new(vec![vec![open_issue(10, "Cold")]], vec![]),
         cache.clone(),
     );
 
@@ -212,10 +209,10 @@ async fn seeded_open_uses_cache_then_refreshes_and_rewrites_cache() {
     let service = CachedBoardService::new(
         SequencePort::new(
             vec![vec![open_issue(20, "Seed")]],
-            vec![vec![RawIssue {
+            vec![RawIssue {
                 closed: true,
                 ..open_issue(20, "Seed")
-            }]],
+            }],
         ),
         cache.clone(),
     );
@@ -249,7 +246,7 @@ async fn seeded_open_uses_cache_then_refreshes_and_rewrites_cache() {
     );
 
     let refresh = service
-        .refresh_cached(&repo, &cached_snapshot)
+        .structural_refresh_cached(&repo, &cached_snapshot)
         .await
         .expect("refresh should succeed");
 
@@ -257,10 +254,12 @@ async fn seeded_open_uses_cache_then_refreshes_and_rewrites_cache() {
         BoardRefresh::Changed(loaded) => {
             assert!(
                 loaded.board.slices.is_empty(),
-                "delta should be applied on top of cache"
+                "the sweep should be applied on top of cache"
             );
         }
-        BoardRefresh::Unchanged(_) => panic!("closing an issue in delta should change the board"),
+        BoardRefresh::Unchanged(_) => {
+            panic!("an issue closed since the cache should change the board")
+        }
     }
 
     assert!(cache.writes() >= 2, "successful refresh rewrites cache");
@@ -276,7 +275,7 @@ async fn cache_is_scoped_per_repo_for_switch_and_reopen() {
     let service = CachedBoardService::new(
         SequencePort::new(
             vec![vec![open_issue(1, "A")], vec![open_issue(2, "B")]],
-            vec![vec![]],
+            vec![],
         ),
         cache.clone(),
     );
@@ -320,14 +319,13 @@ async fn cache_is_scoped_per_repo_for_switch_and_reopen() {
 }
 
 #[tokio::test]
-async fn unchanged_refresh_advances_cached_fetched_at() {
+async fn unchanged_refresh_writes_nothing() {
     let repo = RepoRef::new("funkode-io", "zfirot");
     let cache = Arc::new(CountingBoardCache::default());
     let service = CachedBoardService::new(
         SequencePort::new(
             vec![vec![open_issue(30, "Stable")]],
-            // Empty delta => the board facts are unchanged on refresh.
-            vec![vec![]],
+            vec![open_issue(30, "Stable")],
         ),
         cache.clone(),
     );
@@ -338,30 +336,15 @@ async fn unchanged_refresh_advances_cached_fetched_at() {
     };
 
     let refresh = service
-        .refresh_cached(&repo, &snapshot)
+        .structural_refresh_cached(&repo, &snapshot)
         .await
         .expect("refresh should succeed");
 
-    // Facts are unchanged, but the snapshot must carry an advanced `fetched_at`
-    // so the next delta `since` window moves forward instead of growing.
-    let advanced = match refresh {
-        BoardRefresh::Unchanged(advanced) => advanced,
-        BoardRefresh::Changed(_) => panic!("empty delta should leave the board unchanged"),
-    };
     assert!(
-        advanced.fetched_at > snapshot.fetched_at,
-        "unchanged refresh must advance fetched_at",
+        matches!(refresh, BoardRefresh::Unchanged(_)),
+        "an unchanged index should leave the board unchanged",
     );
-
-    let cached = cache
-        .cached_board(&repo)
-        .await
-        .expect("cache read should succeed")
-        .expect("cache should hold a snapshot");
-    assert_eq!(
-        cached.fetched_at, advanced.fetched_at,
-        "unchanged refresh must persist the advanced snapshot to the cache",
-    );
+    assert_eq!(cache.writes(), 1, "only the cold open wrote the cache");
 }
 
 #[tokio::test]
@@ -476,12 +459,11 @@ async fn reconcile_full_load_noops_when_cache_is_aligned() {
 
     match reconcile {
         BoardRefresh::Unchanged(returned) => {
-            // `Unchanged` already says the facts are aligned; what matters is
-            // that the full load's watermark comes back, since that is where
-            // the next delta window starts.
+            // `Unchanged` already says the facts are aligned; the full load still
+            // read GitHub, and the time it did comes back.
             assert!(
                 returned.fetched_at > snapshot.fetched_at,
-                "aligned reconcile should still advance the issue-side watermark"
+                "aligned reconcile should report when it read GitHub"
             );
         }
         BoardRefresh::Changed(_) => panic!("aligned reconcile should be a no-op"),
@@ -540,7 +522,7 @@ async fn reconcile_full_load_drops_ghost_issue_from_cache() {
 }
 
 #[tokio::test]
-async fn failed_delta_refresh_leaves_snapshot_and_cache_untouched() {
+async fn failed_structural_refresh_leaves_snapshot_and_cache_untouched() {
     let repo = RepoRef::new("funkode-io", "zfirot");
     let cache = Arc::new(CountingBoardCache::default());
     let seed_service = CachedBoardService::new(
@@ -557,17 +539,17 @@ async fn failed_delta_refresh_leaves_snapshot_and_cache_untouched() {
     };
     assert_eq!(cache.writes(), 1, "seed should write exactly once");
 
-    // A connectivity blip on the delta half of a refresh.
+    // A connectivity blip on the issue-index sweep.
     let flaky_service = CachedBoardService::new(FailingPort, cache.clone());
     flaky_service
-        .refresh_cached(&repo, &snapshot)
+        .structural_refresh_cached(&repo, &snapshot)
         .await
         .expect_err("a failing port must surface as an error, not a silent no-op");
 
     assert_eq!(
         cache.writes(),
         1,
-        "a failed delta refresh must not rewrite the cache"
+        "a failed structural refresh must not rewrite the cache"
     );
     let cached = cache
         .cached_board(&repo)
@@ -576,7 +558,7 @@ async fn failed_delta_refresh_leaves_snapshot_and_cache_untouched() {
         .expect("cache should still hold the seeded snapshot");
     assert_eq!(
         cached.fetched_at, snapshot.fetched_at,
-        "a failed delta refresh must not advance the cached fetched_at"
+        "a failed structural refresh must not advance the cached fetched_at"
     );
 }
 

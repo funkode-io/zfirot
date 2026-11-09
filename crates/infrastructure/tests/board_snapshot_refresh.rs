@@ -3,23 +3,26 @@ use std::sync::Mutex;
 
 use application::{classify, BoardRefresh, BoardService, GitHubPort};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use domain::{AppAction, AppResult, Project, RawIssue, RawLinkedPr, RepoRef, SliceState};
+use domain::{
+    AppAction, AppResult, IssueStamp, Project, RawIssue, RawLinkedPr, RepoRef, SliceState,
+};
 use infrastructure::{sample_open_prs, sample_raw_issues};
 
+/// A GitHub that loads `opened` and is found holding `current` by any later
+/// **Sweep** or **Hydrate**.
 struct SequencePort {
     issues: Mutex<VecDeque<Vec<RawIssue>>>,
-    deltas: Mutex<VecDeque<Vec<RawIssue>>>,
+    current: Vec<RawIssue>,
     /// The open-PR **Sweep** every refresh path runs; fixed here, since these
     /// tests are about the issue side of a refresh.
     open_prs: Vec<RawLinkedPr>,
 }
 
 impl SequencePort {
-    fn new(issues: Vec<Vec<RawIssue>>, deltas: Vec<Vec<RawIssue>>) -> Self {
+    fn new(opened: Vec<RawIssue>, current: Vec<RawIssue>) -> Self {
         Self {
-            issues: Mutex::new(VecDeque::from(issues)),
-            deltas: Mutex::new(VecDeque::from(deltas)),
+            issues: Mutex::new(VecDeque::from([opened])),
+            current,
             open_prs: sample_open_prs(),
         }
     }
@@ -36,17 +39,25 @@ impl GitHubPort for SequencePort {
             .expect("issues sequence should have a value"))
     }
 
-    async fn load_issues_since(
-        &self,
-        _repo: &RepoRef,
-        _since: DateTime<Utc>,
-    ) -> AppResult<Vec<RawIssue>> {
+    async fn sweep_open_issues(&self, _repo: &RepoRef) -> AppResult<Vec<IssueStamp>> {
         Ok(self
-            .deltas
-            .lock()
-            .expect("lock poisoned")
-            .pop_front()
-            .expect("delta sequence should have a value"))
+            .current
+            .iter()
+            .filter(|issue| !issue.closed)
+            .map(|issue| IssueStamp {
+                number: issue.number,
+                updated_at: issue.updated_at.clone(),
+            })
+            .collect())
+    }
+
+    async fn hydrate_issues(&self, _repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
+        Ok(self
+            .current
+            .iter()
+            .filter(|issue| numbers.contains(&issue.number))
+            .cloned()
+            .collect())
     }
 
     async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
@@ -84,7 +95,7 @@ fn classify_is_a_pure_projection_over_issues_and_swept_prs() {
 #[tokio::test]
 async fn refresh_reports_unchanged_when_snapshot_facts_match() {
     let issues = sample_raw_issues();
-    let service = BoardService::new(SequencePort::new(vec![issues], vec![vec![]]));
+    let service = BoardService::new(SequencePort::new(issues.clone(), issues));
     let repo = RepoRef::new("funkode-io", "zfirot");
 
     let loaded = service.load(&repo).await.expect("load should succeed");
@@ -97,7 +108,7 @@ async fn refresh_reports_unchanged_when_snapshot_facts_match() {
         BoardRefresh::Unchanged(snapshot) => {
             assert!(
                 snapshot.fetched_at > loaded.snapshot.fetched_at,
-                "unchanged refresh must advance fetched_at so the next delta `since` window moves forward",
+                "unchanged refresh still reports when it read GitHub",
             );
         }
         BoardRefresh::Changed(_) => panic!("equal raw issues must not trigger repaint"),
@@ -107,20 +118,12 @@ async fn refresh_reports_unchanged_when_snapshot_facts_match() {
 #[tokio::test]
 async fn refresh_reports_changed_when_snapshot_facts_differ() {
     let initial = sample_raw_issues();
-    let closed_three = RawIssue {
-        number: 3,
-        title: "Derive SliceState as a pure domain function".to_string(),
-        url: "https://github.com/funkode-io/zfirot/issues/3".to_string(),
-        body: None,
-        labels: vec!["ready-for-agent".to_string()],
-        closed: true,
-        native_parent: Some(1),
-        native_blockers: vec![],
-        assignee: None,
-        assignee_avatar_url: None,
-        is_native_child_of_prd: true,
-    };
-    let service = BoardService::new(SequencePort::new(vec![initial], vec![vec![closed_three]]));
+    let current: Vec<RawIssue> = initial
+        .iter()
+        .filter(|issue| issue.number != 3)
+        .cloned()
+        .collect();
+    let service = BoardService::new(SequencePort::new(initial, current));
     let repo = RepoRef::new("funkode-io", "zfirot");
 
     let loaded = service.load(&repo).await.expect("load should succeed");
@@ -143,7 +146,7 @@ async fn refresh_reports_changed_when_snapshot_facts_differ() {
 }
 
 #[tokio::test]
-async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
+async fn refresh_rederives_blocked_state_when_blocker_leaves_the_index() {
     let repo = RepoRef::new("funkode-io", "zfirot");
     let blocker = RawIssue {
         number: 42,
@@ -157,6 +160,7 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
         assignee: None,
         assignee_avatar_url: None,
         is_native_child_of_prd: false,
+        updated_at: String::new(),
     };
     let blocked = RawIssue {
         number: 43,
@@ -170,15 +174,12 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
         assignee: None,
         assignee_avatar_url: None,
         is_native_child_of_prd: false,
-    };
-    let closed_blocker = RawIssue {
-        closed: true,
-        ..blocker.clone()
+        updated_at: String::new(),
     };
 
     let service = BoardService::new(SequencePort::new(
-        vec![vec![blocker, blocked.clone()]],
-        vec![vec![closed_blocker]],
+        vec![blocker, blocked.clone()],
+        vec![blocked.clone()],
     ));
 
     let loaded = service.load(&repo).await.expect("load should succeed");
@@ -201,38 +202,8 @@ async fn refresh_rederives_blocked_state_when_blocker_closes_in_delta() {
     assert_ne!(
         refreshed_blocked.state,
         SliceState::Blocked,
-        "when blocker closes in delta, slice should leave blocked state",
+        "when its blocker closes, the slice should leave blocked state",
     );
-}
-
-#[tokio::test]
-async fn refresh_is_idempotent_when_since_overlap_refetches_same_issue() {
-    let repo = RepoRef::new("funkode-io", "zfirot");
-    let initial = sample_raw_issues();
-    let refetched = initial
-        .iter()
-        .find(|issue| issue.number == 3)
-        .expect("fixture should include issue 3")
-        .clone();
-    let service = BoardService::new(SequencePort::new(vec![initial], vec![vec![refetched]]));
-
-    let loaded = service.load(&repo).await.expect("load should succeed");
-    let refresh = service
-        .refresh(&repo, &loaded.snapshot)
-        .await
-        .expect("refresh should succeed");
-
-    match refresh {
-        BoardRefresh::Unchanged(snapshot) => {
-            assert!(
-                snapshot.fetched_at > loaded.snapshot.fetched_at,
-                "idempotent refresh must still advance fetched_at so `since` does not grow unbounded",
-            );
-        }
-        BoardRefresh::Changed(_) => {
-            panic!("overlap deltas that refetch unchanged issues should be idempotent")
-        }
-    }
 }
 
 #[tokio::test]
@@ -247,13 +218,9 @@ async fn a_pr_left_open_when_its_issue_closes_moves_from_the_card_to_unlinked() 
     let mut still_open = sample_open_prs().remove(0);
     still_open.closes = vec![number];
     let still_open_number = still_open.pr.number;
-    let closed_slice = RawIssue {
-        closed: true,
-        ..open_slice.clone()
-    };
     let service = BoardService::new(SequencePort {
         issues: Mutex::new(VecDeque::from([vec![open_slice]])),
-        deltas: Mutex::new(VecDeque::from([vec![closed_slice]])),
+        current: vec![],
         open_prs: vec![still_open],
     });
     let repo = RepoRef::new("funkode-io", "zfirot");

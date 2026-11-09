@@ -36,10 +36,14 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
   retargets it, whatever its body says, so a PR with no closing reference falls
   back to the closing keywords in its body (#196).
 - An issue's `updatedAt` does **not** advance when a PR gains or changes a
-  closing reference to it, so an issues-since delta can never see a new Linked
-  PR. That is why the open-PR sweep runs on its own hot loop (and on cold load and
-  cached open), never derived from the issue delta. The issue-side paths (poll,
+  closing reference to it, so the issue index can never see a new Linked PR. That
+  is why the open-PR sweep runs on its own hot loop (and on cold load and cached
+  open), never derived from the issue side. The issue-side paths (structural,
   reconcile) write only issues and adopt the hot path's PR facts from the cache.
+- The issue-index sweep is **authoritative**: an issue absent from it is dropped,
+  so its parser must fail on anything short of a complete page rather than let a
+  truncated answer read as "gone". Never answer it from a `since`-style change
+  feed: GitHub cannot report a deletion or a transfer through one.
   A change to which PRs close which issues **Cascades**: the hot path hydrates
   those issues by number in the same operation, so it is the one hot write that
   touches issues, and the issue-side paths keep it rather than reverting it.

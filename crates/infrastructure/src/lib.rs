@@ -16,8 +16,8 @@ mod secure_store;
 
 pub use board_cache::{FakeBoardCache, FileBoardCache};
 pub use github::{
-    parse_hydrate_response, parse_issues_response, parse_open_prs_response,
-    parse_projects_response, GitHubClient,
+    parse_hydrate_response, parse_issue_index_response, parse_issues_response,
+    parse_open_prs_response, parse_projects_response, GitHubClient,
 };
 pub use project_store::{FakeProjectStore, FileProjectStore};
 pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};
@@ -148,6 +148,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             assignee: None,
             assignee_avatar_url: None,
             is_native_child_of_prd: false,
+            updated_at: String::new(),
         },
         // ── Tier-1: confirmed Slice (ready-for-agent label) ──────────────────
         RawIssue {
@@ -167,6 +168,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             assignee: Some("carlos-verdes".to_string()),
             assignee_avatar_url: Some("https://avatars.githubusercontent.com/u/1?v=4".to_string()),
             is_native_child_of_prd: true,
+            updated_at: String::new(),
         },
         // ── Tier-1: confirmed Slice (slice label, prose parent fallback) ─────
         RawIssue {
@@ -187,6 +189,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             assignee: None,
             assignee_avatar_url: None,
             is_native_child_of_prd: false,
+            updated_at: String::new(),
         },
         // ── Tier-2: suggested PRD (no label, but PRD headings) ───────────────
         RawIssue {
@@ -205,6 +208,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             assignee: None,
             assignee_avatar_url: None,
             is_native_child_of_prd: false,
+            updated_at: String::new(),
         },
         // ── Tier-2: suggested Slice (no label, but Slice headings) ───────────
         RawIssue {
@@ -223,6 +227,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             assignee: None,
             assignee_avatar_url: None,
             is_native_child_of_prd: false,
+            updated_at: String::new(),
         },
         // ── Tier-3: unclassified ─────────────────────────────────────────────
         RawIssue {
@@ -237,6 +242,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             assignee: None,
             assignee_avatar_url: None,
             is_native_child_of_prd: false,
+            updated_at: String::new(),
         },
         // ── Closed: omitted by classify_board ────────────────────────────────
         RawIssue {
@@ -251,6 +257,7 @@ pub fn sample_raw_issues() -> Vec<RawIssue> {
             assignee: Some("carlos-verdes".to_string()),
             assignee_avatar_url: Some("https://avatars.githubusercontent.com/u/1?v=4".to_string()),
             is_native_child_of_prd: true,
+            updated_at: String::new(),
         },
     ]
 }

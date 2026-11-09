@@ -4,10 +4,9 @@ use std::collections::HashMap;
 
 use application::GitHubPort;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use domain::{
-    parse_closing_issues, parse_related_issues, AppAction, AppError, AppResult, LinkedPrRef,
-    PrStatus, Project, RawIssue, RawLinkedPr, RepoRef, ReviewDecision, Viewer,
+    parse_closing_issues, parse_related_issues, AppAction, AppError, AppResult, IssueStamp,
+    LinkedPrRef, PrStatus, Project, RawIssue, RawLinkedPr, RepoRef, ReviewDecision, Viewer,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -33,6 +32,7 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
         url
         body
         state
+        updatedAt
         labels(first: 20) { nodes { name } }
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
@@ -43,31 +43,16 @@ query Issues($owner: String!, $name: String!, $cursor: String) {
 }
 "#;
 
-/// One page of issue deltas for incremental refresh: open and closed issues
-/// updated at or after `since`. Carries no Pull Request data either — see
-/// [`ISSUES_QUERY`].
-const ISSUES_SINCE_QUERY: &str = r#"
-query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: DateTime!) {
+/// One page of the issue-index **Sweep**: every open issue's number and stamp, and
+/// nothing else. It is the authority on which issues exist, and it stays shallow on
+/// purpose: full detail is **Hydrated** by number only for what it reports as new or
+/// moved (ADR 0008).
+const ISSUE_INDEX_QUERY: &str = r#"
+query IssueIndex($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
-    issues(
-      first: 50,
-      after: $cursor,
-      states: [OPEN, CLOSED],
-      filterBy: { since: $since },
-      orderBy: {field: UPDATED_AT, direction: DESC}
-    ) {
+    issues(first: 100, after: $cursor, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
-      nodes {
-        number
-        title
-        url
-        body
-        state
-        labels(first: 20) { nodes { name } }
-        assignees(first: 1) { nodes { login avatarUrl } }
-        parent { number labels(first: 20) { nodes { name } } }
-        blockedBy(first: 50) { nodes { number } }
-      }
+      nodes { number updatedAt }
     }
   }
 }
@@ -125,6 +110,7 @@ const HYDRATE_ISSUE_SELECTION: &str = r#"
         url
         body
         state
+        updatedAt
         labels(first: 20) { nodes { name } }
         assignees(first: 1) { nodes { login avatarUrl } }
         parent { number labels(first: 20) { nodes { name } } }
@@ -312,22 +298,15 @@ impl GitHubClient {
         })
     }
 
-    /// Fetch a single page of issue deltas for `repo`, updated at or after
-    /// `since`, starting after `cursor`.
-    async fn fetch_issues_since_page(
+    /// Fetch a single page of the repo's issue index, for [`ISSUE_INDEX_QUERY`].
+    async fn fetch_issue_index_page(
         &self,
         repo: &RepoRef,
-        since: &DateTime<Utc>,
         cursor: Option<&str>,
     ) -> AppResult<String> {
         let body = serde_json::json!({
-            "query": ISSUES_SINCE_QUERY,
-            "variables": {
-                "owner": repo.owner,
-                "name": repo.name,
-                "cursor": cursor,
-                "since": since.to_rfc3339(),
-            },
+            "query": ISSUE_INDEX_QUERY,
+            "variables": { "owner": repo.owner, "name": repo.name, "cursor": cursor },
         });
 
         let response = self
@@ -338,7 +317,7 @@ impl GitHubClient {
             .await
             .map_err(|err| {
                 AppError::unavailable("Could not reach GitHub")
-                    .with_operation("GitHubClient::fetch_issues_since_page")
+                    .with_operation("GitHubClient::fetch_issue_index_page")
                     .with_source(err)
             })?;
 
@@ -347,13 +326,13 @@ impl GitHubClient {
             return Err(status_error(
                 status,
                 &response,
-                "GitHubClient::fetch_issues_since_page",
+                "GitHubClient::fetch_issue_index_page",
             ));
         }
 
         response.text().await.map_err(|err| {
             AppError::unavailable("Could not read GitHub's response")
-                .with_operation("GitHubClient::fetch_issues_since_page")
+                .with_operation("GitHubClient::fetch_issue_index_page")
                 .with_source(err)
         })
     }
@@ -688,6 +667,23 @@ impl GitHubPort for GitHubClient {
         Ok(linked_prs)
     }
 
+    async fn sweep_open_issues(&self, repo: &RepoRef) -> AppResult<Vec<IssueStamp>> {
+        let mut index = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let body = self.fetch_issue_index_page(repo, cursor.as_deref()).await?;
+            let (page, next) = parse_issue_index_response(&body)?;
+            index.extend(page);
+            match next {
+                Some(end) => cursor = Some(end),
+                None => break,
+            }
+        }
+
+        Ok(index)
+    }
+
     async fn hydrate_issues(&self, repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
         let mut issues = Vec::with_capacity(numbers.len());
         for query in hydrate_queries(numbers) {
@@ -712,29 +708,6 @@ impl GitHubPort for GitHubClient {
         }
 
         Ok(projects)
-    }
-
-    async fn load_issues_since(
-        &self,
-        repo: &RepoRef,
-        since: DateTime<Utc>,
-    ) -> AppResult<Vec<RawIssue>> {
-        let mut issues = Vec::new();
-        let mut cursor: Option<String> = None;
-
-        loop {
-            let body = self
-                .fetch_issues_since_page(repo, &since, cursor.as_deref())
-                .await?;
-            let (page, next) = parse_issues_response(&body)?;
-            issues.extend(page);
-            match next {
-                Some(end) => cursor = Some(end),
-                None => break,
-            }
-        }
-
-        Ok(issues)
     }
 
     async fn assign_self(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
@@ -904,6 +877,60 @@ pub fn parse_open_prs_response(body: &str) -> AppResult<(Vec<RawLinkedPr>, Optio
         AppError::not_found("Repository not found or not visible to the token")
             .with_operation("parse_open_prs_response"),
     )
+}
+
+/// Parse a page of [`ISSUE_INDEX_QUERY`] into its [`IssueStamp`]s and the cursor of
+/// the next page (if any). Pure and offline.
+///
+/// This answer is authoritative, so whatever it leaves out gets dropped from the
+/// board: anything short of a complete page must fail rather than read as "gone".
+/// So unlike the other parsers it tolerates no error beside its data, which costs
+/// nothing here: it selects no optional field a token could be denied. A null
+/// repository or connection fails, a null node fails to parse, and so does a page
+/// claiming a successor it gives no cursor for.
+pub fn parse_issue_index_response(body: &str) -> AppResult<(Vec<IssueStamp>, Option<String>)> {
+    const OPERATION: &str = "parse_issue_index_response";
+
+    let response: IssueIndexResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation(OPERATION)
+            .with_source(err)
+    })?;
+
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        return Err(repository_query_error(errors, OPERATION));
+    }
+
+    let Some(issues) = response
+        .data
+        .and_then(|data| data.repository)
+        .and_then(|repository| repository.issues)
+    else {
+        return Err(
+            AppError::not_found("Repository not found or not visible to the token")
+                .with_operation(OPERATION),
+        );
+    };
+
+    let next = match (issues.page_info.has_next_page, issues.page_info.end_cursor) {
+        (false, _) => None,
+        (true, Some(cursor)) => Some(cursor),
+        (true, None) => {
+            return Err(
+                AppError::internal("GitHub reported another page without a cursor to it")
+                    .with_operation(OPERATION),
+            )
+        }
+    };
+    let index = issues
+        .nodes
+        .into_iter()
+        .map(|node| IssueStamp {
+            number: node.number,
+            updated_at: node.updated_at,
+        })
+        .collect();
+    Ok((index, next))
 }
 
 /// Parse one [`hydrate_queries`] response into the issues GitHub resolved, sorted
@@ -1443,6 +1470,7 @@ fn map_issue_raw(node: RawIssueNode) -> RawIssue {
             .first()
             .map(|user| user.avatar_url.clone()),
         is_native_child_of_prd,
+        updated_at: node.updated_at,
     }
 }
 
@@ -1519,6 +1547,36 @@ struct Login {
 }
 
 // ── Open-PR sweep query ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct IssueIndexResponse {
+    data: Option<IssueIndexData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct IssueIndexData {
+    repository: Option<IssueIndexRepository>,
+}
+
+#[derive(Deserialize)]
+struct IssueIndexRepository {
+    issues: Option<IssueIndexConnection>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueIndexConnection {
+    page_info: PageInfo,
+    nodes: Vec<IssueIndexNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueIndexNode {
+    number: u64,
+    updated_at: String,
+}
 
 #[derive(Deserialize)]
 struct OpenPrsResponse {
@@ -1651,6 +1709,7 @@ struct RawIssueNode {
     url: String,
     body: String,
     state: String,
+    updated_at: String,
     labels: NameConnection,
     assignees: LoginConnection,
     parent: Option<ParentIssueNode>,
@@ -1886,7 +1945,7 @@ mod tests {
         // real GitHub, because the parse tests replay recorded bodies (#168).
         for (name, query) in [
             ("ISSUES_QUERY", ISSUES_QUERY),
-            ("ISSUES_SINCE_QUERY", ISSUES_SINCE_QUERY),
+            ("ISSUE_INDEX_QUERY", ISSUE_INDEX_QUERY),
             ("OPEN_PRS_QUERY", OPEN_PRS_QUERY),
             ("PROJECTS_QUERY", PROJECTS_QUERY),
         ] {
@@ -1934,8 +1993,8 @@ mod tests {
     #[test]
     fn a_hydrate_reads_the_same_issue_fields_as_a_full_load() {
         // They share `RawIssueNode`, so a field missing here would fail every
-        // hydrate at parse time, which recorded bodies cannot catch (the since
-        // query once lost `avatarUrl` that way).
+        // hydrate at parse time, which recorded bodies cannot catch (a query once
+        // lost `avatarUrl` that way).
         let squeeze = |query: &str| query.split_whitespace().collect::<String>();
         assert!(
             squeeze(ISSUES_QUERY).contains(&squeeze(HYDRATE_ISSUE_SELECTION)),
@@ -1951,7 +2010,7 @@ mod tests {
         // since a nested connection also returns MERGED references.
         for (name, query) in [
             ("ISSUES_QUERY", ISSUES_QUERY),
-            ("ISSUES_SINCE_QUERY", ISSUES_SINCE_QUERY),
+            ("ISSUE_INDEX_QUERY", ISSUE_INDEX_QUERY),
             ("HYDRATE_ISSUE_SELECTION", HYDRATE_ISSUE_SELECTION),
         ] {
             let lowered = query.to_lowercase();
@@ -1963,15 +2022,12 @@ mod tests {
     }
 
     #[test]
-    fn issues_since_query_requests_assignee_avatar_url() {
-        // Regression guard: `parse_issues_response` (shared by the full and
-        // since queries) requires `avatarUrl` on every assignee. The since
-        // query used to omit it from its selection set, so any assigned issue
-        // in a delta page would fail to deserialize and silently error out the
-        // whole background refresh.
+    fn the_issue_index_stays_shallow() {
+        // Its whole point: `{ number updatedAt }` and nothing else, at every page.
+        let query: String = ISSUE_INDEX_QUERY.split_whitespace().collect();
         assert!(
-            ISSUES_SINCE_QUERY.contains("login avatarUrl"),
-            "ISSUES_SINCE_QUERY must request avatarUrl alongside login"
+            query.contains("nodes{numberupdatedAt}") && query.contains("states:[OPEN]"),
+            "the index must list open issues' numbers and stamps only: {ISSUE_INDEX_QUERY}"
         );
     }
 
@@ -1985,7 +2041,7 @@ mod tests {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": [ {
                     "number": 1, "title": "A Slice", "url": "https://x/1", "body": "",
-                    "state": "OPEN", "labels": { "nodes": [ { "name": "slice" } ] },
+                    "state": "OPEN", "updatedAt": "2026-11-09T10:00:00Z", "labels": { "nodes": [ { "name": "slice" } ] },
                     "assignees": { "nodes": [] }, "parent": null,
                     "blockedBy": { "nodes": [] }
                 } ]
