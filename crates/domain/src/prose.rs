@@ -110,24 +110,23 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
 }
 
 /// The text a reader of `body` sees as prose: Markdown rendered by a CommonMark
-/// parser, without HTML or code of any form. Each block ends its own line, since
-/// a phrase and its references must share one.
+/// parser, without HTML, code or link text, since `[#12](url)` may name another
+/// repository's issue. Each block ends its own line, since a phrase and its
+/// references must share one.
 fn rendered_prose(body: &str) -> String {
     let mut prose = String::new();
-    let mut code_blocks = 0_usize;
+    let mut hidden = 0_usize;
     for event in Parser::new(body) {
         match event {
-            Event::Start(Tag::CodeBlock(_)) => code_blocks += 1,
-            Event::End(TagEnd::CodeBlock) => code_blocks = code_blocks.saturating_sub(1),
-            Event::Text(text) if code_blocks == 0 => prose.push_str(&text),
+            Event::Start(Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. }) => hidden += 1,
+            Event::End(TagEnd::CodeBlock | TagEnd::Link | TagEnd::Image) => {
+                hidden = hidden.saturating_sub(1);
+            }
+            Event::Text(text) if hidden == 0 => prose.push_str(&text),
+            // A boundary, so text either side of it does not join into a keyword.
+            Event::Code(_) => prose.push(' '),
             // Inline tags stay on their line: `**Closes:** #12`.
-            Event::End(
-                TagEnd::Emphasis
-                | TagEnd::Strong
-                | TagEnd::Strikethrough
-                | TagEnd::Link
-                | TagEnd::Image,
-            ) => {}
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {}
             Event::SoftBreak | Event::HardBreak | Event::End(_) => prose.push('\n'),
             _ => {}
         }
@@ -394,7 +393,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_body_says_it_closes() {
-        let cases: [(&str, &str, Vec<u64>); 32] = [
+        let cases: [(&str, &str, Vec<u64>); 34] = [
             ("the reported wording", "- Closes #2217", vec![2217]),
             ("a colon", "- Closes: #2217", vec![2217]),
             ("any case", "FIXES #12.", vec![12]),
@@ -420,6 +419,12 @@ mod tests {
             ("a relation is no closing keyword", "Part of #12", vec![]),
             ("a bare mention", "Follow-up to #12", vec![]),
             ("inline code", "Use `Closes #12` to link", vec![]),
+            ("a keyword split by inline code", "Fi`x`xes #12", vec![]),
+            (
+                "a link to another repository",
+                "Closes [#12](https://github.com/other/repo/issues/12)",
+                vec![],
+            ),
             (
                 "a backtick inside inline code",
                 "``a ` Closes #12`` b",
