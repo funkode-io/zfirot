@@ -497,10 +497,12 @@ fn issues_changed_between(before: &[RawIssue], after: &[RawIssue]) -> HashSet<u6
         .collect()
 }
 
-/// An issue-side result with the issues a **Cascade** wrote while it was in flight
-/// (`written`) laid back over it. That write wins: this fetch may have read the
-/// issue before the PR merged, and would otherwise put a closed Slice back on the
-/// board. Issues keep their positions, so the overlay alone never reorders cards.
+/// An issue-side result with the issues another path wrote while it was in flight
+/// (`written`) laid back over it: a **Cascade**, or the other issue-side path. That
+/// write wins: this fetch may have read the issue before the PR merged, or before a
+/// reconcile dropped or corrected it, and would otherwise put a closed Slice or an
+/// older issue back on the board. Issues keep their positions, so the overlay alone
+/// never reorders cards.
 fn with_issues_written_meanwhile(
     fetched: &[RawIssue],
     written: &HashSet<u64>,
@@ -1155,9 +1157,10 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// found something. An unchanged repo hydrates nothing, repaints nothing and
     /// writes nothing.
     ///
-    /// Issue-side only: whatever the hot path wrote while this refresh was in
-    /// flight is adopted before the result is returned or cached, so a slower
-    /// structural write can never revert 15-second-fresh PR facts (ADR 0008).
+    /// Issue-side only: whatever the hot path or a reconcile wrote while this
+    /// refresh was in flight is adopted before the result is returned or cached, so
+    /// a slower structural write can never revert 15-second-fresh PR facts, nor
+    /// bring back an issue a reconcile dropped or corrected (ADR 0008).
     pub async fn structural_refresh_cached(
         &self,
         repo: &RepoRef,
@@ -1165,7 +1168,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     ) -> AppResult<BoardRefresh> {
         let start = self.freshest_snapshot(repo, snapshot).await?;
         let refresh = self.board.refresh(repo, &start).await?;
-        let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
+        let refresh = self.with_facts_written_since(repo, &start, refresh).await?;
         self.cache_issue_side_result(repo, &start, &refresh).await?;
         Ok(refresh)
     }
@@ -1291,13 +1294,15 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         Ok(cached.unwrap_or_else(|| base.clone()))
     }
 
-    /// Re-decide an issue-side refresh's outcome against everything the hot path
-    /// wrote since the fetch began, when the cache held `start`, so its result
-    /// carries the hot path's PR facts and **Cascade** rather than older ones. Only
-    /// writes made after `start` are protected: anything earlier was there for the
-    /// fetch to supersede. If a Cascade's read was the older one, the next index
-    /// sweep finds it out of date.
-    async fn with_hot_facts_since(
+    /// Re-decide an issue-side refresh's outcome against everything written since
+    /// the fetch began, when the cache held `start`, so its result carries the hot
+    /// path's PR facts and **Cascade**, and the issues the other issue-side path
+    /// wrote, rather than older ones: a structural refresh finishing after a
+    /// reconcile keeps what that reconcile dropped or corrected. Only writes made
+    /// after `start` are protected: anything earlier was there for the fetch to
+    /// supersede. If the other write's read was the older one, the next index sweep
+    /// finds it out of date.
+    async fn with_facts_written_since(
         &self,
         repo: &RepoRef,
         start: &BoardSnapshot,
@@ -1358,7 +1363,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     ) -> AppResult<BoardRefresh> {
         let start = self.freshest_snapshot(repo, snapshot).await?;
         let refresh = self.board.reload_issues(repo, &start).await?;
-        let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
+        let refresh = self.with_facts_written_since(repo, &start, refresh).await?;
         self.cache_issue_side_result(repo, &start, &refresh).await?;
         Ok(refresh)
     }
