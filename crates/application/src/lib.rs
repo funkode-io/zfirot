@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    classify_issue, classify_on_board, has_unreferenced_blocked_by, parent_of,
+    classify_issue, classify_on_board, has_unreferenced_blocked_by, lane_parent_of,
     parse_blockers_from_body, resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode,
     DependencyRef, GitHubToken, IssueClassification, LinkedPrRef, Prd, PrdRef, Project, RawIssue,
     RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
@@ -166,7 +166,8 @@ pub struct OtherIssue {
 ///   ready for the Kanban columns.
 /// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
 /// - `other`  — suggested and unclassified issues with no promoting Parent, for
-///   the "other open issues" bucket.
+///   the "other open issues" bucket. A Suggested PRD stays here even while it
+///   heads a Lane, since this is where it can be confirmed.
 /// - `unlinked_prs` — **Unlinked PRs**: open PRs on no Slice card, in sweep order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedBoard {
@@ -522,16 +523,23 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
                     number: raw.number,
                     title: raw.title.clone(),
                     url: raw.url.clone(),
+                    suggested: classify_issue(raw) == IssueClassification::SuggestedPrd,
                 },
             )
         })
         .collect();
 
     // The first classification pass, so the second can promote an issue whose
-    // Parent is one of these PRDs.
+    // Parent is one of these PRDs or Suggested PRDs.
     let open_prds: HashSet<u64> = raw_issues
         .iter()
-        .filter(|raw| !raw.closed && classify_issue(raw) == IssueClassification::Prd)
+        .filter(|raw| {
+            !raw.closed
+                && matches!(
+                    classify_issue(raw),
+                    IssueClassification::Prd | IssueClassification::SuggestedPrd
+                )
+        })
         .map(|raw| raw.number)
         .collect();
 
@@ -564,7 +572,8 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
                     )
                 };
                 // Look the Parent up among the issues in this board.
-                let prd = parent_of(&raw).and_then(|number| issue_by_number.get(&number).cloned());
+                let prd = lane_parent_of(&raw, &open_prds)
+                    .and_then(|number| issue_by_number.get(&number).cloned());
                 slices.push(RawSlice {
                     number: raw.number,
                     title: raw.title,

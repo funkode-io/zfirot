@@ -8,8 +8,9 @@ use super::{state_badge_class, state_label, BoardColumn, SliceCard};
 
 /// One swimlane: a collapsible PRD header above the Ready / WIP / Blocked
 /// columns holding that PRD's Slices. A lane with no PRD (`prd` is `None`)
-/// renders a plain "No PRD" header. Built on the daisyUI `collapse` component
-/// (a checkbox toggle + `collapse-arrow` chevron), matching the "other open
+/// renders a plain "No PRD" header, and a **Suggested PRD**'s header is dimmed and
+/// badged "Unconfirmed", so a guess is never mistaken for a fact. Built on the
+/// daisyUI `collapse` component (a checkbox toggle + `collapse-arrow` chevron), matching the "other open
 /// issues" accordion — so the PRD link is a sibling of the toggle, never nested
 /// inside a `<button>`. The lane starts expanded and the whole header toggles it.
 /// Collapsing the lane hides the columns and summarises them as coloured
@@ -78,9 +79,17 @@ pub fn PrdLane(
                         // keeps that click from also toggling the lane.
                         a {
                             class: "link link-hover font-semibold truncate relative z-10",
+                            class: if prd.suggested { "italic opacity-70" },
                             href: "{prd.url}",
                             onclick: move |e: Event<MouseData>| e.stop_propagation(),
                             "#{prd.number} {prd.title}"
+                        }
+                        if prd.suggested {
+                            span {
+                                class: "badge badge-sm badge-warning badge-outline shrink-0",
+                                title: "Reads like a PRD by its headings, but has no \"prd\" label",
+                                "Unconfirmed"
+                            }
                         }
                         span { class: "badge badge-sm badge-neutral shrink-0", "{slices_pill_label(total_slices)}" }
                     },
