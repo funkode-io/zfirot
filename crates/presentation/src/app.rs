@@ -159,6 +159,10 @@ pub fn App() -> Element {
     // fails, shown above the board; cleared on a successful confirm. Same
     // Invalid-never-lands-here rule as `assign_error`.
     let mut confirm_error = use_signal(|| Option::<FeatureActionError>::None);
+    // `true` from a Confirm or Veto click until its label and refresh have landed.
+    // Confirm then Veto in that window would add both labels, and `prd` would
+    // silently beat the later Veto, so only one decision runs at a time.
+    let mut deciding = use_signal(|| false);
     // Set to a client-safe message when signing out fails, shown above the
     // current screen (Home or Board); cleared on a successful sign-out.
     let mut sign_out_error = use_signal(|| Option::<String>::None);
@@ -788,6 +792,9 @@ pub fn App() -> Element {
 
     let on_confirm = use_callback(
         move |(number, classification): (u64, IssueClassification)| {
+            if *deciding.peek() {
+                return;
+            }
             // Taken together and before the mutation: the user may have opened
             // another board by the time GitHub answers.
             let open_board = match view.read_unchecked().as_ref() {
@@ -797,6 +804,7 @@ pub fn App() -> Element {
                 _ => None,
             };
             if let Some((repo, snapshot)) = open_board {
+                deciding.set(true);
                 spawn(async move {
                     match confirm_classification(&repo, number, &classification).await {
                         Ok(()) => {
@@ -816,6 +824,7 @@ pub fn App() -> Element {
                         Err(error) => confirm_error
                             .set(feature_action_error(error, token_error, nav, reload).await),
                     }
+                    deciding.set(false);
                 });
             }
         },
@@ -823,11 +832,15 @@ pub fn App() -> Element {
 
     // The negative counterpart of `on_confirm`, sharing its error banner.
     let on_veto = use_callback(move |number: u64| {
+        if *deciding.peek() {
+            return;
+        }
         let open_board = match view.read_unchecked().as_ref() {
             Some(View::Board { repo, snapshot, .. }) => Some((repo.clone(), (**snapshot).clone())),
             _ => None,
         };
         if let Some((repo, snapshot)) = open_board {
+            deciding.set(true);
             spawn(async move {
                 match veto_suggested_prd(&repo, number).await {
                     Ok(()) => {
@@ -847,6 +860,7 @@ pub fn App() -> Element {
                     Err(error) => confirm_error
                         .set(feature_action_error(error, token_error, nav, reload).await),
                 }
+                deciding.set(false);
             });
         }
     });
@@ -1063,6 +1077,7 @@ pub fn App() -> Element {
                             on_assign,
                             on_confirm,
                             on_veto,
+                            deciding: deciding(),
                         }
                         if !board.unlinked_prs.is_empty() {
                             UnlinkedPrs { prs: board.unlinked_prs.clone() }
@@ -1861,6 +1876,7 @@ fn Board(
     on_assign: EventHandler<u64>,
     on_confirm: EventHandler<(u64, IssueClassification)>,
     on_veto: EventHandler<u64>,
+    deciding: bool,
 ) -> Element {
     let lanes = group_into_lanes(slices);
     // The board-wide "highlighted issue", shared across lanes so a dependency
@@ -1885,6 +1901,7 @@ fn Board(
                     on_assign,
                     on_confirm,
                     on_veto,
+                    deciding,
                     highlighted: highlighted(),
                     on_highlight,
                 }

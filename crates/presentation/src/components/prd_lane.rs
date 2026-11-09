@@ -19,7 +19,8 @@ use super::{state_badge_class, state_label, BoardColumn, SliceCard};
 ///
 /// A Suggested PRD's header also offers **Confirm** and **Veto**, emitted through
 /// `on_confirm` and `on_veto` with no dialog: each costs one label on GitHub, and
-/// removing that label undoes it.
+/// removing that label undoes it. `deciding` disables both while a decision is in
+/// flight.
 ///
 /// `highlighted` / `on_highlight` carry the board-wide "highlighted issue" so a
 /// dependency badge can highlight its referenced card even in another lane.
@@ -31,6 +32,7 @@ pub fn PrdLane(
     on_assign: EventHandler<u64>,
     on_confirm: EventHandler<(u64, IssueClassification)>,
     on_veto: EventHandler<u64>,
+    deciding: bool,
     highlighted: Option<u64>,
     on_highlight: EventHandler<Option<u64>>,
 ) -> Element {
@@ -100,6 +102,7 @@ pub fn PrdLane(
                             // above, so a click decides without toggling the lane.
                             button {
                                 class: "btn btn-xs btn-primary shrink-0 relative z-10",
+                                disabled: deciding,
                                 title: "Add the \"prd\" label",
                                 "aria-label": "Confirm #{prd.number} as a PRD",
                                 onclick: move |e: Event<MouseData>| {
@@ -110,6 +113,7 @@ pub fn PrdLane(
                             }
                             button {
                                 class: "btn btn-xs btn-ghost shrink-0 relative z-10",
+                                disabled: deciding,
                                 title: "Add the \"not-a-prd\" label. Remove it on GitHub to undo.",
                                 "aria-label": "Veto #{prd.number} as a PRD",
                                 onclick: move |e: Event<MouseData>| {
@@ -329,7 +333,9 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    use dioxus::core::{ElementId, Event as CoreEvent, Mutation, Mutations, VirtualDom};
+    use dioxus::core::{
+        AttributeValue, ElementId, Event as CoreEvent, Mutation, Mutations, VirtualDom,
+    };
     use dioxus::html::{
         set_event_converter, PlatformEventData, SerializedHtmlEventConverter, SerializedMouseData,
     };
@@ -356,6 +362,7 @@ mod tests {
     #[derive(Clone, PartialEq, Props)]
     struct HarnessProps {
         prd: Option<PrdRef>,
+        deciding: bool,
         decisions: Decisions,
     }
 
@@ -377,6 +384,7 @@ mod tests {
                     on_veto.0.lock().unwrap().push(Decision::Vetoed(number));
                 },
                 highlighted: None,
+                deciding: props.deciding,
                 on_highlight: |_| {},
             }
         }
@@ -391,6 +399,7 @@ mod tests {
             Harness,
             HarnessProps {
                 prd,
+                deciding: false,
                 decisions: decisions.clone(),
             },
         );
@@ -433,6 +442,39 @@ mod tests {
                 Decision::Vetoed(LANE_PRD),
             ]
         );
+    }
+
+    fn disabled_buttons(deciding: bool) -> usize {
+        let mut dom = VirtualDom::new_with_props(
+            Harness,
+            HarnessProps {
+                prd: Some(prd(true)),
+                deciding,
+                decisions: Decisions(Arc::new(Mutex::new(Vec::new()))),
+            },
+        );
+        let mut mutations = Mutations::default();
+        dom.rebuild(&mut mutations);
+        mutations
+            .edits
+            .iter()
+            .filter(|edit| {
+                matches!(
+                    edit,
+                    Mutation::SetAttribute {
+                        name: "disabled",
+                        value: AttributeValue::Bool(true),
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn both_decisions_are_disabled_only_while_one_is_in_flight() {
+        assert_eq!(disabled_buttons(true), 2);
+        assert_eq!(disabled_buttons(false), 0);
     }
 
     #[test]
