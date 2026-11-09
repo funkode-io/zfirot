@@ -824,6 +824,133 @@ async fn classify_board_drops_a_suggested_lane_whose_body_no_longer_matches() {
     assert!(lane_shape(&classify_issues(issues).await).is_empty());
 }
 
+const NOT_A_PRD_LABEL: &str = "not-a-prd";
+
+fn with_label(mut issues: Vec<RawIssue>, number: u64, label: &str) -> Vec<RawIssue> {
+    issues
+        .iter_mut()
+        .find(|issue| issue.number == number)
+        .expect("the fixture should hold this issue")
+        .labels
+        .push(label.to_string());
+    issues
+}
+
+fn tray_of(board: &ClassifiedBoard) -> Vec<u64> {
+    board.other.iter().map(|issue| issue.number).collect()
+}
+
+/// A `not-a-prd` label beats the heading heuristic, but when in doubt the board
+/// shows: natively linked children stay on their Lane, labelled or not, and a
+/// labelled prose-parented Slice moves to "No PRD". An unlabelled prose child has
+/// nothing left saying it is planned work, so it is in the tray, still on screen.
+#[tokio::test]
+async fn classify_board_keeps_a_vetoed_issues_work_visible() {
+    let issues = with_label(
+        suggested_prd_issues(PRD_TEMPLATE),
+        SUGGESTED_PRD,
+        NOT_A_PRD_LABEL,
+    );
+    let board = classify_issues(issues).await;
+
+    assert_eq!(
+        lane_shape(&board),
+        vec![
+            (Some(SUGGESTED_PRD), false, vec![303, 304]),
+            (Some(CONFIDENT_PRD), false, vec![311, 312]),
+            (None, false, vec![302]),
+        ]
+    );
+    assert_eq!(tray_of(&board), vec![SUGGESTED_PRD, 320, 301, 321]);
+    assert_eq!(
+        board.other[0].classification,
+        IssueClassification::Unclassified,
+        "a vetoed issue carries no suggestion"
+    );
+}
+
+/// With no natively linked child to hold it open, a vetoed issue heads no Lane, and
+/// nothing about it is lost: its issues are all still on screen.
+#[tokio::test]
+async fn classify_board_gives_a_vetoed_issue_with_only_prose_children_no_lane() {
+    let board = classify_issues(vec![
+        raw_slice_issue(SUGGESTED_PRD, PRD_TEMPLATE, &[NOT_A_PRD_LABEL], false),
+        raw_slice_issue(301, "## Parent\n\n#300\n", &[], false),
+        raw_slice_issue(302, "## Parent\n\n#300\n", &["ready-for-agent"], false),
+    ])
+    .await;
+
+    assert_eq!(lane_shape(&board), vec![(None, false, vec![302])]);
+    assert_eq!(tray_of(&board), vec![SUGGESTED_PRD, 301]);
+}
+
+/// The veto stops every guess about the issue, not just the PRD one, but its own
+/// Parent still applies: it says nothing about what the issue belongs to.
+#[tokio::test]
+async fn classify_board_reads_a_vetoed_issue_as_an_ordinary_issue() {
+    let slice_headings = "## What to build\n\nX.\n\n## Acceptance criteria\n\n- Y\n";
+    let board = classify_issues(vec![
+        raw_slice_issue(600, "The plan.", &["prd"], false),
+        raw_slice_issue(
+            601,
+            &format!("{PRD_TEMPLATE}\n## Parent\n\n#600\n"),
+            &[NOT_A_PRD_LABEL],
+            false,
+        ),
+        raw_slice_issue(602, slice_headings, &[NOT_A_PRD_LABEL], false),
+    ])
+    .await;
+
+    assert_eq!(lane_shape(&board), vec![(Some(600), false, vec![601])]);
+    assert_eq!(tray_of(&board), vec![602]);
+    assert_eq!(
+        board.other[0].classification,
+        IssueClassification::Unclassified
+    );
+}
+
+/// `prd` and `not-a-prd` together contradict each other, and the explicit `prd`
+/// wins, so the Lane is exactly a labelled PRD's.
+#[tokio::test]
+async fn classify_board_resolves_prd_and_not_a_prd_in_favour_of_prd() {
+    let labelled = with_label(suggested_prd_issues(PRD_TEMPLATE), SUGGESTED_PRD, "prd");
+    let both = with_label(labelled.clone(), SUGGESTED_PRD, NOT_A_PRD_LABEL);
+
+    assert_eq!(classify_issues(both).await, classify_issues(labelled).await);
+}
+
+/// The label is the only record: the board is a function of the issues, so a board
+/// read without it is the board from before it was added.
+#[tokio::test]
+async fn classify_board_brings_the_suggestion_back_when_the_label_is_removed() {
+    let before = suggested_prd_issues(PRD_TEMPLATE);
+    let mut issues = with_label(before.clone(), SUGGESTED_PRD, NOT_A_PRD_LABEL);
+    assert_ne!(
+        classify_issues(issues.clone()).await,
+        classify_issues(before.clone()).await
+    );
+
+    issues
+        .iter_mut()
+        .for_each(|issue| issue.labels.retain(|label| label != NOT_A_PRD_LABEL));
+
+    assert_eq!(classify_issues(issues).await, classify_issues(before).await);
+}
+
+/// A native child of any other open issue still stays off the board: only a
+/// `not-a-prd` Parent, which someone looked at, keeps its children visible.
+#[tokio::test]
+async fn classify_board_still_keeps_a_bugs_native_sub_task_off_the_board() {
+    let board = classify_issues(vec![
+        raw_slice_issue(320, "A bug report.", &["bug"], false),
+        native_parented_issue(321, 320, ""),
+    ])
+    .await;
+
+    assert!(lane_shape(&board).is_empty());
+    assert_eq!(tray_of(&board), vec![320, 321]);
+}
+
 /// Both passes read only their input, so the board does not depend on the order
 /// GitHub lists issues in beyond first-seen ordering: a child listed before its
 /// Suggested PRD still lands on its Lane.

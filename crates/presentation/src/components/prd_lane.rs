@@ -9,7 +9,8 @@ use super::{state_badge_class, state_label, BoardColumn, SliceCard};
 /// One swimlane: a collapsible PRD header above the Ready / WIP / Blocked
 /// columns holding that PRD's Slices. A lane with no PRD (`prd` is `None`)
 /// renders a plain "No PRD" header, and a **Suggested PRD**'s header is dimmed and
-/// badged "Unconfirmed", so a guess is never mistaken for a fact. Built on the
+/// badged "Unconfirmed", with guidance and a link for settling it on GitHub, so a
+/// guess is never mistaken for a fact. Built on the
 /// daisyUI `collapse` component (a checkbox toggle + `collapse-arrow` chevron), matching the "other open
 /// issues" accordion — so the PRD link is a sibling of the toggle, never nested
 /// inside a `<button>`. The lane starts expanded and the whole header toggles it.
@@ -29,6 +30,7 @@ pub fn PrdLane(
     on_highlight: EventHandler<Option<u64>>,
 ) -> Element {
     let total_slices = slices.len();
+    let suggested = prd.as_ref().is_some_and(|prd| prd.suggested);
     let graph = graph_view.then(|| {
         derive_lane_graph(&DomainPrdLane {
             prd: prd.clone(),
@@ -64,14 +66,18 @@ pub fn PrdLane(
         .collect();
 
     rsx! {
-        section { class: "collapse collapse-arrow bg-base-200 rounded-box group",
+        section {
+            class: "collapse collapse-arrow bg-base-200 rounded-box group",
+            class: if suggested { "border-l-4 border-warning" },
             // Checkbox toggle drives the daisyUI collapse. Starts `checked` so
             // the lane opens expanded. `aria-label` names the control for
             // assistive tech. The `group` on the section lets the collapsed-only
             // summary badges hide themselves via `group-has-[:checked]:hidden`
             // when this checkbox is checked (expanded).
             input { r#type: "checkbox", checked: true, "aria-label": "Toggle lane" }
-            div { class: "collapse-title flex min-w-0 items-center gap-3",
+            div {
+                class: "collapse-title flex min-w-0 items-center gap-3",
+                class: if suggested { "flex-wrap" },
                 match prd {
                     Some(prd) => rsx! {
                         // `relative z-10` lifts the link above the collapse
@@ -92,6 +98,17 @@ pub fn PrdLane(
                             }
                         }
                         span { class: "badge badge-sm badge-neutral shrink-0", "{slices_pill_label(total_slices)}" }
+                        if let Some(guidance) = guidance_for(&prd) {
+                            p { class: "basis-full text-xs font-normal",
+                                "{guidance} "
+                                a {
+                                    class: "link relative z-10",
+                                    href: "{prd.url}",
+                                    onclick: move |e: Event<MouseData>| e.stop_propagation(),
+                                    "Set the label on GitHub"
+                                }
+                            }
+                        }
                     },
                     None => rsx! {
                         span { class: "font-semibold opacity-70", "No PRD" }
@@ -134,6 +151,16 @@ pub fn PrdLane(
             }
         }
     }
+}
+
+/// What a PRD's Lane header tells the user about settling it, if anything: only a
+/// Suggested PRD has a guess to settle. The board only reads these labels, so that
+/// is theirs to do on GitHub.
+fn guidance_for(prd: &PrdRef) -> Option<&'static str> {
+    prd.suggested.then_some(
+        "Guessed from its headings. If this is a PRD, add the \"prd\" label on GitHub. If it \
+         is not, add \"not-a-prd\": it stops being suggested, and its Slices stay visible.",
+    )
 }
 
 fn slices_pill_label(total_slices: usize) -> String {
@@ -292,5 +319,32 @@ fn GraphLane(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prd(suggested: bool) -> PrdRef {
+        PrdRef {
+            number: 12,
+            title: "A plan".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/12".to_string(),
+            suggested,
+        }
+    }
+
+    #[test]
+    fn a_suggested_prd_is_told_which_labels_to_set() {
+        let guidance = guidance_for(&prd(true)).expect("a guess has something to settle");
+
+        assert!(guidance.contains("\"prd\" label"), "{guidance}");
+        assert!(guidance.contains("\"not-a-prd\""), "{guidance}");
+    }
+
+    #[test]
+    fn a_confident_prd_has_no_guidance() {
+        assert_eq!(guidance_for(&prd(false)), None);
     }
 }

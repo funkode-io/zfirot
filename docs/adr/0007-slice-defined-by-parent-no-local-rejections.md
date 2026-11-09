@@ -25,6 +25,11 @@ PR closing it left the plan's board. It sits on a Lane headed by that parent,
 where a labelled sub-issue already was. The rejection of "any open issue" below
 stands, because a bug that is not a Slice still promotes nothing.
 
+**Amended by #178:** the board does not write these labels. A Suggested PRD's Lane
+header shows guidance and a link instead of Confirm and Veto actions, and the user
+sets `prd` or `not-a-prd` on GitHub. A `not-a-prd` label is read before the heading
+heuristic and never hides work: when in doubt, the board shows.
+
 ## Considered options
 
 - **Requiring the parent to be a confident (`prd`-labelled) PRD.** Rejected: the

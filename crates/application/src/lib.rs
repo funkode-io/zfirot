@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    classify_issue, classify_on_board, has_unreferenced_blocked_by, lane_parent_of,
+    classify_issue, classify_on_board, has_unreferenced_blocked_by, has_veto, lane_parent_of,
     parse_blockers_from_body, resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode,
     DependencyRef, GitHubToken, IssueClassification, IssueStamp, LinkedPrRef, Prd, PrdRef, Project,
     RawIssue, RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
@@ -610,7 +610,11 @@ fn unlinked_prs(linked_prs: &[RawLinkedPr], slices: &[Slice]) -> Vec<LinkedPrRef
 /// board does not hold. Repeated until nothing new is found, so promotion depends
 /// on neither the depth of a split nor the order of the board, and a Parent cycle
 /// with no plan behind it promotes nothing.
-fn open_plan(raw_issues: &[RawIssue], open_numbers: &HashSet<u64>) -> HashSet<u64> {
+fn open_plan(
+    raw_issues: &[RawIssue],
+    open_numbers: &HashSet<u64>,
+    open_vetoed: &HashSet<u64>,
+) -> HashSet<u64> {
     let open_issues = || raw_issues.iter().filter(|raw| !raw.closed);
     let mut plan: HashSet<u64> = open_issues()
         .filter(|raw| {
@@ -624,7 +628,10 @@ fn open_plan(raw_issues: &[RawIssue], open_numbers: &HashSet<u64>) -> HashSet<u6
     loop {
         let found: Vec<u64> = open_issues()
             .filter(|raw| !plan.contains(&raw.number))
-            .filter(|raw| classify_on_board(raw, open_numbers, &plan) == IssueClassification::Slice)
+            .filter(|raw| {
+                classify_on_board(raw, open_numbers, &plan, open_vetoed)
+                    == IssueClassification::Slice
+            })
             .map(|raw| raw.number)
             .collect();
         if found.is_empty() {
@@ -675,7 +682,12 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
         })
         .collect();
 
-    let open_plan = open_plan(raw_issues, &open_numbers);
+    let open_vetoed: HashSet<u64> = raw_issues
+        .iter()
+        .filter(|raw| !raw.closed && has_veto(raw))
+        .map(|raw| raw.number)
+        .collect();
+    let open_plan = open_plan(raw_issues, &open_numbers, &open_vetoed);
 
     let mut slices = Vec::new();
     let mut prds = Vec::new();
@@ -686,7 +698,7 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
             continue;
         }
 
-        match classify_on_board(&raw, &open_numbers, &open_plan) {
+        match classify_on_board(&raw, &open_numbers, &open_plan, &open_vetoed) {
             IssueClassification::Slice => {
                 let body_str = raw.body.as_deref().unwrap_or("");
                 // Use native blockers when present; otherwise fall back to
