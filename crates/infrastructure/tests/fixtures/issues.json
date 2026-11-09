@@ -13,6 +13,7 @@
             "url": "https://github.com/funkode-io/zfirot/issues/1",
             "body": "## Problem Statement\n\nAgents need a dashboard.\n\n## User Stories\n\n- As an agent…\n",
             "state": "OPEN",
+            "updatedAt": "2026-11-09T10:00:00Z",
             "labels": {
               "nodes": [
                 {
@@ -34,6 +35,7 @@
             "url": "https://github.com/funkode-io/zfirot/issues/3",
             "body": "",
             "state": "OPEN",
+            "updatedAt": "2026-11-09T10:00:00Z",
             "labels": {
               "nodes": [
                 {
@@ -74,6 +76,7 @@
             "url": "https://github.com/funkode-io/zfirot/issues/5",
             "body": "## What to build\n\nClassify issues.\n\n## Parent\n\nfunkode-io/zfirot#1\n",
             "state": "OPEN",
+            "updatedAt": "2026-11-09T10:00:00Z",
             "labels": {
               "nodes": [
                 {
@@ -104,6 +107,7 @@
             "url": "https://github.com/funkode-io/zfirot/issues/9",
             "body": "## What to build\n\nA dark-mode toggle button.\n\n## Acceptance criteria\n\n- [ ] Toggle persists\n",
             "state": "OPEN",
+            "updatedAt": "2026-11-09T10:00:00Z",
             "labels": {
               "nodes": []
             },
@@ -121,6 +125,7 @@
             "url": "https://github.com/funkode-io/zfirot/issues/2",
             "body": "",
             "state": "CLOSED",
+            "updatedAt": "2026-11-09T10:00:00Z",
             "labels": {
               "nodes": [
                 {

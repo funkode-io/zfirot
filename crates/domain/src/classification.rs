@@ -82,6 +82,21 @@ pub struct RawIssue {
     /// `true` when this issue is a native sub-issue child of an issue that
     /// carries the `prd` label.
     pub is_native_child_of_prd: bool,
+    /// GitHub's `updatedAt` as read with this detail: the stamp an issue-index
+    /// **Sweep** is compared against to decide whether this issue must be
+    /// **Hydrated** again. Compared for equality only, so it stays GitHub's own
+    /// RFC-3339 text.
+    pub updated_at: String,
+}
+
+/// One line of the issue-index **Sweep**: an open issue's number and its last
+/// updated stamp, and nothing else, which is what keeps that sweep shallow. The
+/// index is the authority on which issues exist (ADR 0008).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueStamp {
+    pub number: u64,
+    /// GitHub's `updatedAt`, comparable with [`RawIssue::updated_at`].
+    pub updated_at: String,
 }
 
 /// Classify a raw issue using the two-tier strategy plus an unclassified fallback.
@@ -307,6 +322,7 @@ mod tests {
             assignee: None,
             assignee_avatar_url: None,
             is_native_child_of_prd: false,
+            updated_at: String::new(),
         }
     }
 
@@ -343,6 +359,7 @@ mod tests {
     fn native_child_of_prd_classifies_as_slice() {
         let raw = RawIssue {
             is_native_child_of_prd: true,
+            updated_at: String::new(),
             ..blank_raw(4)
         };
         assert_eq!(classify_issue(&raw), IssueClassification::Slice);
@@ -354,6 +371,7 @@ mod tests {
         let raw = RawIssue {
             labels: vec!["prd".to_string()],
             is_native_child_of_prd: true,
+            updated_at: String::new(),
             ..blank_raw(5)
         };
         assert_eq!(classify_issue(&raw), IssueClassification::Prd);

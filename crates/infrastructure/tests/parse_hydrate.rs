@@ -11,7 +11,7 @@ fn issue_node(number: u64, state: &str) -> String {
         r#"{{
             "number": {number}, "title": "Slice {number}",
             "url": "https://github.com/funkode-io/zfirot/issues/{number}",
-            "body": "", "state": "{state}",
+            "body": "", "state": "{state}", "updatedAt": "2026-11-09T10:00:00Z",
             "labels": {{ "nodes": [ {{ "name": "slice" }} ] }},
             "assignees": {{ "nodes": [ {{ "login": "colleague", "avatarUrl": "https://a/1" }} ] }},
             "parent": null,

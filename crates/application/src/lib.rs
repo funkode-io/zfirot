@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use domain::{
     classify_issue, classify_on_board, has_unreferenced_blocked_by, parent_of,
     parse_blockers_from_body, resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode,
-    DependencyRef, GitHubToken, IssueClassification, LinkedPrRef, Prd, PrdRef, Project, RawIssue,
-    RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
+    DependencyRef, GitHubToken, IssueClassification, IssueStamp, LinkedPrRef, Prd, PrdRef, Project,
+    RawIssue, RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,22 +41,28 @@ pub trait GitHubPort: Send + Sync {
     /// and [`classify`] joins its result onto the issues by issue number.
     async fn sweep_open_prs(&self, repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>>;
 
-    /// Load issues updated at or after `since`, including closed ones so close
-    /// transitions can be removed from retained snapshots.
+    /// **Sweep** the repo's issue index: every open issue's number and last-updated
+    /// stamp, with no other detail.
     ///
-    /// The default is a **safe full-load fallback**: it ignores `since` and
-    /// delegates to [`load_issues`](Self::load_issues), whose result (all issues,
-    /// closed included) is a superset of the requested delta — so the contract
-    /// still holds and close transitions remain observable; only the delta
-    /// optimization is forfeited. Adapters override this to fetch just the delta
-    /// (e.g. GitHub's `filterBy: { since }`).
-    async fn load_issues_since(
-        &self,
-        repo: &RepoRef,
-        since: DateTime<Utc>,
-    ) -> AppResult<Vec<RawIssue>> {
-        let _ = since;
-        self.load_issues(repo).await
+    /// The result is *authoritative* over which issues exist: one absent from it
+    /// has been closed, deleted or transferred, and is dropped from the board. The
+    /// **structural** refresh runs it every 60 seconds and **Hydrates** only the
+    /// numbers that are new or whose stamp moved (ADR 0008).
+    ///
+    /// The default is a **safe full-load fallback**: it derives the index from
+    /// [`load_issues`](Self::load_issues), which is correct but forfeits the sweep's
+    /// shallowness. Adapters override this to fetch just the index.
+    async fn sweep_open_issues(&self, repo: &RepoRef) -> AppResult<Vec<IssueStamp>> {
+        Ok(self
+            .load_issues(repo)
+            .await?
+            .into_iter()
+            .filter(|issue| !issue.closed)
+            .map(|issue| IssueStamp {
+                number: issue.number,
+                updated_at: issue.updated_at,
+            })
+            .collect())
     }
 
     /// **Hydrate** specific issues by number: their full detail, in as few
@@ -114,12 +120,8 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
         (**self).sweep_open_prs(repo).await
     }
 
-    async fn load_issues_since(
-        &self,
-        repo: &RepoRef,
-        since: DateTime<Utc>,
-    ) -> AppResult<Vec<RawIssue>> {
-        (**self).load_issues_since(repo, since).await
+    async fn sweep_open_issues(&self, repo: &RepoRef) -> AppResult<Vec<IssueStamp>> {
+        (**self).sweep_open_issues(repo).await
     }
 
     async fn hydrate_issues(&self, repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
@@ -182,7 +184,8 @@ pub struct ClassifiedBoard {
 /// another version fails to deserialize, so the cache adapter discards it and
 /// the board cold-loads instead of being mis-read (ADR 0008). Version 2 is the
 /// split into two independently-owned collections — issues and Linked PRs.
-const SNAPSHOT_FORMAT_VERSION: u32 = 2;
+/// Version 3 stamps each issue with the `updatedAt` an index **Sweep** compares.
+const SNAPSHOT_FORMAT_VERSION: u32 = 3;
 
 /// Reject a stored snapshot written by another version of the format, so an
 /// older shape is discarded rather than silently half-read.
@@ -215,7 +218,9 @@ pub struct BoardSnapshot {
     raw_issues: Vec<RawIssue>,
     /// Every open Linked PR of the repo, as the last sweep reported it.
     linked_prs: Vec<RawLinkedPr>,
-    /// The UTC timestamp captured at fetch start.
+    /// When the issue side last read GitHub, captured at fetch start. Only ever
+    /// shown to the user: what needs re-reading is decided by each issue's own
+    /// stamp, not by this.
     pub fetched_at: DateTime<Utc>,
 }
 
@@ -233,28 +238,28 @@ impl BoardSnapshot {
         }
     }
 
+    /// Whether the two paint the same board. An issue's stamp is deliberately not
+    /// a fact: a comment moves it and changes nothing on screen, so it must not
+    /// repaint. Closed issues paint nothing either.
     fn same_facts_as(&self, other: &Self) -> bool {
-        self.raw_issues == other.raw_issues && self.linked_prs == other.linked_prs
+        self.linked_prs == other.linked_prs
+            && same_open_issue_facts(&self.raw_issues, &other.raw_issues)
     }
 
     /// This snapshot with its **issue** collection replaced — the write of the
     /// structural and safety-net paths, which own the issues and nothing else.
-    /// `fetched_at` moves with it, since it is the issue-side watermark.
     fn with_issues(&self, raw_issues: Vec<RawIssue>, fetched_at: DateTime<Utc>) -> Self {
         Self::new(raw_issues, self.linked_prs.clone(), fetched_at)
     }
 
     /// This snapshot with its **Linked PR** collection replaced — the hot path's
-    /// own write. `fetched_at` deliberately does not move: the hot path sweeps no
-    /// issues, so advancing the issue-side watermark would skip issue changes the
-    /// structural path has not seen yet (ADR 0008).
+    /// own write. `fetched_at` does not move, since it sweeps no issues.
     fn with_linked_prs(&self, linked_prs: Vec<RawLinkedPr>) -> Self {
         Self::new(self.raw_issues.clone(), linked_prs, self.fetched_at)
     }
 
     /// This snapshot with a **Cascade**'s answer written over the issues it asked
-    /// for. `fetched_at` stays put for the same reason as in
-    /// [`Self::with_linked_prs`]: those few issues say nothing about the rest.
+    /// for. `fetched_at` stays put: those few issues say nothing about the rest.
     fn with_hydrated_issues(&self, requested: &[u64], hydrated: &[RawIssue]) -> Self {
         Self::new(
             merge_hydrated_issues(&self.raw_issues, requested, hydrated),
@@ -299,9 +304,8 @@ pub enum BoardRefresh {
     /// The fetched facts differ from the retained snapshot: repaint with `view`.
     Changed(LoadedBoard),
     /// The fetched facts match the retained snapshot: keep the current UI as-is,
-    /// but adopt this snapshot so its advanced `fetched_at` moves the next delta
-    /// `since` window forward (in memory and on disk) instead of re-fetching the
-    /// same growing window every time.
+    /// but adopt this snapshot, which may carry stamps that moved without changing
+    /// anything on screen.
     Unchanged(BoardSnapshot),
 }
 
@@ -331,9 +335,41 @@ fn same_open_prs(left: &[RawLinkedPr], right: &[RawLinkedPr]) -> bool {
             .all(|linked| by_number.get(&linked.pr.number) == Some(&linked))
 }
 
-fn merge_issues(retained: &[RawIssue], delta: &[RawIssue]) -> Vec<RawIssue> {
+/// Whether two issue collections hold the same open issues in the same order,
+/// stamps aside (see [`BoardSnapshot::same_facts_as`]).
+fn same_open_issue_facts(left: &[RawIssue], right: &[RawIssue]) -> bool {
+    let open = |issues: &'_ [RawIssue]| -> Vec<RawIssue> {
+        issues
+            .iter()
+            .filter(|issue| !issue.closed)
+            .map(|issue| RawIssue {
+                updated_at: String::new(),
+                ..issue.clone()
+            })
+            .collect()
+    };
+    open(left) == open(right)
+}
+
+/// The numbers an index **Sweep** says must be **Hydrated**: those new to the
+/// board or whose stamp moved. Sorted, as [`GitHubPort::hydrate_issues`] expects.
+fn stale_issues(retained: &[RawIssue], index: &[IssueStamp]) -> Vec<u64> {
+    let known: HashMap<u64, &str> = retained
+        .iter()
+        .filter(|issue| !issue.closed)
+        .map(|issue| (issue.number, issue.updated_at.as_str()))
+        .collect();
+    let stale: BTreeSet<u64> = index
+        .iter()
+        .filter(|stamp| known.get(&stamp.number) != Some(&stamp.updated_at.as_str()))
+        .map(|stamp| stamp.number)
+        .collect();
+    stale.into_iter().collect()
+}
+
+fn merge_issues(retained: &[RawIssue], fetched: &[RawIssue]) -> Vec<RawIssue> {
     let mut merged: Vec<RawIssue> = retained.to_vec();
-    for issue in delta {
+    for issue in fetched {
         if let Some(position) = merged
             .iter()
             .position(|current| current.number == issue.number)
@@ -879,7 +915,8 @@ impl<P: GitHubPort> BoardService<P> {
         Ok(linked_prs)
     }
 
-    /// **Hydrate** `numbers`, the second half of a **Cascade**.
+    /// **Hydrate** `numbers`: the second half of a **Cascade**, and of a structural
+    /// refresh.
     async fn hydrate_issues(&self, repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
         self.port
             .hydrate_issues(repo, numbers)
@@ -892,26 +929,40 @@ impl<P: GitHubPort> BoardService<P> {
 
     /// Refresh against a retained snapshot and report whether the board changed.
     ///
-    /// This is the **issue side** of a refresh, and it writes only issues: a
-    /// delta merged onto the retained ones, joined with the Linked PRs the
-    /// snapshot already carries. It runs no sweep of its own, so a structural
-    /// refresh can never overwrite the hot path's fresher PR facts with an older
-    /// list of its own (ADR 0008).
+    /// This is the **structural** refresh, and it writes only issues. The index
+    /// **Sweep** says what exists: anything absent from it is dropped, with no need
+    /// to ask GitHub about it, and only the numbers that are new or whose stamp moved
+    /// are **Hydrated**. It joins the result with the Linked PRs the snapshot already
+    /// carries, so it can never overwrite the hot path's fresher PR facts with an
+    /// older list of its own (ADR 0008).
+    ///
+    /// The sweep and its hydrate land together or not at all, so a failed hydrate
+    /// leaves every stamp unmoved and the next tick finds the same change.
     pub async fn refresh(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
         let fetched_at = Utc::now();
-        let delta = self
+        let index = self
             .port
-            .load_issues_since(repo, snapshot.fetched_at)
+            .sweep_open_issues(repo)
             .await
-            .map_err(|err| {
-                err.with_context("repo", repo)
-                    .with_context("since", snapshot.fetched_at)
-            })?;
-        let raw_issues = merge_issues(&snapshot.raw_issues, &delta);
+            .map_err(|err| err.with_context("repo", repo))?;
+        let open: HashSet<u64> = index.iter().map(|stamp| stamp.number).collect();
+        let survivors: Vec<RawIssue> = snapshot
+            .raw_issues
+            .iter()
+            .filter(|issue| open.contains(&issue.number))
+            .cloned()
+            .collect();
+        let stale = stale_issues(&survivors, &index);
+        let raw_issues = if stale.is_empty() {
+            survivors
+        } else {
+            let hydrated = self.hydrate_issues(repo, &stale).await?;
+            merge_hydrated_issues(&survivors, &stale, &hydrated)
+        };
         Ok(refresh_outcome(
             snapshot.with_issues(raw_issues, fetched_at),
             snapshot,
@@ -919,8 +970,7 @@ impl<P: GitHubPort> BoardService<P> {
     }
 
     /// Re-read every open issue and replace the snapshot's issue collection
-    /// wholesale, healing drift a delta cannot observe (a hard-deleted or
-    /// transferred issue). Like [`BoardService::refresh`] it writes only issues,
+    /// wholesale, healing what GitHub did not stamp (an edited relationship). Like [`BoardService::refresh`] it writes only issues,
     /// carrying the snapshot's Linked PRs through untouched.
     async fn reload_issues(
         &self,
@@ -993,28 +1043,23 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         Ok(BoardOpen::Cold(loaded))
     }
 
-    /// Refresh a retained snapshot and rewrite the cache after a successful
-    /// refresh.
+    /// The **structural** refresh: sweep the issue index, drop what it no longer
+    /// lists, hydrate what is new or moved, and rewrite the cache only when that
+    /// found something. An unchanged repo hydrates nothing, repaints nothing and
+    /// writes nothing.
     ///
     /// Issue-side only: whatever the hot path wrote while this refresh was in
     /// flight is adopted before the result is returned or cached, so a slower
     /// structural write can never revert 15-second-fresh PR facts (ADR 0008).
-    pub async fn refresh_cached(
+    pub async fn structural_refresh_cached(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
-        let start = self.issue_side_start(repo, snapshot).await?;
+        let start = self.freshest_snapshot(repo, snapshot).await?;
         let refresh = self.board.refresh(repo, &start).await?;
         let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
-        let snapshot_to_cache = match &refresh {
-            BoardRefresh::Changed(loaded) => &loaded.snapshot,
-            BoardRefresh::Unchanged(snapshot) => snapshot,
-        };
-        self.cache
-            .cache_board(repo, snapshot_to_cache)
-            .await
-            .map_err(|err| err.with_operation("CachedBoardService::refresh_cached"))?;
+        self.cache_issue_side_result(repo, &start, &refresh).await?;
         Ok(refresh)
     }
 
@@ -1024,10 +1069,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// repaints nothing, hydrates nothing and writes nothing.
     ///
     /// This is the 15-second path of the Freshness contract, and the only writer
-    /// of PR facts. It sweeps no issues, so it can neither be delayed by a
-    /// structural refresh walking a large repo nor advance the issue-side
-    /// watermark; it writes its sweep onto the freshest issues known rather than
-    /// onto the ones its caller happened to be holding (ADR 0008).
+    /// of PR facts. It sweeps no issues, so it cannot be delayed by a structural
+    /// refresh walking a large repo; it writes its sweep onto the freshest issues
+    /// known rather than onto the ones its caller happened to be holding (ADR 0008).
     ///
     /// A change to which PRs close which issues also **Cascades**: those issues
     /// are hydrated in the same operation. A PR merges, its Slice reads closed,
@@ -1059,10 +1103,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             let hydrated = self.board.hydrate_issues(repo, &cascade).await?;
             // The hydrate yielded, so the issue side may have written meanwhile.
             // An issue it wrote keeps that write: the hydrate may have read it
-            // earlier, and overlaying it would undo a closure the issue side's
-            // advanced watermark will not report again. Dropping the hydrate's
-            // read loses nothing, because that watermark predates the issue
-            // side's own read, so any later change still reaches its next delta.
+            // earlier, and overlaying it would undo a closure. Dropping the hydrate's
+            // read loses nothing, because the next index sweep compares against
+            // what is written here and finds anything still out of date.
             let current = self.freshest_snapshot(repo, &freshest).await?;
             let written = issues_changed_between(&freshest.raw_issues, &current.raw_issues);
             let cascade: Vec<u64> = cascade
@@ -1073,17 +1116,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
                 .into_iter()
                 .filter(|issue| !written.contains(&issue.number))
                 .collect();
-            let mut merged = current
+            current
                 .with_linked_prs(linked_prs)
-                .with_hydrated_issues(&cascade, &hydrated);
-            // Even an issue the cache never held can have closed in that window,
-            // leaving no write to compare. So a read that lands while the
-            // watermark moved takes it back: the next delta reads those issues
-            // again, and heals one this hydrate read too early.
-            if !hydrated.is_empty() && current.fetched_at != freshest.fetched_at {
-                merged.fetched_at = freshest.fetched_at;
-            }
-            merged
+                .with_hydrated_issues(&cascade, &hydrated)
         }
         .loaded();
         self.cache
@@ -1119,31 +1154,12 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         Ok(cached.unwrap_or_else(|| base.clone()))
     }
 
-    /// What an issue-side fetch starts from: the freshest facts known, with the
-    /// caller's watermark if it holds those same facts at a later one. An unchanged
-    /// reconcile hands its watermark back without rewriting the cache, and dropping
-    /// it would re-fetch a window that full load already proved.
-    async fn issue_side_start(
-        &self,
-        repo: &RepoRef,
-        snapshot: &BoardSnapshot,
-    ) -> AppResult<BoardSnapshot> {
-        let mut start = self.freshest_snapshot(repo, snapshot).await?;
-        if start.same_facts_as(snapshot) {
-            start.fetched_at = start.fetched_at.max(snapshot.fetched_at);
-        }
-        Ok(start)
-    }
-
     /// Re-decide an issue-side refresh's outcome against everything the hot path
     /// wrote since the fetch began, when the cache held `start`, so its result
     /// carries the hot path's PR facts and **Cascade** rather than older ones. Only
     /// writes made after `start` are protected: anything earlier was there for the
-    /// fetch to supersede.
-    ///
-    /// A Cascade that overrode this fetch's answer may itself be the older read,
-    /// so the watermark then stays at `start`: the next delta reads those issues
-    /// again rather than skipping whatever this fetch saw.
+    /// fetch to supersede. If a Cascade's read was the older one, the next index
+    /// sweep finds it out of date.
     async fn with_hot_facts_since(
         &self,
         repo: &RepoRef,
@@ -1158,45 +1174,51 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         let written = issues_changed_between(&start.raw_issues, &freshest.raw_issues);
         let raw_issues =
             with_issues_written_meanwhile(&refreshed.raw_issues, &written, &freshest.raw_issues);
-        let fetched_at = if raw_issues == refreshed.raw_issues {
-            refreshed.fetched_at
-        } else {
-            // The earlier one: a hydrate that landed meanwhile may have taken the
-            // cache's watermark back for the same reason.
-            start.fetched_at.min(freshest.fetched_at)
-        };
         Ok(refresh_outcome(
-            BoardSnapshot::new(raw_issues, freshest.linked_prs, fetched_at),
+            BoardSnapshot::new(raw_issues, freshest.linked_prs, refreshed.fetched_at),
             start,
         ))
     }
 
+    /// Write an issue-side result to the cache unless the cache already holds those
+    /// exact facts. Stamps count here, unlike for a repaint: a moved stamp left
+    /// unwritten would be hydrated again on every later sweep. `fetched_at` does not
+    /// count, so an idle board never touches the disk.
+    async fn cache_issue_side_result(
+        &self,
+        repo: &RepoRef,
+        start: &BoardSnapshot,
+        refresh: &BoardRefresh,
+    ) -> AppAction {
+        let result = match refresh {
+            BoardRefresh::Changed(loaded) => &loaded.snapshot,
+            BoardRefresh::Unchanged(snapshot) => snapshot,
+        };
+        let cached = self.freshest_snapshot(repo, start).await?;
+        if result.raw_issues == cached.raw_issues && result.linked_prs == cached.linked_prs {
+            return Ok(());
+        }
+        self.cache
+            .cache_board(repo, result)
+            .await
+            .map_err(|err| err.with_operation("CachedBoardService::cache_issue_side_result"))
+    }
+
     /// Full-load reconcile against a retained snapshot.
     ///
-    /// Runs a complete issue load (not delta) to heal cache drift that deltas
-    /// cannot observe (for example, hard-deleted or transferred issues). Like
-    /// every issue-side path it writes no PR facts of its own, adopting the hot
-    /// path's instead. Repaints and rewrites cache only when facts differ;
-    /// aligned snapshots are a no-op — but even then the reload's `fetched_at`
-    /// comes back, so the caller's next delta window starts from the moment
-    /// this full load proved the board correct rather than from an older one.
+    /// Runs a complete issue load to heal what GitHub did not stamp (for example,
+    /// an edited relationship). Like every issue-side path it writes no PR facts of
+    /// its own, adopting the hot path's instead. Repaints only when facts differ.
     pub async fn reconcile_cached(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
-        let start = self.issue_side_start(repo, snapshot).await?;
+        let start = self.freshest_snapshot(repo, snapshot).await?;
         let refresh = self.board.reload_issues(repo, &start).await?;
         let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
-        let loaded = match refresh {
-            BoardRefresh::Changed(loaded) => loaded,
-            unchanged => return Ok(unchanged),
-        };
-        self.cache
-            .cache_board(repo, &loaded.snapshot)
-            .await
-            .map_err(|err| err.with_operation("CachedBoardService::reconcile_cached"))?;
-        Ok(BoardRefresh::Changed(loaded))
+        self.cache_issue_side_result(repo, &start, &refresh).await?;
+        Ok(refresh)
     }
 }
 

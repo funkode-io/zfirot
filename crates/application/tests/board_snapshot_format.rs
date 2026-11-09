@@ -41,6 +41,18 @@ fn a_snapshot_from_a_previous_app_version_is_rejected_rather_than_mis_read() {
         .expect_err("a snapshot in the previous format must not be readable");
 }
 
+/// Format 2 issues carry no `updatedAt`. Reading one with a blank stamp would make
+/// the first sweep hydrate every issue, so it cold-loads like any other old format.
+#[test]
+fn a_snapshot_whose_issues_have_no_stamp_is_rejected_too() {
+    let mut value: serde_json::Value =
+        serde_json::to_value(sample_snapshot()).expect("a snapshot should encode");
+    value["version"] = serde_json::json!(2);
+
+    serde_json::from_value::<BoardSnapshot>(value)
+        .expect_err("a snapshot in format 2 must not be readable");
+}
+
 #[test]
 fn a_snapshot_from_a_future_format_version_is_rejected_too() {
     let mut value: serde_json::Value =
@@ -95,6 +107,7 @@ mod fake_port {
                 assignee: None,
                 assignee_avatar_url: None,
                 is_native_child_of_prd: false,
+                updated_at: String::new(),
             }])
         }
 

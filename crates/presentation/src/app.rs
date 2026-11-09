@@ -26,9 +26,10 @@ use crate::logging::surface_error;
 use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
     confirm_classification, hot_refresh_board, last_opened, open_and_track_project, open_board,
-    open_project, reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
-    remember_theme_preference, remember_view_mode, secure_store, sign_out, theme_preference,
-    tracked_repos, untrack_repo, view_mode, viewer as fetch_viewer,
+    open_project, reconcile_board, refresh_projects, refresh_recent_projects,
+    remember_theme_preference, remember_view_mode, secure_store, sign_out,
+    structural_refresh_board, theme_preference, tracked_repos, untrack_repo, view_mode,
+    viewer as fetch_viewer,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -162,12 +163,12 @@ pub fn App() -> Element {
     // Set to a client-safe message when signing out fails, shown above the
     // current screen (Home or Board); cleared on a successful sign-out.
     let mut sign_out_error = use_signal(|| Option::<String>::None);
-    // Set to a client-safe message when a delta refresh or authoritative
+    // Set to a client-safe message when a structural refresh or authoritative
     // reconcile fails (e.g. a connectivity blip) — automatic sources and manual
     // Refresh alike, so a flaky network is visible instead of the board just
     // silently sitting on stale data. Cleared on the next successful refresh
     // from any source. Never touches `board_snapshot`/the cache: a failed fetch
-    // must not advance `fetched_at` (see `delta_refresh`/`authoritative_reconcile`).
+    // must not advance `fetched_at` (see `structural_refresh`/`authoritative_reconcile`).
     let mut refresh_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
@@ -188,14 +189,14 @@ pub fn App() -> Element {
     // Retained board snapshot used by `BoardService::refresh` to decide
     // Changed/Unchanged during polls and manual refreshes.
     let mut board_snapshot = use_signal(|| Option::<BoardSnapshot>::None);
-    // True while the fast/manual delta refresh is in flight; it clears before
+    // True while the fast/manual structural refresh is in flight; it clears before
     // the authoritative reconcile runs (see `syncing` for that phase).
     let mut board_refreshing = use_signal(|| false);
     // True while an authoritative (full-load) reconcile is in flight, from any
     // source — automatic or manual. Folded into the Refresh button's spinner
     // (see `refreshing` below) alongside `board_refreshing`, so the button
     // keeps indicating in-flight work for the whole two-phase refresh instead
-    // of going idle the moment the fast delta phase clears `board_refreshing`,
+    // of going idle the moment the fast structural phase clears `board_refreshing`,
     // while the slower reconcile that actually catches things like a just-
     // merged PR keeps running silently behind an icon that already looks done.
     let syncing = use_signal(|| false);
@@ -369,12 +370,12 @@ pub fn App() -> Element {
 
     // Stale-while-revalidate for project boards: if a board was painted from the
     // local cache, refresh it once in the background — the hot open-PR sweep
-    // first (cheapest call, and the facts the user is actually watching), then a
-    // fast issue delta, then a silent authoritative reconcile — and repaint only
-    // if a phase finds a real change. The hot sweep matters here specifically:
-    // GitHub does not bump an issue's own `updatedAt` when a PR is opened with a
-    // closing reference to it, so a just-opened (or just-merged) linked PR is
-    // invisible to the delta's `since` filter and is only ever seen by sweeping
+    // first (cheapest call, and the facts the user is actually watching), then the
+    // structural issue-index sweep, then a silent authoritative reconcile — and
+    // repaint only if a phase finds a real change. The hot sweep matters here
+    // specifically: GitHub does not bump an issue's own `updatedAt` when a PR is
+    // opened with a closing reference to it, so a just-opened (or just-merged)
+    // linked PR is invisible to the issue index and is only ever seen by sweeping
     // the open PRs.
     let reconcile_gate_on_open = reconcile_gate.clone();
     let hot_gate_on_open = hot_gate.clone();
@@ -418,7 +419,7 @@ pub fn App() -> Element {
                     .await
                     .flatten()
                     .unwrap_or(snapshot);
-                if let Some(base) = delta_refresh(
+                if let Some(base) = structural_refresh(
                     repo.clone(),
                     base,
                     board_snapshot,
@@ -489,11 +490,13 @@ pub fn App() -> Element {
         }
     });
 
-    // Background poll: while a board is open, re-resolve it on a fixed cadence so
-    // the columns, counts, and "last updated" timestamp stay fresh without the
-    // user clicking Refresh. The interval is the configurable `PollInterval`
-    // (default ~60s); it only bumps `reload` when a board is showing, so the
-    // home and paste-token screens are never disturbed.
+    // The structural loop: while a board is open, sweep its issue index on a fixed
+    // cadence so a new Slice or PRD, a retitle, a relabel, an assignment or a manual
+    // close reaches the board without the user clicking Refresh. It writes only the
+    // issue collection and is independent of the hot loop above, so a failure here
+    // leaves the last good board on screen and PR facts refreshing. The interval is
+    // the configurable `PollInterval` (default ~60s); it only bumps `reload` when a
+    // board is showing, so the home and paste-token screens are never disturbed.
     use_future(move || async move {
         let interval = PollInterval::default().as_duration();
         loop {
@@ -515,13 +518,13 @@ pub fn App() -> Element {
             };
             if let Some(repo) = open_repo {
                 if let Some(snapshot) = board_snapshot() {
-                    match refresh_board(&repo, &snapshot).await {
+                    match structural_refresh_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
                             refresh_error.set(None);
                             repaint_board(repo, loaded, board_snapshot, prefetched_board, reload);
                         }
                         // Facts unchanged: don't repaint, but adopt the snapshot so
-                        // its advanced `fetched_at` moves the next delta window on.
+                        // any stamp that moved is not hydrated again.
                         Ok(BoardRefresh::Unchanged(snapshot)) => {
                             refresh_error.set(None);
                             board_snapshot.set(Some(snapshot));
@@ -535,9 +538,9 @@ pub fn App() -> Element {
         }
     });
 
-    // Slow background reconcile: full-load occasionally to heal any drift that
-    // delta refreshes cannot observe (for example, hard-deleted or transferred
-    // issues). Silent and non-blocking: repaint only on a real diff.
+    // Slow background reconcile: full-load occasionally to heal what GitHub did not
+    // stamp (for example, an edited relationship), which the structural sweep cannot
+    // observe. Silent and non-blocking: repaint only on a real diff.
     let reconcile_gate_background = reconcile_gate.clone();
     use_future(move || {
         let gate = reconcile_gate_background.clone();
@@ -575,11 +578,10 @@ pub fn App() -> Element {
         }
     });
 
-    // Manual refresh: a fast delta for instant feedback, then a silent,
-    // authoritative reconcile to heal anything the delta cannot see (e.g. an
-    // issue closed by a merged PR, whose close event may fall outside the delta
-    // `since` window). The delta paints first and clears the spinner; the
-    // reconcile runs full-load and repaints only on a real difference.
+    // Manual refresh: a fast structural sweep for instant feedback, then a silent,
+    // authoritative reconcile to heal anything GitHub did not stamp. The sweep
+    // paints first and clears the spinner; the reconcile runs full-load and repaints
+    // only on a real difference.
     //
     // The reconcile call below is deliberately unconditional (unlike the two
     // automatic reconcile sources): a user clicking Update must always get a
@@ -604,7 +606,7 @@ pub fn App() -> Element {
                 // above and the flag being set inside the task.
                 board_refreshing.set(true);
                 spawn(async move {
-                    let base = delta_refresh(
+                    let base = structural_refresh(
                         repo.clone(),
                         snapshot,
                         board_snapshot,
@@ -613,7 +615,7 @@ pub fn App() -> Element {
                         refresh_error,
                     )
                     .await;
-                    // Spinner clears after the fast delta paint.
+                    // Spinner clears after the fast structural paint.
                     board_refreshing.set(false);
 
                     if let Some(base) = base {
@@ -875,8 +877,8 @@ pub fn App() -> Element {
     // confirming. The board stays on screen (see `board_loading`), so this only
     // drives a small in-flight indicator on the Refresh button rather than
     // replacing any content. Includes `syncing` so the indicator spans the
-    // whole two-phase refresh (delta + authoritative reconcile), not just the
-    // faster delta half — otherwise the button looked idle while a reconcile
+    // whole two-phase refresh (structural + authoritative reconcile), not just the
+    // faster structural half — otherwise the button looked idle while a reconcile
     // that might still change the board (e.g. catching a just-merged PR) kept
     // running silently behind it.
     let refreshing = (matches!(*view.state().read(), UseResourceState::Pending)
@@ -1277,7 +1279,7 @@ fn snapshot_hms(fetched_at: chrono::DateTime<chrono::Utc>) -> String {
 /// Adopt an already-fetched refresh result as the board on screen: retain its
 /// snapshot and stash its board for the next `view` resolution, so a change
 /// costs one fetch, not two (refresh + reload). Returns the adopted snapshot,
-/// for callers that carry on from it. Every refresh path — hot, delta and
+/// for callers that carry on from it. Every refresh path — hot, structural and
 /// reconcile — repaints through here, so they cannot drift apart.
 fn repaint_board(
     repo: RepoRef,
@@ -1298,20 +1300,19 @@ fn repaint_board(
     loaded.snapshot
 }
 
-/// The fast half of a two-phase board refresh: a delta fetch that repaints
+/// The fast half of a two-phase board refresh: an issue-index sweep that repaints
 /// immediately on a real change (`prefetched_board` + `reload`) and otherwise
-/// just advances the retained snapshot's `fetched_at` so the next delta window
-/// moves forward. Returns the resulting snapshot on success (`Changed` or
-/// `Unchanged`), for the caller to feed into [`authoritative_reconcile`];
+/// just adopts the resulting snapshot. Returns that snapshot on success (`Changed`
+/// or `Unchanged`), for the caller to feed into [`authoritative_reconcile`];
 /// `None` on a fetch failure, so the caller skips reconciling from a result
 /// that may not reflect reality — the retained snapshot and cache are left
-/// exactly as they were, so a failed fetch can never advance `fetched_at`.
+/// exactly as they were.
 /// Shared by the auto-revalidate-on-cache-open effect, the periodic poll, and
 /// the manual Refresh button, so all three apply the same rule. Clears
 /// `refresh_error` on success (any source healed it) and sets a client-safe
 /// message on failure, so a connectivity blip is visible instead of the board
 /// silently sitting on stale data.
-async fn delta_refresh(
+async fn structural_refresh(
     repo: RepoRef,
     snapshot: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
@@ -1319,7 +1320,7 @@ async fn delta_refresh(
     reload: Signal<u32>,
     mut refresh_error: Signal<Option<String>>,
 ) -> Option<BoardSnapshot> {
-    match refresh_board(&repo, &snapshot).await {
+    match structural_refresh_board(&repo, &snapshot).await {
         Ok(BoardRefresh::Changed(loaded)) => {
             refresh_error.set(None);
             Some(repaint_board(
@@ -1330,15 +1331,15 @@ async fn delta_refresh(
                 reload,
             ))
         }
-        // Facts unchanged: don't repaint, but adopt the snapshot so its
-        // advanced `fetched_at` moves the next delta window on.
+        // Facts unchanged: don't repaint, but adopt the snapshot so any stamp
+        // that moved is not hydrated again.
         Ok(BoardRefresh::Unchanged(snapshot)) => {
             refresh_error.set(None);
             board_snapshot.set(Some(snapshot.clone()));
             Some(snapshot)
         }
         Err(error) => {
-            refresh_error.set(Some(surface_error("board_delta_refresh", &error)));
+            refresh_error.set(Some(surface_error("board_structural_refresh", &error)));
             None
         }
     }
@@ -1346,8 +1347,7 @@ async fn delta_refresh(
 
 /// The **hot** half of the board's freshness: an open-PR **Sweep** that repaints
 /// the moment the PR facts change (`prefetched_board` + `reload`) and does
-/// nothing at all when they do not — no repaint, no cache write, and no
-/// advancing of the issue-side `since` watermark, since it sweeps no issues.
+/// nothing at all when they do not — no repaint and no cache write.
 /// Shared by the revalidate-on-open effect and the 15-second hot loop, so both
 /// apply the same rule.
 ///
@@ -1399,19 +1399,13 @@ async fn hot_refresh(
 /// auto-revalidate-on-open, the periodic reconcile loop, or the manual Refresh
 /// button), which the Refresh button's spinner also watches, so the button
 /// keeps indicating in-flight work through this phase instead of going idle
-/// right after the faster `delta_refresh` clears `board_refreshing` while this
-/// heals drift the delta cannot observe. This is not only for
-/// hard-deleted/transferred issues (the original motivation for the slow
-/// background reconcile loop): GitHub does not bump an issue's own
-/// `updatedAt` when a PR is opened with a closing reference to it, so a
-/// Slice's brand-new linked PR can be invisible to every `load_issues_since`
-/// delta until a full load re-derives `closedByPullRequestsReferences` from
-/// scratch.
+/// right after the faster `structural_refresh` clears `board_refreshing` while this
+/// heals what GitHub did not stamp, which the structural sweep cannot observe.
 ///
 /// Repaints (`prefetched_board` + `reload`) only on a real difference. Callers
 /// serialize entry through a [`RefreshGate`] so concurrent reconciles cannot
 /// race to overwrite state. A failed reconcile leaves the retained snapshot
-/// and cache untouched (`fetched_at` never advances on failure) and sets a
+/// and cache untouched and sets a
 /// client-safe `refresh_error`; any successful reconcile — changed or not —
 /// clears it.
 async fn authoritative_reconcile(
@@ -1431,8 +1425,7 @@ async fn authoritative_reconcile(
         }
         // A reconcile that found nothing to heal still confirms the connection
         // is healthy, so it clears a previous failure too. Nothing to repaint,
-        // but adopt the snapshot so its advanced `fetched_at` moves the next
-        // delta window on from this full load.
+        // but adopt the snapshot and any stamps it read.
         Ok(BoardRefresh::Unchanged(unchanged)) => {
             refresh_error.set(None);
             board_snapshot.set(Some(unchanged));

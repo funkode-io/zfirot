@@ -200,13 +200,17 @@ pub async fn open_board(repo: &RepoRef) -> AppResult<BoardOpen> {
         .await
 }
 
-/// Refresh the open board against its retained snapshot and report if it
-/// changed. Reads the stored token and wires the live adapter for `repo`.
-pub async fn refresh_board(repo: &RepoRef, snapshot: &BoardSnapshot) -> AppResult<BoardRefresh> {
+/// The **structural** refresh of the open board: sweep its issue index, hydrate
+/// what is new or moved, and report if the board changed. Reads the stored token
+/// and wires the live adapter for `repo`.
+pub async fn structural_refresh_board(
+    repo: &RepoRef,
+    snapshot: &BoardSnapshot,
+) -> AppResult<BoardRefresh> {
     let token = AuthService::new(secure_store()).require_token().await?;
     let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
     CachedBoardService::new(port, board_cache()?)
-        .refresh_cached(repo, snapshot)
+        .structural_refresh_cached(repo, snapshot)
         .await
 }
 
