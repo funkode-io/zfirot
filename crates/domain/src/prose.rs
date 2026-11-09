@@ -92,10 +92,14 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
                 continue;
             };
             let before = &line[..start];
-            // `other/refs#12` and `example.com/refs#12` are paths, not relations.
-            let starts_a_word =
-                !before.ends_with(|c: char| c.is_alphanumeric() || "/-_.#@".contains(c));
-            if !starts_a_word || is_negated(before) {
+            // A relation opens its whitespace-separated word, so one inside a
+            // path, a URL or a longer word (`other/refs#12`, `?q=refs#12`,
+            // `unrelated`) never counts.
+            let opens_a_word = before
+                .rsplit(char::is_whitespace)
+                .next()
+                .is_some_and(|word| word.chars().all(is_wrapper));
+            if !opens_a_word || is_negated(before) {
                 continue;
             }
             for number in references_after_relation(&rest[phrase.len()..]) {
@@ -109,11 +113,15 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
     numbers
 }
 
+/// Markdown and quoting that may wrap a word without changing it.
+fn is_wrapper(c: char) -> bool {
+    "([{*_\"'`~".contains(c)
+}
+
 /// Whether the text before a relation phrase ends in the word `not`, looking
 /// through the Markdown and quoting around it: `(not`, `*not*`, `"not`. A `not.`
 /// ends its own sentence, so it negates nothing after it.
 fn is_negated(before: &str) -> bool {
-    let is_wrapper = |c: char| "([{*_\"'`~".contains(c);
     before
         .trim_end_matches(|c: char| c.is_whitespace() || is_wrapper(c))
         .split_whitespace()
@@ -126,11 +134,12 @@ fn is_negated(before: &str) -> bool {
 /// (which also makes the first `#` optional), then a list of references joined
 /// by `,`, `&` or `and`. Anything else ends the list.
 fn references_after_relation(text: &str) -> Vec<u64> {
-    let mut rest = text.trim_start_matches(|c: char| c.is_whitespace() || c == ':');
+    let is_gap = |c: char| c.is_whitespace() || c == ':' || c == '*' || c == '_';
+    let mut rest = text.trim_start_matches(is_gap);
     let mut hash_required = true;
     for word in ["issues", "issue"] {
         if let Some(after_word) = rest.strip_prefix(word) {
-            rest = after_word.trim_start_matches(|c: char| c.is_whitespace() || c == ':');
+            rest = after_word.trim_start_matches(is_gap);
             hash_required = false;
             break;
         }
@@ -323,7 +332,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_relates_to_without_closing_them() {
-        let cases: [(&str, &str, Vec<u64>); 26] = [
+        let cases: [(&str, &str, Vec<u64>); 29] = [
             ("the reported wording", "Related to #12", vec![12]),
             ("any case", "RELATES TO #12.", vec![12]),
             ("the word issue", "related to issue #12", vec![12]),
@@ -368,6 +377,13 @@ mod tests {
             ),
             ("a repository path", "Related to other/refs#12", vec![]),
             ("a URL", "https://example.com/refs#12", vec![]),
+            (
+                "a URL query value",
+                "https://example.com/?q=refs#12",
+                vec![],
+            ),
+            ("bold around the phrase", "**Related to:** #12", vec![12]),
+            ("a phrase in parentheses", "(part of #12)", vec![12]),
             ("a hyphenated word", "cross-refs #12", vec![]),
             ("negated in parentheses", "(not related to #12)", vec![]),
             ("negated in quotes", "\"not related to #12\"", vec![]),
