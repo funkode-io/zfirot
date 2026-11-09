@@ -134,12 +134,13 @@ pub fn parent_of(raw: &RawIssue) -> Option<u64> {
 
 /// Classify an issue with the board around it: [`classify_issue`], then promotion
 /// by Parent (ADR 0007). `open_issues` holds every open issue number on the board
-/// and `open_prds` the ones among them that are PRDs.
+/// and `open_plan` the ones among them that are PRDs or Slices.
 ///
 /// An issue the first pass left unconfirmed becomes a Slice when its [`parent_of`]
 /// is:
 ///
-/// - an open PRD, which puts it on that PRD's Lane; or
+/// - an open PRD, which puts it on that PRD's Lane;
+/// - an open Slice, which keeps a Slice split into sub-issues visible under it; or
 /// - not an open issue on the board (closed, or never fetched), which puts it in
 ///   the "No PRD" Lane rather than losing planned work.
 ///
@@ -148,7 +149,7 @@ pub fn parent_of(raw: &RawIssue) -> Option<u64> {
 pub fn classify_on_board(
     raw: &RawIssue,
     open_issues: &HashSet<u64>,
-    open_prds: &HashSet<u64>,
+    open_plan: &HashSet<u64>,
 ) -> IssueClassification {
     let first_pass = classify_issue(raw);
     if matches!(
@@ -158,7 +159,7 @@ pub fn classify_on_board(
         return first_pass;
     }
     match parent_of(raw) {
-        Some(parent) if open_prds.contains(&parent) || !open_issues.contains(&parent) => {
+        Some(parent) if open_plan.contains(&parent) || !open_issues.contains(&parent) => {
             IssueClassification::Slice
         }
         _ => first_pass,

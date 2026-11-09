@@ -19,7 +19,9 @@ A thin vertical tracer-bullet unit of work that cuts end-to-end through every
 layer and is independently grabbable. Represented as a GitHub Issue, child of a
 PRD. Having a **Parent** that resolves to a PRD is enough to make an issue a
 Slice, whatever its labels — a Slice is not required to be workable, and the
-not-yet-workable ones matter most (they are the plan's unfinished edges).
+not-yet-workable ones matter most (they are the plan's unfinished edges). So is
+a Parent that is itself a Slice: a Slice split into sub-issues, typically one per
+PR, stays visible under it.
 _Avoid_: task, ticket, subtask
 
 **Parent**:
@@ -45,9 +47,11 @@ _Avoid_: in progress, active, doing
 
 **Linked PR**:
 An open Pull Request that closes a Slice's issue (GitHub's closing reference)
-or, when it has no closing reference, says in its title or body that it relates
-to that issue ("related to #n", "part of #n", "refs #n"). A bare `#n` mention
-does not link. A Slice's open linked PRs share a dedicated row on its card, one `pr #n @u`
+or, when it has no closing reference, says so in prose: a closing keyword in its
+body ("closes #n", "fixes: #n"), which is all a **Stacked PR** has since GitHub
+fills in closing references only for PRs targeting the default branch, or else
+its title or body relating to that issue ("related to #n", "part of #n", "refs
+#n"). A bare `#n` mention does not link. A Slice's open linked PRs share a dedicated row on its card, one `pr #n @u`
 badge each, where `n` is the PR number and `u` is the PR's **author** (for
 delegated work, the Agent's bot account) — on any card that has one, regardless
 of column. Closed PRs are not shown, so replacing one PR with another leaves

@@ -320,3 +320,85 @@ fn a_pr_closing_a_promoted_slice_is_linked_not_unlinked() {
     assert_eq!(state(&board, 2), SliceState::Wip);
     assert!(board.unlinked_prs.is_empty());
 }
+
+fn sub_issue(number: u64, parent: u64, labels: &[&str]) -> RawIssue {
+    RawIssue {
+        native_parent: Some(parent),
+        labels: labels.iter().map(|label| label.to_string()).collect(),
+        ..slice_issue(number)
+    }
+}
+
+fn lane_of(board: &application::ClassifiedBoard, issue: u64) -> Option<u64> {
+    board
+        .slices
+        .iter()
+        .find(|slice| slice.number == issue)
+        .unwrap_or_else(|| panic!("issue #{issue} should be a Slice on the board"))
+        .prd
+        .as_ref()
+        .map(|prd| prd.number)
+}
+
+/// `majidalfuttaim/dxp-data-loom`, 2026-11-09: one Slice split into a sub-issue
+/// per PR must stay visible, with each PR on the issue it closes.
+#[test]
+fn a_sub_issue_of_a_slice_is_a_slice_under_its_parent() {
+    let issues = [slice_issue(2217), sub_issue(2237, 2217, &[])];
+    let prs = [
+        swept_pr(2235, PrStatus::AwaitingReview, vec![2237]),
+        swept_pr(2236, PrStatus::AwaitingReview, vec![2217]),
+    ];
+
+    let board = classify(&issues, &prs);
+
+    assert_eq!(badges(&board, 2237), vec![2235]);
+    assert_eq!(badges(&board, 2217), vec![2236]);
+    assert_eq!(lane_of(&board, 2237), Some(2217));
+    assert!(board.unlinked_prs.is_empty());
+}
+
+#[test]
+fn a_sub_issue_of_a_promoted_slice_is_a_slice_at_any_depth() {
+    let prd = RawIssue {
+        labels: vec!["prd".to_string()],
+        ..slice_issue(1)
+    };
+    // Sub-issues listed first: promotion must not depend on the order of the board.
+    let issues = [
+        sub_issue(4, 3, &[]),
+        sub_issue(3, 2, &[]),
+        sub_issue(2, 1, &[]),
+        prd,
+    ];
+
+    let board = classify(&issues, &[]);
+
+    assert_eq!(lane_of(&board, 2), Some(1));
+    assert_eq!(lane_of(&board, 3), Some(2));
+    assert_eq!(lane_of(&board, 4), Some(3));
+}
+
+#[test]
+fn a_sub_issue_of_a_bug_stays_off_the_board() {
+    let bug = RawIssue {
+        labels: vec!["bug".to_string()],
+        ..slice_issue(1)
+    };
+    let issues = [bug, sub_issue(2, 1, &[]), sub_issue(3, 2, &[])];
+
+    let board = classify(&issues, &[]);
+
+    assert!(board.slices.is_empty());
+    let tray: Vec<u64> = board.other.iter().map(|issue| issue.number).collect();
+    assert_eq!(tray, vec![1, 2, 3]);
+}
+
+#[test]
+fn a_parent_cycle_with_no_plan_stays_off_the_board() {
+    let issues = [sub_issue(1, 2, &[]), sub_issue(2, 1, &[])];
+
+    let board = classify(&issues, &[]);
+
+    assert!(board.slices.is_empty());
+}
