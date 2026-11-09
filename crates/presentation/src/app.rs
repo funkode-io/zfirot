@@ -1422,9 +1422,13 @@ async fn safety_net_refresh(
 }
 
 /// The manual **Refresh**: hot, structural and safety-net passes once each, in
-/// that order, reported as one outcome. One repaint (`prefetched_board` +
-/// `reload`) if together they changed anything; otherwise the resulting
-/// snapshot is adopted silently. The banner shows the first failed pass, and
+/// that order, reported as one outcome: the freshest board once they are done,
+/// always painted (`prefetched_board` + `reload`). It is painted rather than
+/// compared, because background refreshes may have painted since the click and
+/// only a repaint is sure to leave the screen matching the cache; an unchanged
+/// board repaints identically. PR facts the hot pass changed are painted the
+/// moment it finishes, not after the slower issue passes, so the 15-second
+/// contract holds through a manual refresh too. The banner shows the first failed pass, and
 /// every failure is logged with its full cause chain; a refresh with no failure
 /// clears the banner. A pass that failed wrote nothing, so the board on screen
 /// and the cache stay the last good ones.
@@ -1438,20 +1442,28 @@ async fn full_refresh(
     repo: RepoRef,
     snapshot: BoardSnapshot,
     hot_gate: RefreshGate,
-    mut board_snapshot: Signal<Option<BoardSnapshot>>,
+    board_snapshot: Signal<Option<BoardSnapshot>>,
     prefetched_board: Signal<Option<View>>,
     reload: Signal<u32>,
     mut refresh_error: Signal<Option<String>>,
 ) {
     let hot_permit = hot_gate.hold().await;
-    match full_refresh_board(&repo, &snapshot, move || drop(hot_permit)).await {
-        Ok(FullRefresh { refresh, failures }) => {
-            match refresh {
-                BoardRefresh::Changed(loaded) => {
-                    repaint_board(repo, loaded, board_snapshot, prefetched_board, reload);
-                }
-                BoardRefresh::Unchanged(unchanged) => board_snapshot.set(Some(unchanged)),
-            }
+    let hot_repo = repo.clone();
+    let hot_pass_done = move |changed: Option<&LoadedBoard>| {
+        drop(hot_permit);
+        if let Some(loaded) = changed {
+            repaint_board(
+                hot_repo,
+                loaded.clone(),
+                board_snapshot,
+                prefetched_board,
+                reload,
+            );
+        }
+    };
+    match full_refresh_board(&repo, &snapshot, hot_pass_done).await {
+        Ok(FullRefresh { board, failures }) => {
+            repaint_board(repo, board, board_snapshot, prefetched_board, reload);
             let surfaced: Vec<String> = failures
                 .iter()
                 .map(|error| surface_error("board_manual_refresh", error))

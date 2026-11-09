@@ -2163,10 +2163,12 @@ async fn a_manual_refresh_runs_every_pass_once_and_reports_one_change() {
     let snapshot = seeded(&service).await;
     github.update_issue(slice_issue(94));
 
-    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
 
     assert!(full.failures.is_empty(), "every pass succeeded");
-    let loaded = changed(full.refresh, "three passes that each found news repaint");
+    let loaded = full.board;
     assert_eq!(
         slice(&loaded.board, 91).state,
         SliceState::Wip,
@@ -2190,7 +2192,7 @@ async fn a_manual_refresh_runs_every_pass_once_and_reports_one_change() {
 }
 
 #[tokio::test]
-async fn a_manual_refresh_that_finds_nothing_repaints_nothing_and_writes_nothing() {
+async fn a_manual_refresh_that_finds_nothing_writes_nothing() {
     let cache = Arc::new(CountingBoardCache::default());
     let service = CachedBoardService::new(
         ScriptedGitHub::new(vec![slice_issue(95)], vec![vec![open_pr(950, 95)]]),
@@ -2199,10 +2201,16 @@ async fn a_manual_refresh_that_finds_nothing_repaints_nothing_and_writes_nothing
     let snapshot = seeded(&service).await;
     let writes = cache.writes();
 
-    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
+    let mut hot_changed = None;
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |changed| {
+            hot_changed = Some(changed.is_some())
+        })
+        .await;
 
     assert!(full.failures.is_empty());
-    assert!(matches!(full.refresh, BoardRefresh::Unchanged(_)));
+    assert_eq!(hot_changed, Some(false), "the hot pass changed nothing");
+    assert_eq!(slice(&full.board.board, 95).state, SliceState::Wip);
     assert_eq!(cache.writes(), writes);
 }
 
@@ -2221,10 +2229,12 @@ async fn a_manual_refresh_with_a_broken_pr_sweep_still_runs_the_issue_passes() {
         cache.clone(),
     );
 
-    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
 
     assert_eq!(full.failures.len(), 1, "only the hot pass failed");
-    let loaded = changed(full.refresh, "the safety net's heal still repaints");
+    let loaded = full.board;
     assert_eq!(slice(&loaded.board, 90).state, SliceState::Ready);
 }
 
@@ -2242,14 +2252,16 @@ async fn a_manual_refresh_with_a_broken_issue_side_still_refreshes_pr_facts() {
         cache.clone(),
     );
 
-    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
 
     assert_eq!(
         full.failures.len(),
         2,
         "the structural and safety-net passes each failed, and each is reported",
     );
-    let loaded = changed(full.refresh, "the hot pass's PR still repaints");
+    let loaded = full.board;
     assert_eq!(slice(&loaded.board, 96).state, SliceState::Wip);
 }
 
@@ -2284,16 +2296,88 @@ async fn a_manual_refresh_reports_the_pr_facts_a_background_sweep_wrote_during_a
         cache.clone(),
     );
 
-    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
 
     assert_eq!(full.failures.len(), 2, "both issue passes failed");
-    let loaded = changed(
-        full.refresh,
-        "the board on screen lacks the PR the background sweep cached",
-    );
+    let loaded = full.board;
     assert_eq!(
         slice(&loaded.board, 97).state,
         SliceState::Wip,
         "the outcome is the freshest board, not the manual pass's older answer",
+    );
+}
+
+#[tokio::test]
+async fn a_manual_refresh_hands_over_the_hot_pass_board_before_the_issue_passes_run() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let snapshot = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(99)], vec![vec![]]),
+        cache.clone(),
+    ))
+    .await;
+    // The issue side is down, so only a board handed over after the hot pass can
+    // show the new PR before the whole refresh ends.
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(99)], vec![vec![open_pr(990, 99)]])
+            .with_failing_issues(),
+        cache.clone(),
+    );
+
+    let mut painted_early = None;
+    service
+        .full_refresh_cached(&repo(), &snapshot, |changed| {
+            painted_early = changed.map(|loaded| slice(&loaded.board, 99).state);
+        })
+        .await;
+
+    assert_eq!(
+        painted_early,
+        Some(SliceState::Wip),
+        "the PR the hot pass found is ready to paint at once",
+    );
+}
+
+#[tokio::test]
+async fn a_manual_refresh_ends_on_the_freshest_board_even_when_it_matches_the_click() {
+    let as_clicked = RawIssue {
+        title: "As clicked".to_string(),
+        ..slice_issue(98)
+    };
+    let cache = Arc::new(CountingBoardCache::default());
+    let snapshot = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(vec![as_clicked.clone()], vec![vec![]]),
+        cache.clone(),
+    ))
+    .await;
+    // A background refresh paints a retitle while the manual refresh runs ...
+    let painted_meanwhile = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![RawIssue {
+                title: "Painted meanwhile".to_string(),
+                ..slice_issue(98)
+            }],
+            vec![vec![]],
+        ),
+        Arc::new(CountingBoardCache::default()),
+    ))
+    .await;
+    // ... and by the safety net GitHub reads as it did at the click.
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![as_clicked], vec![vec![]])
+            .with_write_during_fetch(cache.clone(), painted_meanwhile),
+        cache.clone(),
+    );
+
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
+
+    assert!(full.failures.is_empty());
+    assert_eq!(
+        slice(&full.board.board, 98).title,
+        "As clicked",
+        "the board to paint is GitHub's last word, though it matches the click-time board",
     );
 }

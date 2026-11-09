@@ -263,11 +263,11 @@ pub async fn safety_net_refresh_board(
 /// passes once each, in that order, reported as one outcome. Fails as a whole
 /// only when no pass could start (no token, no cache); a pass that fails is
 /// reported in the outcome instead. `hot_pass_done` runs once the hot pass is
-/// finished.
+/// finished, with the board it changed, if any.
 pub async fn full_refresh_board(
     repo: &RepoRef,
     snapshot: &BoardSnapshot,
-    hot_pass_done: impl FnOnce(),
+    hot_pass_done: impl FnOnce(Option<&LoadedBoard>),
 ) -> AppResult<FullRefresh> {
     let token = AuthService::new(secure_store()).require_token().await?;
     let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);

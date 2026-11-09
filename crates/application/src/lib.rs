@@ -331,8 +331,10 @@ pub enum BoardRefresh {
 /// [`CachedBoardService::full_refresh_cached`]).
 #[derive(Debug)]
 pub struct FullRefresh {
-    /// What the passes found together, judged against the board on screen.
-    pub refresh: BoardRefresh,
+    /// The freshest board once every pass has run: the one to paint. It is not
+    /// judged against the board the user clicked on, since other refreshes may
+    /// have painted since then, so only the caller can tell what is on screen.
+    pub board: LoadedBoard,
     /// Every pass that failed, in the order they ran. A failed pass wrote nothing,
     /// and the passes after it still ran.
     pub failures: Vec<AppError>,
@@ -1400,25 +1402,25 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// each, in that order, so the user's escape hatch is strictly stronger than
     /// any single loop.
     ///
-    /// The passes are reported as one outcome, judged against `snapshot` (the
-    /// board on screen): `Changed` if together they found anything to repaint.
-    /// A failed pass writes nothing and does not stop the passes after it, so a
-    /// broken issue side still refreshes PR facts, and the other way round; every
-    /// failure is reported beside the outcome.
+    /// The passes are reported as one outcome: the board to paint and every
+    /// failure. A failed pass writes nothing and does not stop the passes after
+    /// it, so a broken issue side still refreshes PR facts, and the other way
+    /// round.
     ///
-    /// `hot_pass_done` runs as soon as the hot pass has finished, so a caller that
-    /// serializes hot sweeps can hold its gate for that pass alone, rather than
-    /// blocking every PR update behind the slower issue passes.
+    /// `hot_pass_done` runs as soon as the hot pass has finished, with the board
+    /// it changed, if it changed one. A caller can paint fresh PR facts at once
+    /// rather than after the slower issue passes, and a caller that serializes
+    /// hot sweeps can hold its gate for that pass alone.
     ///
-    /// The outcome is the freshest board in the cache once the passes are done,
-    /// not the last pass's own answer: a background refresh may have written newer
-    /// facts meanwhile, notably after a failed pass, and reporting the older answer
-    /// would repaint them away.
+    /// The board is the freshest one in the cache once the passes are done, not
+    /// the last pass's own answer: a background refresh may have written newer
+    /// facts meanwhile, notably after a failed pass, and reporting the older
+    /// answer would repaint them away.
     pub async fn full_refresh_cached(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
-        hot_pass_done: impl FnOnce(),
+        hot_pass_done: impl FnOnce(Option<&LoadedBoard>),
     ) -> FullRefresh {
         fn absorb(
             pass: AppResult<BoardRefresh>,
@@ -1435,8 +1437,11 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         let mut latest = snapshot.clone();
         let mut failures = Vec::new();
         let hot = self.hot_refresh_cached(repo, &latest).await;
+        hot_pass_done(match &hot {
+            Ok(BoardRefresh::Changed(loaded)) => Some(loaded),
+            _ => None,
+        });
         absorb(hot, &mut latest, &mut failures);
-        hot_pass_done();
         let structural = self.structural_refresh_cached(repo, &latest).await;
         absorb(structural, &mut latest, &mut failures);
         let safety_net = self.safety_net_refresh_cached(repo, &latest).await;
@@ -1446,7 +1451,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             Err(error) => failures.push(error),
         }
         FullRefresh {
-            refresh: refresh_outcome(latest, snapshot),
+            board: latest.loaded(),
             failures,
         }
     }
