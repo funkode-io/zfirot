@@ -846,3 +846,36 @@ async fn classify_board_promotes_a_child_listed_before_its_suggested_prd() {
         "the same facts classify to the same board"
     );
 }
+
+/// A Suggested PRD with a Parent of its own is still a PRD by its headings, not a
+/// Slice: it heads its Lane and keeps its Confirm card in the tray, whatever that
+/// Parent resolves to, rather than being a card on one Lane and the head of another.
+#[tokio::test]
+async fn classify_board_never_promotes_a_suggested_prd_by_its_parent() {
+    let with_parent = |parent: u64| format!("{PRD_TEMPLATE}\n## Parent\n\n#{parent}\n");
+    let board = classify_issues(vec![
+        raw_slice_issue(500, "The plan.", &["prd"], false),
+        raw_slice_issue(501, &with_parent(500), &[], false),
+        raw_slice_issue(502, "## Parent\n\n#501\n", &[], false),
+        raw_slice_issue(503, &with_parent(999), &[], false),
+        raw_slice_issue(504, "## Parent\n\n#503\n", &[], false),
+    ])
+    .await;
+
+    assert_eq!(
+        lane_shape(&board),
+        vec![(Some(501), true, vec![502]), (Some(503), true, vec![504]),]
+    );
+    let tray: Vec<(u64, IssueClassification)> = board
+        .other
+        .iter()
+        .map(|issue| (issue.number, issue.classification.clone()))
+        .collect();
+    assert_eq!(
+        tray,
+        vec![
+            (501, IssueClassification::SuggestedPrd),
+            (503, IssueClassification::SuggestedPrd),
+        ]
+    );
+}
