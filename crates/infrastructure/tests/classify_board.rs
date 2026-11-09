@@ -438,3 +438,221 @@ async fn classify_board_derives_blocked_reasons_and_keeps_them_out_of_ready() {
         "a closed Slice stays Done and off the board"
     );
 }
+
+/// Board fixture for "a Parent makes a Slice". Nothing here is tier-1 evidence
+/// except the PRD's own label and the two control Slices, so every other issue
+/// reaches a Lane by its Parent or not at all.
+#[derive(Clone)]
+struct PromotionFixturePort;
+
+const PROMOTION_PRD: u64 = 200;
+
+fn native_parented_issue(number: u64, native_parent: u64, body: &str) -> RawIssue {
+    RawIssue {
+        native_parent: Some(native_parent),
+        ..raw_slice_issue(number, body, &[], false)
+    }
+}
+
+#[async_trait]
+impl application::GitHubPort for PromotionFixturePort {
+    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        Ok(vec![
+            raw_slice_issue(PROMOTION_PRD, "The plan.", &["prd"], false),
+            raw_slice_issue(201, "A bug report.", &["bug"], false),
+            raw_slice_issue(202, "A closed plan.", &["prd"], true),
+            // Promoted by a prose Parent alone.
+            raw_slice_issue(210, "## Parent\n\n#200\n", &[], false),
+            // Promoted despite carrying only non-classifying labels.
+            raw_slice_issue(211, "## Parent\n\n#200\n", &["deferred", "ci"], false),
+            // dxp-data-loom#1250: split off a sibling, deferred and waiting on
+            // something that is not an issue.
+            raw_slice_issue(
+                212,
+                "## Parent\n\n#200\n\n## Blocked by\n\n- A prod values file existing for this app.\n",
+                &["deferred", "blocked"],
+                false,
+            ),
+            // Blocked by an open sibling, reached only through prose.
+            raw_slice_issue(213, "## Parent\n\n#200\n\n## Blocked by\n\n- #210\n", &[], false),
+            // Native link wins, in both directions.
+            native_parented_issue(220, PROMOTION_PRD, "## Parent\n\n#201\n"),
+            native_parented_issue(221, 201, "## Parent\n\n#200\n"),
+            // A parent that is not a PRD promotes nothing, with or without a
+            // heading that suggests a Slice.
+            raw_slice_issue(230, "## Parent\n\n#201\n", &[], false),
+            raw_slice_issue(
+                231,
+                "## What to build\n\nA fix.\n\n## Parent\n\n#201\n",
+                &[],
+                false,
+            ),
+            // A closed or absent parent: planned work with nowhere to go.
+            raw_slice_issue(240, "## Parent\n\n#202\n", &[], false),
+            raw_slice_issue(241, "## Parent\n\n#999\n", &["deferred"], false),
+            native_parented_issue(242, 999, ""),
+            // Genuine orphans, including a Parent section naming nothing.
+            raw_slice_issue(250, "Just a thought.", &[], false),
+            raw_slice_issue(251, "## Parent\n\nSee the main issue.\n", &[], false),
+            raw_slice_issue(
+                252,
+                "## What to build\n\nA fix.\n\n## Acceptance criteria\n\n- [ ] Done\n",
+                &[],
+                false,
+            ),
+            // Tier-1 stays as it was: a labelled Slice under a non-PRD parent
+            // keeps that parent, and a labelled PRD with a parent stays a PRD.
+            raw_slice_issue(260, "## Parent\n\n#201\n", &["slice"], false),
+            raw_slice_issue(261, "## Parent\n\n#200\n", &["prd"], false),
+        ])
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(vec![])
+    }
+
+    async fn list_projects(&self) -> AppResult<Vec<Project>> {
+        Ok(vec![])
+    }
+
+    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
+        Ok(())
+    }
+
+    async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
+        Ok(())
+    }
+}
+
+async fn promotion_board() -> ClassifiedBoard {
+    BoardService::new(PromotionFixturePort)
+        .classify_board(&RepoRef::new("funkode-io", "zfirot"))
+        .await
+        .expect("fixture port should classify the board")
+}
+
+/// Every issue whose Parent resolves lands on the right Lane, and one whose
+/// Parent cannot be resolved lands in "No PRD" rather than disappearing.
+#[tokio::test]
+async fn classify_board_promotes_parented_issues_onto_their_lane() {
+    let ClassifiedBoard { slices, .. } = promotion_board().await;
+
+    let cases: [(u64, Option<u64>, &str); 9] = [
+        (210, Some(PROMOTION_PRD), "unlabelled, prose Parent"),
+        (211, Some(PROMOTION_PRD), "non-classifying labels only"),
+        (212, Some(PROMOTION_PRD), "the dxp-data-loom#1250 shape"),
+        (213, Some(PROMOTION_PRD), "prose Parent and prose blocker"),
+        (220, Some(PROMOTION_PRD), "native PRD beats prose non-PRD"),
+        (240, None, "closed Parent"),
+        (241, None, "Parent outside the board"),
+        (242, None, "native Parent outside the board"),
+        (260, Some(201), "tier-1 Slice keeps its non-PRD parent"),
+    ];
+
+    for (issue, lane, name) in cases {
+        let slice = slices
+            .iter()
+            .find(|s| s.number == issue)
+            .unwrap_or_else(|| panic!("#{issue} ({name}) should be a Slice"));
+        assert_eq!(
+            slice.prd.as_ref().map(|prd| prd.number),
+            lane,
+            "#{issue} ({name}) is on the wrong Lane"
+        );
+    }
+}
+
+/// A Parent that resolves to anything but a PRD promotes nothing, so the tray
+/// holds exactly those issues and the genuine orphans.
+#[tokio::test]
+async fn classify_board_keeps_non_prd_children_and_orphans_in_the_tray() {
+    let ClassifiedBoard {
+        slices,
+        prds,
+        other,
+        ..
+    } = promotion_board().await;
+
+    let tray: Vec<u64> = other.iter().map(|issue| issue.number).collect();
+    assert_eq!(
+        tray,
+        vec![201, 221, 230, 231, 250, 251, 252],
+        "the tray should shrink to non-PRD children and genuine orphans"
+    );
+
+    let suggested = other.iter().find(|issue| issue.number == 231).unwrap();
+    assert_eq!(
+        suggested.classification,
+        IssueClassification::SuggestedSlice,
+        "an unpromoted issue keeps its first-pass classification"
+    );
+    assert!(
+        !slices.iter().any(|s| tray.contains(&s.number)),
+        "no tray issue may also be a Slice"
+    );
+    assert!(
+        prds.iter().any(|p| p.number == 261),
+        "a labelled PRD with a Parent stays a PRD"
+    );
+}
+
+/// Promotion only decides *that* an issue is a Slice: its state and Blocked
+/// reasons come from the same rules as a labelled Slice's.
+#[tokio::test]
+async fn classify_board_derives_promoted_slice_state_like_a_labelled_one() {
+    use domain::{BlockedReason, SliceState};
+
+    let ClassifiedBoard { slices, .. } = promotion_board().await;
+
+    struct Case {
+        issue: u64,
+        expected_state: SliceState,
+        expected_reasons: Vec<BlockedReason>,
+        expected_blockers: Vec<u64>,
+    }
+    let cases = [
+        Case {
+            issue: 210,
+            expected_state: SliceState::Ready,
+            expected_reasons: vec![],
+            expected_blockers: vec![],
+        },
+        Case {
+            issue: 211,
+            expected_state: SliceState::Blocked,
+            expected_reasons: vec![BlockedReason::Deferred],
+            expected_blockers: vec![],
+        },
+        Case {
+            issue: 212,
+            expected_state: SliceState::Blocked,
+            expected_reasons: vec![
+                BlockedReason::ExternalBlocker,
+                BlockedReason::Deferred,
+                BlockedReason::LabelledBlocked,
+            ],
+            expected_blockers: vec![],
+        },
+        Case {
+            issue: 213,
+            expected_state: SliceState::Blocked,
+            expected_reasons: vec![BlockedReason::Dependency],
+            expected_blockers: vec![210],
+        },
+    ];
+
+    for case in cases {
+        let slice = slices
+            .iter()
+            .find(|s| s.number == case.issue)
+            .unwrap_or_else(|| panic!("#{} should be a Slice", case.issue));
+        assert_eq!(slice.state, case.expected_state, "#{} state", case.issue);
+        assert_eq!(
+            slice.blocked_reasons, case.expected_reasons,
+            "#{} reasons",
+            case.issue
+        );
+        let blockers: Vec<u64> = slice.blockers.iter().map(|b| b.number).collect();
+        assert_eq!(blockers, case.expected_blockers, "#{} blockers", case.issue);
+    }
+}

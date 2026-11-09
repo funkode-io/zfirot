@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 /// How an open GitHub issue has been classified by the two-tier strategy.
@@ -10,11 +12,15 @@ use serde::{Deserialize, Serialize};
 ///   [`IssueClassification::SuggestedSlice`].
 /// - **Tier 3:** nothing matches → [`IssueClassification::Unclassified`], shown
 ///   in "other open issues".
+///
+/// Those tiers read one issue alone. [`classify_on_board`] then promotes issues
+/// to [`IssueClassification::Slice`] by their Parent, against the whole board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueClassification {
     /// Confident — carries the `prd` label.
     Prd,
-    /// Confident — native child of a PRD, or carries `slice`/`ready-for-agent`.
+    /// Confident — native child of a PRD, carries `slice`/`ready-for-agent`, or
+    /// promoted by its Parent (see [`classify_on_board`]).
     Slice,
     /// Heuristic — body matches PRD template headings; unconfirmed.
     SuggestedPrd,
@@ -117,6 +123,46 @@ pub fn classify_issue(raw: &RawIssue) -> IssueClassification {
     }
 
     IssueClassification::Unclassified
+}
+
+/// The issue number of an issue's Parent: the native sub-issue link when present,
+/// otherwise the prose `## Parent` section.
+pub fn parent_of(raw: &RawIssue) -> Option<u64> {
+    raw.native_parent
+        .or_else(|| parse_parent_from_body(raw.body.as_deref()?))
+}
+
+/// Classify an issue with the board around it: [`classify_issue`], then promotion
+/// by Parent (ADR 0007). `open_issues` holds every open issue number on the board
+/// and `open_prds` the ones among them that are PRDs.
+///
+/// An issue the first pass left unconfirmed becomes a Slice when its [`parent_of`]
+/// is:
+///
+/// - an open PRD, which puts it on that PRD's Lane; or
+/// - not an open issue on the board (closed, or never fetched), which puts it in
+///   the "No PRD" Lane rather than losing planned work.
+///
+/// A Parent that is an open issue of any other kind promotes nothing, so a bug's
+/// sub-task stays off the board. Tier-1 classifications are never changed.
+pub fn classify_on_board(
+    raw: &RawIssue,
+    open_issues: &HashSet<u64>,
+    open_prds: &HashSet<u64>,
+) -> IssueClassification {
+    let first_pass = classify_issue(raw);
+    if matches!(
+        first_pass,
+        IssueClassification::Prd | IssueClassification::Slice
+    ) {
+        return first_pass;
+    }
+    match parent_of(raw) {
+        Some(parent) if open_prds.contains(&parent) || !open_issues.contains(&parent) => {
+            IssueClassification::Slice
+        }
+        _ => first_pass,
+    }
 }
 
 /// Parse the parent issue number from the `## Parent` section of an issue body.
