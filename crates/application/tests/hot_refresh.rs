@@ -1976,6 +1976,44 @@ async fn a_stamp_only_write_during_a_structural_refresh_repaints_nothing() {
     }
 }
 
+/// GitHub did not stamp a relationship edit, so a reload reads new detail under the
+/// old stamp while a newer stamp lands on the old detail. Pinning that newer stamp on
+/// the reload's detail would make the pair look current to the next sweep, which then
+/// never re-reads the issue.
+#[tokio::test]
+async fn a_stamp_written_during_a_reload_is_not_pinned_on_detail_it_did_not_describe() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let (opened, stamped) = opened_and_structurally_written(
+        &cache,
+        vec![slice_issue(70), slice_issue(71)],
+        vec![],
+        stamp_moved(slice_issue(70)),
+    )
+    .await;
+
+    let unstamped_edit = slice_blocked_by(70, 71);
+    let github = Arc::new(
+        ScriptedGitHub::new(vec![unstamped_edit.clone(), slice_issue(71)], vec![vec![]])
+            .with_write_during_fetch(cache.clone(), stamped),
+    );
+    let service = CachedBoardService::new(github.clone(), cache.clone());
+    let reconciled = changed(
+        service
+            .reconcile_cached(&repo(), &opened)
+            .await
+            .expect("reconcile should succeed"),
+        "the unstamped edit changes the board",
+    );
+    assert_eq!(slice(&reconciled.board, 70).state, SliceState::Blocked);
+
+    github.update_issue(stamp_moved(unstamped_edit));
+    github.set_hydrate_failing(true);
+    service
+        .structural_refresh_cached(&repo(), &reconciled.snapshot)
+        .await
+        .expect_err("the next sweep must still re-read #70, whose stamp it has not seen");
+}
+
 /// A real write landing mid-fetch repaints, but overlaying it must leave every card
 /// where it was.
 #[tokio::test]

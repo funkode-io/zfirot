@@ -521,25 +521,26 @@ fn with_issues_written_meanwhile(
 }
 
 /// `issues` with the stamps written to the cache while their fetch was in flight. An
-/// issue still carrying the stamp it had in `start` was reused rather than read, so
-/// the cache's stamp is newer, and writing the old one back would have the next sweep
-/// hydrate it again. An issue this fetch did read keeps the stamp it read.
+/// issue still exactly as it was in `start` was reused rather than read, so the
+/// cache's stamp is newer, and writing the old one back would have the next sweep
+/// hydrate it again. Any other issue keeps its own stamp: its detail came from this
+/// fetch, and a stamp it never read would hide that detail from the next sweep.
 fn with_stamps_moved_meanwhile(
     mut issues: Vec<RawIssue>,
     start: &[RawIssue],
     cached: &[RawIssue],
 ) -> Vec<RawIssue> {
-    let stamps = |issues: &[RawIssue]| -> HashMap<u64, String> {
+    let by_number = |issues: &'_ [RawIssue]| -> HashMap<u64, RawIssue> {
         issues
             .iter()
-            .map(|issue| (issue.number, issue.updated_at.clone()))
+            .map(|issue| (issue.number, issue.clone()))
             .collect()
     };
-    let (start, cached) = (stamps(start), stamps(cached));
+    let (start, cached) = (by_number(start), by_number(cached));
     for issue in &mut issues {
-        if start.get(&issue.number) == Some(&issue.updated_at) {
-            if let Some(stamp) = cached.get(&issue.number) {
-                issue.updated_at.clone_from(stamp);
+        if start.get(&issue.number) == Some(&*issue) {
+            if let Some(newer) = cached.get(&issue.number) {
+                issue.updated_at.clone_from(&newer.updated_at);
             }
         }
     }
