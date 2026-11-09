@@ -107,7 +107,13 @@ fn a_null_alias_with_no_explanation_of_its_own_fails() {
             r#"{{ "data": {{ "repository": {{ "i9": null, "i10": null }} }}, "errors": {errors} }}"#
         );
 
-        parse_hydrate_response(&body).expect_err(errors);
+        let error = parse_hydrate_response(&body).expect_err(errors);
+
+        assert_eq!(error.kind(), AppErrorKind::Internal);
+        assert!(
+            format!("{error:?}").contains("i9"),
+            "the failure names the unanswered alias: {error:?}",
+        );
     }
 }
 

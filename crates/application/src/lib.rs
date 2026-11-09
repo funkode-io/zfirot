@@ -1058,7 +1058,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             // advanced watermark will not report again. Dropping the hydrate's
             // read loses nothing, because that watermark predates the issue
             // side's own read, so any later change still reaches its next delta.
-            let current = self.freshest_snapshot(repo, snapshot).await?;
+            let current = self.freshest_snapshot(repo, &freshest).await?;
             let written = issues_changed_between(&freshest.raw_issues, &current.raw_issues);
             let cascade: Vec<u64> = cascade
                 .into_iter()

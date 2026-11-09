@@ -935,15 +935,28 @@ pub fn parse_hydrate_response(body: &str) -> AppResult<Vec<RawIssue>> {
         return Err(repository_query_error(errors, OPERATION));
     };
 
-    let unanswered = aliases.iter().any(|(alias, node)| {
-        node.is_none() && !errors.iter().any(|error| is_unresolvable(error, alias))
-    });
-    if unanswered {
-        let causes = errors
+    let mut unanswered: Vec<&str> = aliases
+        .iter()
+        .filter(|(alias, node)| {
+            node.is_none() && !errors.iter().any(|error| is_unresolvable(error, alias))
+        })
+        .map(|(alias, _)| alias.as_str())
+        .collect();
+    if !unanswered.is_empty() {
+        unanswered.sort_unstable();
+        let unanswered = unanswered.join(", ");
+        let causes: Vec<GraphQlError> = errors
             .into_iter()
             .filter(|error| error.error_type.as_deref() != Some("NOT_FOUND"))
             .collect();
-        return Err(repository_query_error(causes, OPERATION));
+        if causes.is_empty() {
+            return Err(
+                AppError::internal("GitHub left an issue unanswered without saying why")
+                    .with_operation(OPERATION)
+                    .with_context("aliases", unanswered),
+            );
+        }
+        return Err(repository_query_error(causes, OPERATION).with_context("aliases", unanswered));
     }
 
     let mut issues: Vec<RawIssue> = aliases.into_values().flatten().map(map_issue_raw).collect();
