@@ -538,6 +538,35 @@ fn unlinked_prs(linked_prs: &[RawLinkedPr], slices: &[Slice]) -> Vec<LinkedPrRef
         .collect()
 }
 
+/// The open issues that promote their children: the PRDs and Suggested PRDs of the
+/// first classification pass, then every Slice reachable from them or from a Parent the
+/// board does not hold. Repeated until nothing new is found, so promotion depends
+/// on neither the depth of a split nor the order of the board, and a Parent cycle
+/// with no plan behind it promotes nothing.
+fn open_plan(raw_issues: &[RawIssue], open_numbers: &HashSet<u64>) -> HashSet<u64> {
+    let open_issues = || raw_issues.iter().filter(|raw| !raw.closed);
+    let mut plan: HashSet<u64> = open_issues()
+        .filter(|raw| {
+            matches!(
+                classify_issue(raw),
+                IssueClassification::Prd | IssueClassification::SuggestedPrd
+            )
+        })
+        .map(|raw| raw.number)
+        .collect();
+    loop {
+        let found: Vec<u64> = open_issues()
+            .filter(|raw| !plan.contains(&raw.number))
+            .filter(|raw| classify_on_board(raw, open_numbers, &plan) == IssueClassification::Slice)
+            .map(|raw| raw.number)
+            .collect();
+        if found.is_empty() {
+            return plan;
+        }
+        plan.extend(found);
+    }
+}
+
 /// Pure projection from the board's two authoritative collections — the open
 /// raw issues and the open Linked PRs of the last **Sweep** — to a classified
 /// board.
@@ -579,19 +608,7 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
         })
         .collect();
 
-    // The first classification pass, so the second can promote an issue whose
-    // Parent is one of these PRDs or Suggested PRDs.
-    let open_prds: HashSet<u64> = raw_issues
-        .iter()
-        .filter(|raw| {
-            !raw.closed
-                && matches!(
-                    classify_issue(raw),
-                    IssueClassification::Prd | IssueClassification::SuggestedPrd
-                )
-        })
-        .map(|raw| raw.number)
-        .collect();
+    let open_plan = open_plan(raw_issues, &open_numbers);
 
     let mut slices = Vec::new();
     let mut prds = Vec::new();
@@ -602,7 +619,7 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
             continue;
         }
 
-        match classify_on_board(&raw, &open_numbers, &open_prds) {
+        match classify_on_board(&raw, &open_numbers, &open_plan) {
             IssueClassification::Slice => {
                 let body_str = raw.body.as_deref().unwrap_or("");
                 // Use native blockers when present; otherwise fall back to
@@ -622,7 +639,7 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
                     )
                 };
                 // Look the Parent up among the issues in this board.
-                let prd = lane_parent_of(&raw, &open_prds)
+                let prd = lane_parent_of(&raw, &open_plan)
                     .and_then(|number| issue_by_number.get(&number).cloned());
                 slices.push(RawSlice {
                     number: raw.number,

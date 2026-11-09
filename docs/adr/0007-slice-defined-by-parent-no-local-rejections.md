@@ -19,6 +19,12 @@ like any other, marked unconfirmed, with a positive-only **Confirm** that adds
 the `prd` label and a **Veto** that adds `not-a-prd`. The app stores **no local
 memory of either decision**.
 
+A Parent that is itself a Slice is enough too (#196): a Slice split into one
+sub-issue per PR is still the plan's work, and without this the sub-issue and the
+PR closing it left the plan's board. It sits on a Lane headed by that parent,
+where a labelled sub-issue already was. The rejection of "any open issue" below
+stands, because a bug that is not a Slice still promotes nothing.
+
 ## Considered options
 
 - **Requiring the parent to be a confident (`prd`-labelled) PRD.** Rejected: the

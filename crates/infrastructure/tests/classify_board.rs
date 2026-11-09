@@ -7,8 +7,8 @@ use application::{BoardRefresh, BoardService, ClassifiedBoard, PendingDecisions}
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    group_into_lanes, AppAction, AppError, AppResult, IssueClassification, Project, RawIssue, RawLinkedPr,
-    RepoRef,
+    group_into_lanes, AppAction, AppError, AppResult, IssueClassification, Project, RawIssue,
+    RawLinkedPr, RepoRef,
 };
 use infrastructure::FakeGitHubPort;
 
@@ -1088,7 +1088,10 @@ async fn refreshing_from_the_retained_snapshot_shows_a_veto() {
 fn labels_of(port: &LabellingPort, number: u64) -> Vec<String> {
     let issues = port.0.lock().unwrap();
     let issue = issues.iter().find(|issue| issue.number == number);
-    issue.expect("the fixture should hold this issue").labels.clone()
+    issue
+        .expect("the fixture should hold this issue")
+        .labels
+        .clone()
 }
 
 /// An accepted decision whose refresh fails leaves the guess on screen. It must not

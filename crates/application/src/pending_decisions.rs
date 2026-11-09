@@ -36,9 +36,8 @@ impl PendingDecisions {
     /// End every decision in `repo` that `board`, the one on screen, has caught up
     /// with. Other repos are left alone: their boards are not on screen.
     pub fn settle(&mut self, repo: &RepoRef, board: &ClassifiedBoard) {
-        self.0.retain(|(held_repo, number)| {
-            held_repo != repo || still_suggested(board, *number)
-        });
+        self.0
+            .retain(|(held_repo, number)| held_repo != repo || still_suggested(board, *number));
     }
 
     /// The issues in `repo` with a decision outstanding.
