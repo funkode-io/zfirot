@@ -386,37 +386,45 @@ fn merge_hydrated_issues(
     merge_issues(&survivors, hydrated)
 }
 
-/// An issue-side result with whatever landed in the cache while it was in flight
-/// laid back over it. An issue the cache holds differently from the `base` this
-/// fetch started from was written by a **Cascade** meanwhile, and that write
-/// wins: this fetch may have read the issue before the PR merged, and would
-/// otherwise put a closed Slice back on the board. If this fetch was in fact the
-/// newer read, the next one heals it, since its window starts before this fetch.
-fn with_issues_written_meanwhile(
-    fetched: &[RawIssue],
-    base: &[RawIssue],
-    cached: &[RawIssue],
-) -> Vec<RawIssue> {
-    let by_number = |issues: &'_ [RawIssue]| -> HashMap<u64, RawIssue> {
+/// The numbers of the issues `after` holds differently from `before`, including
+/// any one of them holds and the other does not: what was written between two
+/// reads of the cache.
+fn issues_changed_between(before: &[RawIssue], after: &[RawIssue]) -> HashSet<u64> {
+    let by_number = |issues: &[RawIssue]| -> HashMap<u64, RawIssue> {
         issues
             .iter()
             .map(|issue| (issue.number, issue.clone()))
             .collect()
     };
-    let (base, cached_by_number) = (by_number(base), by_number(cached));
-    let dropped_meanwhile =
-        |number: &u64| base.contains_key(number) && !cached_by_number.contains_key(number);
-    let written_meanwhile: Vec<RawIssue> = cached
-        .iter()
-        .filter(|issue| base.get(&issue.number) != Some(issue))
-        .cloned()
-        .collect();
+    let (before, after) = (by_number(before), by_number(after));
+    before
+        .keys()
+        .chain(after.keys())
+        .filter(|number| before.get(number) != after.get(number))
+        .copied()
+        .collect()
+}
+
+/// An issue-side result with the issues a **Cascade** wrote while it was in flight
+/// (`written`) laid back over it. That write wins: this fetch may have read the
+/// issue before the PR merged, and would otherwise put a closed Slice back on the
+/// board.
+fn with_issues_written_meanwhile(
+    fetched: &[RawIssue],
+    written: &HashSet<u64>,
+    cached: &[RawIssue],
+) -> Vec<RawIssue> {
     let survivors: Vec<RawIssue> = fetched
         .iter()
-        .filter(|issue| !dropped_meanwhile(&issue.number))
+        .filter(|issue| !written.contains(&issue.number))
         .cloned()
         .collect();
-    merge_issues(&survivors, &written_meanwhile)
+    let written: Vec<RawIssue> = cached
+        .iter()
+        .filter(|issue| written.contains(&issue.number))
+        .cloned()
+        .collect();
+    merge_issues(&survivors, &written)
 }
 
 /// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
@@ -991,10 +999,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
-        let refresh = self.board.refresh(repo, snapshot).await?;
-        let refresh = self
-            .with_freshest_hot_facts(repo, snapshot, refresh)
-            .await?;
+        let start = self.freshest_snapshot(repo, snapshot).await?;
+        let refresh = self.board.refresh(repo, &start).await?;
+        let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
         let snapshot_to_cache = match &refresh {
             BoardRefresh::Changed(loaded) => &loaded.snapshot,
             BoardRefresh::Unchanged(snapshot) => snapshot,
@@ -1046,8 +1053,22 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         } else {
             let hydrated = self.board.hydrate_issues(repo, &cascade).await?;
             // The hydrate yielded, so the issue side may have written meanwhile.
-            self.freshest_snapshot(repo, snapshot)
-                .await?
+            // An issue it wrote keeps that write: the hydrate may have read it
+            // earlier, and overlaying it would undo a closure the issue side's
+            // advanced watermark will not report again. Dropping the hydrate's
+            // read loses nothing, because that watermark predates the issue
+            // side's own read, so any later change still reaches its next delta.
+            let current = self.freshest_snapshot(repo, snapshot).await?;
+            let written = issues_changed_between(&freshest.raw_issues, &current.raw_issues);
+            let cascade: Vec<u64> = cascade
+                .into_iter()
+                .filter(|number| !written.contains(number))
+                .collect();
+            let hydrated: Vec<RawIssue> = hydrated
+                .into_iter()
+                .filter(|issue| !written.contains(&issue.number))
+                .collect();
+            current
                 .with_linked_prs(linked_prs)
                 .with_hydrated_issues(&cascade, &hydrated)
         }
@@ -1086,31 +1107,36 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     }
 
     /// Re-decide an issue-side refresh's outcome against everything the hot path
-    /// wrote while it was in flight, so its result carries the hot path's PR facts
-    /// and **Cascade** rather than the (possibly older) ones its base snapshot was
-    /// captured with.
-    async fn with_freshest_hot_facts(
+    /// wrote since the fetch began, when the cache held `start`, so its result
+    /// carries the hot path's PR facts and **Cascade** rather than older ones. Only
+    /// writes made after `start` are protected: anything earlier was there for the
+    /// fetch to supersede.
+    ///
+    /// A Cascade that overrode this fetch's answer may itself be the older read,
+    /// so the watermark then stays at `start`: the next delta reads those issues
+    /// again rather than skipping whatever this fetch saw.
+    async fn with_hot_facts_since(
         &self,
         repo: &RepoRef,
-        base: &BoardSnapshot,
+        start: &BoardSnapshot,
         refresh: BoardRefresh,
     ) -> AppResult<BoardRefresh> {
         let refreshed = match &refresh {
             BoardRefresh::Changed(loaded) => &loaded.snapshot,
             BoardRefresh::Unchanged(snapshot) => snapshot,
         };
-        let freshest = self.freshest_snapshot(repo, base).await?;
-        let raw_issues = with_issues_written_meanwhile(
-            &refreshed.raw_issues,
-            &base.raw_issues,
-            &freshest.raw_issues,
-        );
-        if freshest.linked_prs == refreshed.linked_prs && raw_issues == refreshed.raw_issues {
-            return Ok(refresh);
-        }
+        let freshest = self.freshest_snapshot(repo, start).await?;
+        let written = issues_changed_between(&start.raw_issues, &freshest.raw_issues);
+        let raw_issues =
+            with_issues_written_meanwhile(&refreshed.raw_issues, &written, &freshest.raw_issues);
+        let fetched_at = if raw_issues == refreshed.raw_issues {
+            refreshed.fetched_at
+        } else {
+            start.fetched_at
+        };
         Ok(refresh_outcome(
-            BoardSnapshot::new(raw_issues, freshest.linked_prs, refreshed.fetched_at),
-            base,
+            BoardSnapshot::new(raw_issues, freshest.linked_prs, fetched_at),
+            start,
         ))
     }
 
@@ -1128,10 +1154,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
-        let refresh = self.board.reload_issues(repo, snapshot).await?;
-        let refresh = self
-            .with_freshest_hot_facts(repo, snapshot, refresh)
-            .await?;
+        let start = self.freshest_snapshot(repo, snapshot).await?;
+        let refresh = self.board.reload_issues(repo, &start).await?;
+        let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
         let loaded = match refresh {
             BoardRefresh::Changed(loaded) => loaded,
             unchanged => return Ok(unchanged),

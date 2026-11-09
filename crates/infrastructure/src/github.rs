@@ -908,10 +908,10 @@ pub fn parse_open_prs_response(body: &str) -> AppResult<(Vec<RawLinkedPr>, Optio
 /// Parse one [`hydrate_queries`] response into the issues GitHub resolved, sorted
 /// by number. Pure and offline.
 ///
-/// A number GitHub cannot resolve answers with a null alias and a `NOT_FOUND`
-/// beside it, which is how a deleted or transferred issue reads: it is left out of
-/// the result, not reported as a failure, and the rest of the batch stands. A null
-/// alias for any *other* reason (say a `FORBIDDEN`) says nothing about whether the
+/// A number GitHub cannot resolve answers with a null alias and a `NOT_FOUND` at
+/// that alias's own path, which is how a deleted or transferred issue reads: it is
+/// left out of the result, not reported as a failure, and the rest of the batch
+/// stands. A null alias with no such explanation says nothing about whether the
 /// issue exists, so that fails the request rather than dropping a live Slice off
 /// the board. Field-level errors beside a resolved issue are tolerated, as in
 /// [`parse_issues_response`].
@@ -935,12 +935,15 @@ pub fn parse_hydrate_response(body: &str) -> AppResult<Vec<RawIssue>> {
         return Err(repository_query_error(errors, OPERATION));
     };
 
-    let unexplained: Vec<GraphQlError> = errors
-        .into_iter()
-        .filter(|error| !is_unresolvable_issue(error))
-        .collect();
-    if !unexplained.is_empty() && aliases.values().any(Option::is_none) {
-        return Err(repository_query_error(unexplained, OPERATION));
+    let unanswered = aliases.iter().any(|(alias, node)| {
+        node.is_none() && !errors.iter().any(|error| is_unresolvable(error, alias))
+    });
+    if unanswered {
+        let causes = errors
+            .into_iter()
+            .filter(|error| error.error_type.as_deref() != Some("NOT_FOUND"))
+            .collect();
+        return Err(repository_query_error(causes, OPERATION));
     }
 
     let mut issues: Vec<RawIssue> = aliases.into_values().flatten().map(map_issue_raw).collect();
@@ -948,13 +951,15 @@ pub fn parse_hydrate_response(body: &str) -> AppResult<Vec<RawIssue>> {
     Ok(issues)
 }
 
-/// Whether a GraphQL error is GitHub saying an aliased issue does not exist here.
-fn is_unresolvable_issue(error: &GraphQlError) -> bool {
+/// Whether a GraphQL error is GitHub saying the issue at `alias` does not exist
+/// here. A `NOT_FOUND` deeper inside an alias is about one of its fields, not the
+/// issue.
+fn is_unresolvable(error: &GraphQlError, alias: &str) -> bool {
     error.error_type.as_deref() == Some("NOT_FOUND")
-        || error
-            .message
-            .to_lowercase()
-            .contains("could not resolve to an issue")
+        && matches!(
+            error.path.as_deref(),
+            Some([_repository, at]) if at.as_str() == Some(alias)
+        )
 }
 
 /// Parse a GraphQL projects response into a page of [`Project`]s and the cursor
@@ -1430,6 +1435,8 @@ struct GraphQlError {
     message: String,
     #[serde(rename = "type")]
     error_type: Option<String>,
+    /// Where in the response the error applies. Mixed strings and list indexes.
+    path: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Deserialize)]

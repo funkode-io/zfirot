@@ -96,6 +96,7 @@ struct ScriptedGitHub {
     issues_fail: bool,
     sweep_fails: bool,
     hydrate_fails: AtomicBool,
+    write_during_fetch: Mutex<Option<(Arc<CountingBoardCache>, BoardSnapshot)>>,
 }
 
 impl ScriptedGitHub {
@@ -108,6 +109,7 @@ impl ScriptedGitHub {
             issues_fail: false,
             sweep_fails: false,
             hydrate_fails: AtomicBool::new(false),
+            write_during_fetch: Mutex::new(None),
         }
     }
 
@@ -116,6 +118,32 @@ impl ScriptedGitHub {
         Self {
             deltas: Mutex::new(VecDeque::from(deltas)),
             ..self
+        }
+    }
+
+    /// The same GitHub, with the other refresh path landing `snapshot` in `cache`
+    /// while the next issue read or **Hydrate** is in flight. It runs on the far
+    /// side of that await, so the answer was read before the write landed.
+    fn with_write_during_fetch(
+        self,
+        cache: Arc<CountingBoardCache>,
+        snapshot: BoardSnapshot,
+    ) -> Self {
+        *self.write_during_fetch.lock().expect("lock poisoned") = Some((cache, snapshot));
+        self
+    }
+
+    async fn land_write_during_fetch(&self) {
+        let write = self
+            .write_during_fetch
+            .lock()
+            .expect("lock poisoned")
+            .take();
+        if let Some((cache, snapshot)) = write {
+            cache
+                .cache_board(&repo(), &snapshot)
+                .await
+                .expect("the fake cache's write should succeed");
         }
     }
 
@@ -169,6 +197,7 @@ impl ScriptedGitHub {
 #[async_trait]
 impl GitHubPort for ScriptedGitHub {
     async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        self.land_write_during_fetch().await;
         if self.issues_fail {
             return Err(AppError::unavailable("GitHub is temporarily unavailable"));
         }
@@ -188,6 +217,7 @@ impl GitHubPort for ScriptedGitHub {
         _repo: &RepoRef,
         _since: DateTime<Utc>,
     ) -> AppResult<Vec<RawIssue>> {
+        self.land_write_during_fetch().await;
         if self.issues_fail {
             return Err(AppError::unavailable("GitHub is temporarily unavailable"));
         }
@@ -212,6 +242,7 @@ impl GitHubPort for ScriptedGitHub {
     }
 
     async fn hydrate_issues(&self, _repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
+        self.land_write_during_fetch().await;
         if self.hydrate_fails.load(Ordering::SeqCst) {
             return Err(AppError::unavailable("GitHub is temporarily unavailable"));
         }
@@ -1235,44 +1266,79 @@ async fn a_failed_cascade_writes_nothing_and_the_next_sweep_retries_it() {
     assert_eq!(slice(&retried.board, 37).state, SliceState::Ready);
 }
 
-/// A structural refresh that started before a cascade landed read the issue while
-/// it was still open. Finishing later must not resurrect it, or the merged PR's
-/// Slice would sit on the board again until the next delta.
-#[tokio::test]
-async fn an_issue_side_refresh_completing_after_a_cascade_keeps_its_issue_facts() {
-    let cache = Arc::new(CountingBoardCache::default());
+/// The board as it opens with PR #380 on #38 and #39 blocked behind it, plus the
+/// snapshot the Cascade writes once that PR merges. The cache is left holding the
+/// opening board, so the Cascade can land during a later fetch.
+async fn opened_and_cascaded(cache: &Arc<CountingBoardCache>) -> (BoardSnapshot, BoardSnapshot) {
     let service = CachedBoardService::new(
         ScriptedGitHub::new(
             vec![slice_issue(38), slice_blocked_by(39, 38)],
             vec![vec![open_pr(380, 38)], vec![]],
         )
-        .with_issue(closed(slice_issue(38)))
-        .with_deltas(vec![vec![slice_issue(40)]]),
+        .with_issue(closed(slice_issue(38))),
         cache.clone(),
     );
-
     let opened = seeded(&service).await;
-    changed(
+    let cascaded = changed(
         service
             .hot_refresh_cached(&repo(), &opened)
             .await
             .expect("hot refresh should succeed"),
         "the merged PR's cascade changes the board",
+    )
+    .snapshot;
+    cache
+        .cache_board(&repo(), &opened)
+        .await
+        .expect("the fake cache's write should succeed");
+    (opened, cascaded)
+}
+
+/// A structural refresh that started before a cascade landed read the issue while
+/// it was still open. Finishing later must not resurrect it, or the merged PR's
+/// Slice would sit on the board again until the next delta.
+#[tokio::test]
+async fn a_delta_in_flight_during_a_cascade_keeps_the_cascade() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let (opened, cascaded) = opened_and_cascaded(&cache).await;
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_deltas(vec![vec![slice_issue(38), slice_issue(40)]])
+            .with_write_during_fetch(cache.clone(), cascaded),
+        cache.clone(),
     );
 
-    // Both issue-side paths started from the pre-cascade snapshot.
     let delta = changed(
         service
             .refresh_cached(&repo(), &opened)
             .await
             .expect("structural refresh should succeed"),
-        "a new issue changes the board",
+        "the cascade and the new issue change the board",
     );
+
     assert!(!delta.board.slices.iter().any(|slice| slice.number == 38));
     assert_eq!(slice(&delta.board, 39).state, SliceState::Ready);
     assert!(
         delta.board.slices.iter().any(|slice| slice.number == 40),
         "the refresh still applies its own issue-side change",
+    );
+    assert_eq!(
+        delta.snapshot.fetched_at, opened.fetched_at,
+        "a fetch the cascade overrode must not move the watermark past what it saw",
+    );
+}
+
+#[tokio::test]
+async fn a_reconcile_in_flight_during_a_cascade_keeps_the_cascade() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let (opened, cascaded) = opened_and_cascaded(&cache).await;
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(38), slice_blocked_by(39, 38)],
+            vec![vec![]],
+        )
+        .with_write_during_fetch(cache.clone(), cascaded),
+        cache.clone(),
     );
 
     let reconciled = changed(
@@ -1280,8 +1346,9 @@ async fn an_issue_side_refresh_completing_after_a_cascade_keeps_its_issue_facts(
             .reconcile_cached(&repo(), &opened)
             .await
             .expect("reconcile should succeed"),
-        "the reconcile's base predates the cascade",
+        "the cascade changes the board",
     );
+
     assert!(
         !reconciled
             .board
@@ -1290,4 +1357,128 @@ async fn an_issue_side_refresh_completing_after_a_cascade_keeps_its_issue_facts(
             .any(|slice| slice.number == 38),
         "a reload that read the issue before the cascade must not resurrect it",
     );
+    assert_eq!(slice(&reconciled.board, 39).state, SliceState::Ready);
+}
+
+/// Only a write made during the fetch is protected. One that landed before it
+/// began is there for the fetch to supersede, however stale the caller's snapshot.
+#[tokio::test]
+async fn a_reconcile_with_a_stale_caller_still_applies_githubs_newer_answer() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(41)], vec![vec![], vec![open_pr(410, 41)]])
+            .with_issue(RawIssue {
+                title: "As the cascade read it".to_string(),
+                ..slice_issue(41)
+            }),
+        cache.clone(),
+    );
+    let stale = seeded(&seeding).await;
+    changed(
+        seeding
+            .hot_refresh_cached(&repo(), &stale)
+            .await
+            .expect("hot refresh should succeed"),
+        "the PR appears",
+    );
+
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![RawIssue {
+                title: "As GitHub says now".to_string(),
+                ..slice_issue(41)
+            }],
+            vec![vec![]],
+        ),
+        cache.clone(),
+    );
+    let reconciled = changed(
+        service
+            .reconcile_cached(&repo(), &stale)
+            .await
+            .expect("reconcile should succeed"),
+        "the reload's newer answer changes the board",
+    );
+
+    assert_eq!(slice(&reconciled.board, 41).title, "As GitHub says now");
+    assert_eq!(slice(&reconciled.board, 41).state, SliceState::Wip);
+}
+
+#[tokio::test]
+async fn a_delta_with_a_stale_caller_builds_on_the_freshest_issues() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let (opened, cascaded) = opened_and_cascaded(&cache).await;
+    cache
+        .cache_board(&repo(), &cascaded)
+        .await
+        .expect("the fake cache's write should succeed");
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![], vec![vec![]]).with_deltas(vec![vec![slice_issue(40)]]),
+        cache.clone(),
+    );
+
+    let delta = changed(
+        service
+            .refresh_cached(&repo(), &opened)
+            .await
+            .expect("structural refresh should succeed"),
+        "a new issue changes the board",
+    );
+
+    assert!(
+        !delta.board.slices.iter().any(|slice| slice.number == 38),
+        "a caller still holding the old board must not bring the closed Slice back",
+    );
+    assert!(delta.board.slices.iter().any(|slice| slice.number == 40));
+}
+
+/// The other completion order: the hydrate read #42 before it closed, and a delta
+/// saw the close while the hydrate was in flight. Overlaying the older read would
+/// reopen it past a watermark that will never report it again, with an unchanged
+/// PR set stopping any further Cascade.
+#[tokio::test]
+async fn a_hydrate_in_flight_during_an_issue_side_write_keeps_that_write() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(42), slice_blocked_by(43, 42)],
+            vec![vec![open_pr(420, 42)]],
+        )
+        .with_deltas(vec![vec![closed(slice_issue(42))]]),
+        cache.clone(),
+    );
+    let opened = seeded(&seeding).await;
+    let structural = changed(
+        seeding
+            .refresh_cached(&repo(), &opened)
+            .await
+            .expect("structural refresh should succeed"),
+        "the close changes the board",
+    )
+    .snapshot;
+    cache
+        .cache_board(&repo(), &opened)
+        .await
+        .expect("the fake cache's write should succeed");
+
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_issue(slice_issue(42))
+            .with_write_during_fetch(cache.clone(), structural.clone()),
+        cache.clone(),
+    );
+    let loaded = changed(
+        service
+            .hot_refresh_cached(&repo(), &opened)
+            .await
+            .expect("hot refresh should succeed"),
+        "the merged PR changes the board",
+    );
+
+    assert!(
+        !loaded.board.slices.iter().any(|slice| slice.number == 42),
+        "the hydrate's older read must not reopen the Slice",
+    );
+    assert_eq!(slice(&loaded.board, 43).state, SliceState::Ready);
+    assert_eq!(loaded.snapshot.fetched_at, structural.fetched_at);
 }

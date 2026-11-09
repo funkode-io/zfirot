@@ -64,7 +64,11 @@ fn an_unresolvable_number_is_left_out_and_the_rest_of_the_batch_stands() {
 fn a_batch_of_only_unresolvable_numbers_is_an_empty_answer() {
     let body = r#"{
         "data": { "repository": { "i9": null } },
-        "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to an Issue with the number of 9." } ]
+        "errors": [ {
+            "type": "NOT_FOUND",
+            "path": ["repository", "i9"],
+            "message": "Could not resolve to an Issue with the number of 9."
+        } ]
     }"#;
 
     assert!(parse_hydrate_response(body)
@@ -78,8 +82,8 @@ fn a_null_alias_for_any_other_reason_fails_rather_than_dropping_a_live_slice() {
         r#"{{
             "data": {{ "repository": {{ "i7": {}, "i9": null, "i10": null }} }},
             "errors": [
-                {{ "type": "NOT_FOUND", "message": "Could not resolve to an Issue with the number of 9." }},
-                {{ "type": "FORBIDDEN", "message": "Resource not accessible by personal access token" }}
+                {{ "type": "NOT_FOUND", "path": ["repository", "i9"], "message": "Could not resolve to an Issue with the number of 9." }},
+                {{ "type": "FORBIDDEN", "path": ["repository", "i10"], "message": "Resource not accessible by personal access token" }}
             ]
         }}"#,
         issue_node(7, "OPEN"),
@@ -88,6 +92,42 @@ fn a_null_alias_for_any_other_reason_fails_rather_than_dropping_a_live_slice() {
     let error = parse_hydrate_response(&body).expect_err("a FORBIDDEN alias may still exist");
 
     assert_eq!(error.kind(), AppErrorKind::Forbidden);
+}
+
+#[test]
+fn a_null_alias_with_no_explanation_of_its_own_fails() {
+    // Nothing says #9 is gone, and treating it as gone would unblock its
+    // dependents. The NOT_FOUND on #10 and on a field of #9 say nothing about it.
+    for errors in [
+        "[]",
+        r#"[ { "type": "NOT_FOUND", "path": ["repository", "i10"], "message": "gone" } ]"#,
+        r#"[ { "type": "NOT_FOUND", "path": ["repository", "i9", "parent"], "message": "gone" } ]"#,
+    ] {
+        let body = format!(
+            r#"{{ "data": {{ "repository": {{ "i9": null, "i10": null }} }}, "errors": {errors} }}"#
+        );
+
+        parse_hydrate_response(&body).expect_err(errors);
+    }
+}
+
+#[test]
+fn a_field_error_on_one_issue_does_not_fail_a_batch_with_an_unresolvable_number() {
+    let body = format!(
+        r#"{{
+            "data": {{ "repository": {{ "i7": {}, "i9": null }} }},
+            "errors": [
+                {{ "type": "FORBIDDEN", "path": ["repository", "i7", "assignees"], "message": "Resource not accessible by personal access token" }},
+                {{ "type": "NOT_FOUND", "path": ["repository", "i9"], "message": "Could not resolve to an Issue with the number of 9." }}
+            ]
+        }}"#,
+        issue_node(7, "OPEN"),
+    );
+
+    let issues = parse_hydrate_response(&body).expect("each alias is accounted for");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].number, 7);
 }
 
 #[test]
