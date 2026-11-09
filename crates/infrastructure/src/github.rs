@@ -882,10 +882,11 @@ pub fn parse_open_prs_response(body: &str) -> AppResult<(Vec<RawLinkedPr>, Optio
 /// the next page (if any). Pure and offline.
 ///
 /// This answer is authoritative, so whatever it leaves out gets dropped from the
-/// board: anything short of a complete page must fail rather than read as "gone". A
-/// repository that did not come back fails as in [`parse_issues_response`], a null
-/// node fails to parse, and so does a page claiming a successor it gives no cursor
-/// for.
+/// board: anything short of a complete page must fail rather than read as "gone".
+/// So unlike the other parsers it tolerates no error beside its data, which costs
+/// nothing here: it selects no optional field a token could be denied. A null
+/// repository or connection fails, a null node fails to parse, and so does a page
+/// claiming a successor it gives no cursor for.
 pub fn parse_issue_index_response(body: &str) -> AppResult<(Vec<IssueStamp>, Option<String>)> {
     const OPERATION: &str = "parse_issue_index_response";
 
@@ -895,14 +896,15 @@ pub fn parse_issue_index_response(body: &str) -> AppResult<(Vec<IssueStamp>, Opt
             .with_source(err)
     })?;
 
+    if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        return Err(repository_query_error(errors, OPERATION));
+    }
+
     let Some(issues) = response
         .data
         .and_then(|data| data.repository)
-        .map(|repository| repository.issues)
+        .and_then(|repository| repository.issues)
     else {
-        if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
-            return Err(repository_query_error(errors, OPERATION));
-        }
         return Err(
             AppError::not_found("Repository not found or not visible to the token")
                 .with_operation(OPERATION),
@@ -1556,7 +1558,7 @@ struct IssueIndexData {
 
 #[derive(Deserialize)]
 struct IssueIndexRepository {
-    issues: IssueIndexConnection,
+    issues: Option<IssueIndexConnection>,
 }
 
 #[derive(Deserialize)]

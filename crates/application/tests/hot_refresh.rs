@@ -1546,3 +1546,140 @@ async fn a_reconcile_in_flight_during_a_hydrate_keeps_its_issue() {
         .iter()
         .any(|slice| slice.number == 48));
 }
+
+/// `issue` as a comment leaves it: nothing on screen differs, but its stamp moved.
+fn stamp_moved(issue: RawIssue) -> RawIssue {
+    RawIssue {
+        updated_at: "2026-11-09T10:05:00Z".to_string(),
+        ..issue
+    }
+}
+
+/// The board as it opens, plus the snapshot a structural refresh writes once GitHub
+/// holds `edit` too. The cache is left holding the opening board, so that write can
+/// land during a later fetch.
+async fn opened_and_structurally_written(
+    cache: &Arc<CountingBoardCache>,
+    issues: Vec<RawIssue>,
+    linked_prs: Vec<RawLinkedPr>,
+    edit: RawIssue,
+) -> (BoardSnapshot, BoardSnapshot) {
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(issues, vec![linked_prs]).with_issue(edit),
+        cache.clone(),
+    );
+    let opened = seeded(&seeding).await;
+    let written = match seeding
+        .structural_refresh_cached(&repo(), &opened)
+        .await
+        .expect("structural refresh should succeed")
+    {
+        BoardRefresh::Changed(loaded) => loaded.snapshot,
+        BoardRefresh::Unchanged(snapshot) => snapshot,
+    };
+    cache
+        .cache_board(&repo(), &opened)
+        .await
+        .expect("the fake cache's write should succeed");
+    (opened, written)
+}
+
+/// A stamp written while the **Cascade**'s hydrate is in flight is not a conflict:
+/// discarding the hydrate for it would save the vanished PR and lose the closure
+/// until the next structural sweep, breaking the 15-second promise.
+#[tokio::test]
+async fn a_stamp_only_write_during_a_cascade_does_not_lose_the_closure() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let (opened, stamped) = opened_and_structurally_written(
+        &cache,
+        vec![slice_issue(50), slice_blocked_by(51, 50)],
+        vec![open_pr(500, 50)],
+        stamp_moved(slice_issue(50)),
+    )
+    .await;
+
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_issue(closed(stamp_moved(slice_issue(50))))
+            .with_write_during_fetch(cache.clone(), stamped),
+        cache.clone(),
+    );
+    let loaded = changed(
+        service
+            .hot_refresh_cached(&repo(), &opened)
+            .await
+            .expect("hot refresh should succeed"),
+        "the merged PR's cascade changes the board",
+    );
+
+    assert!(!loaded.board.slices.iter().any(|slice| slice.number == 50));
+    assert_eq!(slice(&loaded.board, 51).state, SliceState::Ready);
+}
+
+/// The Cascade's stamp-only write landing during a structural refresh changes
+/// nothing on screen, so that refresh has nothing to repaint.
+#[tokio::test]
+async fn a_stamp_only_write_during_a_structural_refresh_repaints_nothing() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let (opened, stamped) = opened_and_structurally_written(
+        &cache,
+        vec![slice_issue(52), slice_issue(53)],
+        vec![],
+        stamp_moved(slice_issue(52)),
+    )
+    .await;
+
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_issue(slice_issue(52))
+            .with_issue(slice_issue(53))
+            .with_write_during_fetch(cache.clone(), stamped),
+        cache.clone(),
+    );
+    let refresh = service
+        .structural_refresh_cached(&repo(), &opened)
+        .await
+        .expect("structural refresh should succeed");
+
+    assert!(
+        matches!(refresh, BoardRefresh::Unchanged(_)),
+        "a stamp in flight must not repaint or reorder the board",
+    );
+}
+
+/// A real write landing mid-fetch repaints, but overlaying it must leave every card
+/// where it was.
+#[tokio::test]
+async fn a_write_during_a_structural_refresh_keeps_the_cards_in_their_places() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let (opened, retitled) = opened_and_structurally_written(
+        &cache,
+        vec![slice_issue(54), slice_issue(55)],
+        vec![],
+        stamp_moved(RawIssue {
+            title: "Retitled".to_string(),
+            ..slice_issue(54)
+        }),
+    )
+    .await;
+
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_issue(slice_issue(54))
+            .with_issue(slice_issue(55))
+            .with_issue(slice_issue(56))
+            .with_write_during_fetch(cache.clone(), retitled),
+        cache.clone(),
+    );
+    let loaded = changed(
+        service
+            .structural_refresh_cached(&repo(), &opened)
+            .await
+            .expect("structural refresh should succeed"),
+        "the retitle and the new issue change the board",
+    );
+
+    let numbers: Vec<u64> = loaded.board.slices.iter().map(|s| s.number).collect();
+    assert_eq!(numbers, vec![54, 55, 56]);
+    assert_eq!(slice(&loaded.board, 54).title, "Retitled");
+}

@@ -426,12 +426,19 @@ fn merge_hydrated_issues(
 
 /// The numbers of the issues `after` holds differently from `before`, including
 /// any one of them holds and the other does not: what was written between two
-/// reads of the cache.
+/// reads of the cache. A stamp alone is no such write: it says nothing the other
+/// path's answer could undo, and treating it as one would throw that answer away.
 fn issues_changed_between(before: &[RawIssue], after: &[RawIssue]) -> HashSet<u64> {
     let by_number = |issues: &[RawIssue]| -> HashMap<u64, RawIssue> {
         issues
             .iter()
-            .map(|issue| (issue.number, issue.clone()))
+            .map(|issue| {
+                let unstamped = RawIssue {
+                    updated_at: String::new(),
+                    ..issue.clone()
+                };
+                (issue.number, unstamped)
+            })
             .collect()
     };
     let (before, after) = (by_number(before), by_number(after));
@@ -446,15 +453,16 @@ fn issues_changed_between(before: &[RawIssue], after: &[RawIssue]) -> HashSet<u6
 /// An issue-side result with the issues a **Cascade** wrote while it was in flight
 /// (`written`) laid back over it. That write wins: this fetch may have read the
 /// issue before the PR merged, and would otherwise put a closed Slice back on the
-/// board.
+/// board. Issues keep their positions, so the overlay alone never reorders cards.
 fn with_issues_written_meanwhile(
     fetched: &[RawIssue],
     written: &HashSet<u64>,
     cached: &[RawIssue],
 ) -> Vec<RawIssue> {
+    let still_cached: HashSet<u64> = cached.iter().map(|issue| issue.number).collect();
     let survivors: Vec<RawIssue> = fetched
         .iter()
-        .filter(|issue| !written.contains(&issue.number))
+        .filter(|issue| !written.contains(&issue.number) || still_cached.contains(&issue.number))
         .cloned()
         .collect();
     let written: Vec<RawIssue> = cached

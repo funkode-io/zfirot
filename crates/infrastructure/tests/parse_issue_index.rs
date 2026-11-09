@@ -77,6 +77,28 @@ fn a_response_that_cannot_be_the_whole_answer_fails_instead_of_reading_as_gone()
             kind: AppErrorKind::Internal,
         },
         Case {
+            name: "the issues connection is null because the token cannot read issues",
+            body: r#"{ "data": { "repository": { "issues": null } },
+                       "errors": [ { "type": "FORBIDDEN", "message": "No." } ] }"#
+                .to_string(),
+            kind: AppErrorKind::Forbidden,
+        },
+        Case {
+            name: "the issues connection is null with no explanation",
+            body: r#"{ "data": { "repository": { "issues": null } } }"#.to_string(),
+            kind: AppErrorKind::NotFound,
+        },
+        Case {
+            name: "a page that looks whole but arrives beside an error",
+            body: r#"{ "data": { "repository": { "issues": {
+                           "pageInfo": { "hasNextPage": false, "endCursor": null },
+                           "nodes": [ { "number": 1, "updatedAt": "2026-11-09T10:00:00Z" } ]
+                       } } },
+                       "errors": [ { "message": "Something went wrong" } ] }"#
+                .to_string(),
+            kind: AppErrorKind::Internal,
+        },
+        Case {
             name: "a repository that did not come back",
             body: r#"{ "data": { "repository": null } }"#.to_string(),
             kind: AppErrorKind::NotFound,
