@@ -165,15 +165,17 @@ _Avoid_: maybe-PRD, candidate
 
 **Confirm**:
 Accept a suggestion by adding the label it lacks (`prd`), turning a guess into a
-fact everyone shares. The app only ever records decisions on GitHub — it keeps no
-local memory of what the user has judged.
+fact everyone shares. A Suggested PRD's Lane header guides the user to do this on
+GitHub — the app keeps no local memory of what the user has judged.
 _Avoid_: approve, accept
 
 **Veto** (label: `not-a-prd`):
 Reject a suggestion outright, so the app stops guessing about that issue. The
 negative counterpart of **Confirm**, and deliberately also a GitHub label: a
 rejection is worth as much to a teammate as an acceptance, and holding it locally
-would be private, cache-fragile state that fights whatever GitHub later says.
+would be private, cache-fragile state that fights whatever GitHub later says. The
+user adds it on GitHub and the board only reads it. It never hides work: natively
+linked children stay on the Lane, and labelled Slices stay on the board.
 _Avoid_: dismiss, ignore, hide
 
 **Lane**:

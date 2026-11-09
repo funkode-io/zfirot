@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    classify_issue, classify_on_board, has_unreferenced_blocked_by, lane_parent_of,
+    classify_issue, classify_on_board, has_unreferenced_blocked_by, has_veto, lane_parent_of,
     parse_blockers_from_body, resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode,
     DependencyRef, GitHubToken, IssueClassification, IssueStamp, LinkedPrRef, Prd, PrdRef, Project,
     RawIssue, RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
@@ -508,10 +508,12 @@ fn issues_changed_between(before: &[RawIssue], after: &[RawIssue]) -> HashSet<u6
         .collect()
 }
 
-/// An issue-side result with the issues a **Cascade** wrote while it was in flight
-/// (`written`) laid back over it. That write wins: this fetch may have read the
-/// issue before the PR merged, and would otherwise put a closed Slice back on the
-/// board. Issues keep their positions, so the overlay alone never reorders cards.
+/// An issue-side result with the issues another path wrote while it was in flight
+/// (`written`) laid back over it: a **Cascade**, or the other issue-side path. That
+/// write wins: this fetch may have read the issue before the PR merged, or before a
+/// safety net dropped or corrected it, and would otherwise put a closed Slice or an
+/// older issue back on the board. Issues keep their positions, so the overlay alone
+/// never reorders cards.
 fn with_issues_written_meanwhile(
     fetched: &[RawIssue],
     written: &HashSet<u64>,
@@ -621,7 +623,11 @@ fn unlinked_prs(linked_prs: &[RawLinkedPr], slices: &[Slice]) -> Vec<LinkedPrRef
 /// board does not hold. Repeated until nothing new is found, so promotion depends
 /// on neither the depth of a split nor the order of the board, and a Parent cycle
 /// with no plan behind it promotes nothing.
-fn open_plan(raw_issues: &[RawIssue], open_numbers: &HashSet<u64>) -> HashSet<u64> {
+fn open_plan(
+    raw_issues: &[RawIssue],
+    open_numbers: &HashSet<u64>,
+    open_vetoed: &HashSet<u64>,
+) -> HashSet<u64> {
     let open_issues = || raw_issues.iter().filter(|raw| !raw.closed);
     let mut plan: HashSet<u64> = open_issues()
         .filter(|raw| {
@@ -635,7 +641,10 @@ fn open_plan(raw_issues: &[RawIssue], open_numbers: &HashSet<u64>) -> HashSet<u6
     loop {
         let found: Vec<u64> = open_issues()
             .filter(|raw| !plan.contains(&raw.number))
-            .filter(|raw| classify_on_board(raw, open_numbers, &plan) == IssueClassification::Slice)
+            .filter(|raw| {
+                classify_on_board(raw, open_numbers, &plan, open_vetoed)
+                    == IssueClassification::Slice
+            })
             .map(|raw| raw.number)
             .collect();
         if found.is_empty() {
@@ -686,7 +695,12 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
         })
         .collect();
 
-    let open_plan = open_plan(raw_issues, &open_numbers);
+    let open_vetoed: HashSet<u64> = raw_issues
+        .iter()
+        .filter(|raw| !raw.closed && has_veto(raw))
+        .map(|raw| raw.number)
+        .collect();
+    let open_plan = open_plan(raw_issues, &open_numbers, &open_vetoed);
 
     let mut slices = Vec::new();
     let mut prds = Vec::new();
@@ -697,7 +711,7 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
             continue;
         }
 
-        match classify_on_board(&raw, &open_numbers, &open_plan) {
+        match classify_on_board(&raw, &open_numbers, &open_plan, &open_vetoed) {
             IssueClassification::Slice => {
                 let body_str = raw.body.as_deref().unwrap_or("");
                 // Use native blockers when present; otherwise fall back to
@@ -1167,9 +1181,10 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// found something. An unchanged repo hydrates nothing, repaints nothing and
     /// writes nothing.
     ///
-    /// Issue-side only: whatever the hot path wrote while this refresh was in
-    /// flight is adopted before the result is returned or cached, so a slower
-    /// structural write can never revert 15-second-fresh PR facts (ADR 0008).
+    /// Issue-side only: whatever the hot path or a safety net wrote while this
+    /// refresh was in flight is adopted before the result is returned or cached, so
+    /// a slower structural write can never revert 15-second-fresh PR facts, nor
+    /// bring back an issue a safety net dropped or corrected (ADR 0008).
     pub async fn structural_refresh_cached(
         &self,
         repo: &RepoRef,
@@ -1177,7 +1192,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     ) -> AppResult<BoardRefresh> {
         let start = self.freshest_snapshot(repo, snapshot).await?;
         let refresh = self.board.refresh(repo, &start).await?;
-        let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
+        let refresh = self.with_facts_written_since(repo, &start, refresh).await?;
         self.cache_issue_side_result(repo, &start, &refresh).await?;
         Ok(refresh)
     }
@@ -1303,13 +1318,15 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         Ok(cached.unwrap_or_else(|| base.clone()))
     }
 
-    /// Re-decide an issue-side refresh's outcome against everything the hot path
-    /// wrote since the fetch began, when the cache held `start`, so its result
-    /// carries the hot path's PR facts and **Cascade** rather than older ones. Only
-    /// writes made after `start` are protected: anything earlier was there for the
-    /// fetch to supersede. If a Cascade's read was the older one, the next index
-    /// sweep finds it out of date.
-    async fn with_hot_facts_since(
+    /// Re-decide an issue-side refresh's outcome against everything written since
+    /// the fetch began, when the cache held `start`, so its result carries the hot
+    /// path's PR facts and **Cascade**, and the issues the other issue-side path
+    /// wrote, rather than older ones: a structural refresh finishing after a
+    /// safety net keeps what that safety net dropped or corrected. Only writes made
+    /// after `start` are protected: anything earlier was there for the fetch to
+    /// supersede. If the other write's read was the older one, the next index sweep
+    /// finds it out of date.
+    async fn with_facts_written_since(
         &self,
         repo: &RepoRef,
         start: &BoardSnapshot,
@@ -1374,7 +1391,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     ) -> AppResult<BoardRefresh> {
         let start = self.freshest_snapshot(repo, snapshot).await?;
         let refresh = self.board.safety_net_refresh(repo, &start).await?;
-        let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
+        let refresh = self.with_facts_written_since(repo, &start, refresh).await?;
         self.cache_issue_side_result(repo, &start, &refresh).await?;
         Ok(refresh)
     }
