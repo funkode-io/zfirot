@@ -21,8 +21,8 @@ mod view_mode;
 mod viewer;
 
 pub use classification::{
-    classify_issue, has_unreferenced_blocked_by, parse_blockers_from_body, parse_parent_from_body,
-    IssueClassification, RawIssue,
+    classify_issue, classify_on_board, has_unreferenced_blocked_by, parent_of,
+    parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
 };
 pub use credential_failure::CredentialFailure;
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};

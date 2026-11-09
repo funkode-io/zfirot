@@ -52,3 +52,6 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
   Acceptance criteria / Blocked by / Parent -> Slice), surfaced with a
   "looks like a PRD/Slice — confirm?" badge and a confirm-and-add-label action.
 - Tier 3: no match -> Unclassified, shown inline in "other open issues".
+- Second pass (ADR 0007): an issue left at tier 2 or 3 becomes a Slice when its
+  Parent (native, else prose) is an open PRD, or is closed or outside the fetched
+  board ("No PRD" Lane). A Parent that is any other open issue promotes nothing.

@@ -7,10 +7,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    classify_issue, has_unreferenced_blocked_by, parse_blockers_from_body, parse_parent_from_body,
-    resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken,
-    IssueClassification, LinkedPrRef, Prd, PrdRef, Project, RawIssue, RawLinkedPr, RawSlice,
-    RepoRef, Slice, ThemePreference, Viewer,
+    classify_issue, classify_on_board, has_unreferenced_blocked_by, parent_of,
+    parse_blockers_from_body, resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode,
+    DependencyRef, GitHubToken, IssueClassification, LinkedPrRef, Prd, PrdRef, Project, RawIssue,
+    RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -139,9 +139,11 @@ pub struct OtherIssue {
 
 /// The result of classifying all open issues in a project.
 ///
-/// - `slices` — tier-1 confirmed Slices, ready for the Kanban columns.
+/// - `slices` — tier-1 confirmed Slices and issues promoted by their Parent,
+///   ready for the Kanban columns.
 /// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
-/// - `other`  — suggested and unclassified issues for the "other open issues" bucket.
+/// - `other`  — suggested and unclassified issues with no promoting Parent, for
+///   the "other open issues" bucket.
 /// - `unlinked_prs` — **Unlinked PRs**: open PRs on no Slice card, in sweep order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedBoard {
@@ -412,6 +414,14 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
         })
         .collect();
 
+    // The first classification pass, so the second can promote an issue whose
+    // Parent is one of these PRDs.
+    let open_prds: HashSet<u64> = raw_issues
+        .iter()
+        .filter(|raw| !raw.closed && classify_issue(raw) == IssueClassification::Prd)
+        .map(|raw| raw.number)
+        .collect();
+
     let mut slices = Vec::new();
     let mut prds = Vec::new();
     let mut other = Vec::new();
@@ -421,7 +431,7 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
             continue;
         }
 
-        match classify_issue(&raw) {
+        match classify_on_board(&raw, &open_numbers, &open_prds) {
             IssueClassification::Slice => {
                 let body_str = raw.body.as_deref().unwrap_or("");
                 // Use native blockers when present; otherwise fall back to
@@ -440,13 +450,8 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
                         &issue_by_number,
                     )
                 };
-                // Resolve the parent PRD: prefer the native parent link, fall
-                // back to the prose `## Parent` reference, then look the number up
-                // among the issues in this board.
-                let prd = raw
-                    .native_parent
-                    .or_else(|| parse_parent_from_body(body_str))
-                    .and_then(|number| issue_by_number.get(&number).cloned());
+                // Look the Parent up among the issues in this board.
+                let prd = parent_of(&raw).and_then(|number| issue_by_number.get(&number).cloned());
                 slices.push(RawSlice {
                     number: raw.number,
                     title: raw.title,
