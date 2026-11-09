@@ -1,20 +1,16 @@
 //! Application layer: use-cases and the port traits that infrastructure
 //! implements (dependency inversion). Depends only on `domain`.
 
-mod pending_decisions;
-
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-pub use pending_decisions::PendingDecisions;
-
 use domain::{
-    classify_issue, classify_on_board, has_unreferenced_blocked_by, lane_parent_of,
+    classify_issue, classify_on_board, has_unreferenced_blocked_by, has_veto, lane_parent_of,
     parse_blockers_from_body, resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode,
     DependencyRef, GitHubToken, IssueClassification, LinkedPrRef, Prd, PrdRef, Project, RawIssue,
-    RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer, NOT_A_PRD_LABEL,
+    RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -170,8 +166,8 @@ pub struct OtherIssue {
 ///   ready for the Kanban columns.
 /// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
 /// - `other`  — suggested and unclassified issues with no promoting Parent, for
-///   the "other open issues" bucket. A Suggested PRD heading a Lane is not here,
-///   since its Lane header is where it is settled.
+///   the "other open issues" bucket. A Suggested PRD stays here even while it
+///   heads a Lane, since this is where it can be confirmed.
 /// - `unlinked_prs` — **Unlinked PRs**: open PRs on no Slice card, in sweep order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedBoard {
@@ -543,7 +539,11 @@ fn unlinked_prs(linked_prs: &[RawLinkedPr], slices: &[Slice]) -> Vec<LinkedPrRef
 /// board does not hold. Repeated until nothing new is found, so promotion depends
 /// on neither the depth of a split nor the order of the board, and a Parent cycle
 /// with no plan behind it promotes nothing.
-fn open_plan(raw_issues: &[RawIssue], open_numbers: &HashSet<u64>) -> HashSet<u64> {
+fn open_plan(
+    raw_issues: &[RawIssue],
+    open_numbers: &HashSet<u64>,
+    open_vetoed: &HashSet<u64>,
+) -> HashSet<u64> {
     let open_issues = || raw_issues.iter().filter(|raw| !raw.closed);
     let mut plan: HashSet<u64> = open_issues()
         .filter(|raw| {
@@ -557,7 +557,10 @@ fn open_plan(raw_issues: &[RawIssue], open_numbers: &HashSet<u64>) -> HashSet<u6
     loop {
         let found: Vec<u64> = open_issues()
             .filter(|raw| !plan.contains(&raw.number))
-            .filter(|raw| classify_on_board(raw, open_numbers, &plan) == IssueClassification::Slice)
+            .filter(|raw| {
+                classify_on_board(raw, open_numbers, &plan, open_vetoed)
+                    == IssueClassification::Slice
+            })
             .map(|raw| raw.number)
             .collect();
         if found.is_empty() {
@@ -608,7 +611,12 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
         })
         .collect();
 
-    let open_plan = open_plan(raw_issues, &open_numbers);
+    let open_vetoed: HashSet<u64> = raw_issues
+        .iter()
+        .filter(|raw| !raw.closed && has_veto(raw))
+        .map(|raw| raw.number)
+        .collect();
+    let open_plan = open_plan(raw_issues, &open_numbers, &open_vetoed);
 
     let mut slices = Vec::new();
     let mut prds = Vec::new();
@@ -619,7 +627,7 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
             continue;
         }
 
-        match classify_on_board(&raw, &open_numbers, &open_plan) {
+        match classify_on_board(&raw, &open_numbers, &open_plan, &open_vetoed) {
             IssueClassification::Slice => {
                 let body_str = raw.body.as_deref().unwrap_or("");
                 // Use native blockers when present; otherwise fall back to
@@ -684,17 +692,6 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
     resolve_unblocks(&mut slices);
     let slices: Vec<Slice> = slices.into_iter().map(RawSlice::into_slice).collect();
     let unlinked_prs = unlinked_prs(linked_prs, &slices);
-
-    // Every Slice here is open, so any it names heads a Lane.
-    let lane_heads: HashSet<u64> = slices
-        .iter()
-        .filter_map(|slice| slice.prd.as_ref())
-        .map(|prd| prd.number)
-        .collect();
-    other.retain(|issue| {
-        issue.classification != IssueClassification::SuggestedPrd
-            || !lane_heads.contains(&issue.number)
-    });
 
     ClassifiedBoard {
         slices,
@@ -924,24 +921,6 @@ impl<P: GitHubPort> BoardService<P> {
                 err.with_context("repo", repo)
                     .with_context("issue", issue_number)
                     .with_context("label", label)
-            })
-    }
-
-    /// **Veto** a Suggested PRD by adding the `not-a-prd` label to the issue on
-    /// GitHub, the only place the decision is recorded.
-    ///
-    /// On success the caller re-polls the board: the issue stops heading a Lane,
-    /// and removing the label on GitHub brings the suggestion back. On failure the
-    /// error carries the repo, issue and label for context and the issue is left
-    /// unchanged.
-    pub async fn veto_suggested_prd(&self, repo: &RepoRef, issue_number: u64) -> AppAction {
-        self.port
-            .add_label(repo, issue_number, NOT_A_PRD_LABEL)
-            .await
-            .map_err(|err| {
-                err.with_context("repo", repo)
-                    .with_context("issue", issue_number)
-                    .with_context("label", NOT_A_PRD_LABEL)
             })
     }
 

@@ -1180,7 +1180,7 @@ fn parse_label_ids(body: &str, issue_number: u64, label: &str) -> AppResult<Labe
     let label_id = repository.label.map(|node| node.id).ok_or_else(|| {
         AppError::not_found(format!(
             "The \"{label}\" label does not exist in this repository. Create it on \
-             GitHub, then try again."
+             GitHub, then confirm the classification again."
         ))
         .with_operation("parse_label_ids")
         .with_context("label", label)
@@ -2155,25 +2155,6 @@ mod tests {
         assert!(
             format!("{error:?}").contains("label=prd"),
             "the label should be attached as context: {error:?}"
-        );
-    }
-
-    #[test]
-    fn parse_label_ids_missing_label_message_suits_any_labelling_action() {
-        let body = r#"{
-            "data": { "repository": { "issue": { "id": "ISSUE_5" }, "label": null } }
-        }"#;
-
-        let error = parse_label_ids(body, 5, "not-a-prd").expect_err("a missing label should fail");
-
-        let display = error.to_string();
-        assert!(
-            display.contains("\"not-a-prd\" label does not exist"),
-            "{display}"
-        );
-        assert!(
-            !display.to_lowercase().contains("confirm"),
-            "a Veto must not be told to confirm: {display}"
         );
     }
 

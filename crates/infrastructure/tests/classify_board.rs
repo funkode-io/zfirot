@@ -1,14 +1,10 @@
 //! Integration test: the classify-board use-case runs end-to-end against the fake port.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-
-use application::{BoardRefresh, BoardService, ClassifiedBoard, PendingDecisions};
+use application::{BoardService, ClassifiedBoard};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use domain::{
-    group_into_lanes, AppAction, AppError, AppResult, IssueClassification, Project, RawIssue,
-    RawLinkedPr, RepoRef,
+    group_into_lanes, AppAction, AppResult, IssueClassification, Project, RawIssue, RawLinkedPr,
+    RepoRef,
 };
 use infrastructure::FakeGitHubPort;
 
@@ -698,7 +694,6 @@ impl application::GitHubPort for IssuesPort {
 
 const SUGGESTED_PRD: u64 = 300;
 const CONFIDENT_PRD: u64 = 310;
-const NOT_A_PRD_LABEL: &str = "not-a-prd";
 const PRD_TEMPLATE: &str = "## Problem Statement\n\nX.\n\n## User Stories\n\n1. Y.\n";
 
 /// One unlabelled PRD and one labelled PRD with the same family of children, and
@@ -764,10 +759,9 @@ async fn classify_board_heads_a_lane_with_a_suggested_prd() {
     );
 }
 
-/// A Parent that is neither a PRD nor a Suggested PRD still promotes nothing. A
-/// Suggested PRD heading a Lane is settled from that Lane's header, so it leaves
-/// the tray; with no active Slices it has no Lane, so it stays there with its
-/// Confirm action.
+/// A Parent that is neither a PRD nor a Suggested PRD still promotes nothing, and
+/// a Suggested PRD with no active Slices has no Lane, so like any PRD-shaped
+/// suggestion it stays in the tray with its Confirm action.
 #[tokio::test]
 async fn classify_board_promotes_only_against_prds_and_suggested_prds() {
     let board = classify_issues(suggested_prd_issues(PRD_TEMPLATE)).await;
@@ -780,6 +774,7 @@ async fn classify_board_promotes_only_against_prds_and_suggested_prds() {
     assert_eq!(
         tray,
         vec![
+            (SUGGESTED_PRD, IssueClassification::SuggestedPrd),
             (320, IssueClassification::Unclassified),
             (321, IssueClassification::Unclassified),
         ]
@@ -826,6 +821,133 @@ async fn classify_board_drops_a_suggested_lane_whose_body_no_longer_matches() {
     assert!(lane_shape(&classify_issues(issues).await).is_empty());
 }
 
+const NOT_A_PRD_LABEL: &str = "not-a-prd";
+
+fn with_label(mut issues: Vec<RawIssue>, number: u64, label: &str) -> Vec<RawIssue> {
+    issues
+        .iter_mut()
+        .find(|issue| issue.number == number)
+        .expect("the fixture should hold this issue")
+        .labels
+        .push(label.to_string());
+    issues
+}
+
+fn tray_of(board: &ClassifiedBoard) -> Vec<u64> {
+    board.other.iter().map(|issue| issue.number).collect()
+}
+
+/// A `not-a-prd` label beats the heading heuristic, but when in doubt the board
+/// shows: natively linked children stay on their Lane, labelled or not, and a
+/// labelled prose-parented Slice moves to "No PRD". An unlabelled prose child has
+/// nothing left saying it is planned work, so it is in the tray, still on screen.
+#[tokio::test]
+async fn classify_board_keeps_a_vetoed_issues_work_visible() {
+    let issues = with_label(
+        suggested_prd_issues(PRD_TEMPLATE),
+        SUGGESTED_PRD,
+        NOT_A_PRD_LABEL,
+    );
+    let board = classify_issues(issues).await;
+
+    assert_eq!(
+        lane_shape(&board),
+        vec![
+            (Some(SUGGESTED_PRD), false, vec![303, 304]),
+            (Some(CONFIDENT_PRD), false, vec![311, 312]),
+            (None, false, vec![302]),
+        ]
+    );
+    assert_eq!(tray_of(&board), vec![SUGGESTED_PRD, 320, 301, 321]);
+    assert_eq!(
+        board.other[0].classification,
+        IssueClassification::Unclassified,
+        "a vetoed issue carries no suggestion"
+    );
+}
+
+/// With no natively linked child to hold it open, a vetoed issue heads no Lane, and
+/// nothing about it is lost: its issues are all still on screen.
+#[tokio::test]
+async fn classify_board_gives_a_vetoed_issue_with_only_prose_children_no_lane() {
+    let board = classify_issues(vec![
+        raw_slice_issue(SUGGESTED_PRD, PRD_TEMPLATE, &[NOT_A_PRD_LABEL], false),
+        raw_slice_issue(301, "## Parent\n\n#300\n", &[], false),
+        raw_slice_issue(302, "## Parent\n\n#300\n", &["ready-for-agent"], false),
+    ])
+    .await;
+
+    assert_eq!(lane_shape(&board), vec![(None, false, vec![302])]);
+    assert_eq!(tray_of(&board), vec![SUGGESTED_PRD, 301]);
+}
+
+/// The veto stops every guess about the issue, not just the PRD one, but its own
+/// Parent still applies: it says nothing about what the issue belongs to.
+#[tokio::test]
+async fn classify_board_reads_a_vetoed_issue_as_an_ordinary_issue() {
+    let slice_headings = "## What to build\n\nX.\n\n## Acceptance criteria\n\n- Y\n";
+    let board = classify_issues(vec![
+        raw_slice_issue(600, "The plan.", &["prd"], false),
+        raw_slice_issue(
+            601,
+            &format!("{PRD_TEMPLATE}\n## Parent\n\n#600\n"),
+            &[NOT_A_PRD_LABEL],
+            false,
+        ),
+        raw_slice_issue(602, slice_headings, &[NOT_A_PRD_LABEL], false),
+    ])
+    .await;
+
+    assert_eq!(lane_shape(&board), vec![(Some(600), false, vec![601])]);
+    assert_eq!(tray_of(&board), vec![602]);
+    assert_eq!(
+        board.other[0].classification,
+        IssueClassification::Unclassified
+    );
+}
+
+/// `prd` and `not-a-prd` together contradict each other, and the explicit `prd`
+/// wins, so the Lane is exactly a labelled PRD's.
+#[tokio::test]
+async fn classify_board_resolves_prd_and_not_a_prd_in_favour_of_prd() {
+    let labelled = with_label(suggested_prd_issues(PRD_TEMPLATE), SUGGESTED_PRD, "prd");
+    let both = with_label(labelled.clone(), SUGGESTED_PRD, NOT_A_PRD_LABEL);
+
+    assert_eq!(classify_issues(both).await, classify_issues(labelled).await);
+}
+
+/// The label is the only record: the board is a function of the issues, so a board
+/// read without it is the board from before it was added.
+#[tokio::test]
+async fn classify_board_brings_the_suggestion_back_when_the_label_is_removed() {
+    let before = suggested_prd_issues(PRD_TEMPLATE);
+    let mut issues = with_label(before.clone(), SUGGESTED_PRD, NOT_A_PRD_LABEL);
+    assert_ne!(
+        classify_issues(issues.clone()).await,
+        classify_issues(before.clone()).await
+    );
+
+    issues
+        .iter_mut()
+        .for_each(|issue| issue.labels.retain(|label| label != NOT_A_PRD_LABEL));
+
+    assert_eq!(classify_issues(issues).await, classify_issues(before).await);
+}
+
+/// A native child of any other open issue still stays off the board: only a
+/// `not-a-prd` Parent, which someone looked at, keeps its children visible.
+#[tokio::test]
+async fn classify_board_still_keeps_a_bugs_native_sub_task_off_the_board() {
+    let board = classify_issues(vec![
+        raw_slice_issue(320, "A bug report.", &["bug"], false),
+        native_parented_issue(321, 320, ""),
+    ])
+    .await;
+
+    assert!(lane_shape(&board).is_empty());
+    assert_eq!(tray_of(&board), vec![320, 321]);
+}
+
 /// Both passes read only their input, so the board does not depend on the order
 /// GitHub lists issues in beyond first-seen ordering: a child listed before its
 /// Suggested PRD still lands on its Lane.
@@ -853,9 +975,8 @@ async fn classify_board_promotes_a_child_listed_before_its_suggested_prd() {
 }
 
 /// A Suggested PRD with a Parent of its own is still a PRD by its headings, not a
-/// Slice: it heads its Lane, whatever that Parent resolves to, rather than being a
-/// card on one Lane and the head of another. Its Lane header is where it is settled,
-/// so it is not in the tray either.
+/// Slice: it heads its Lane and keeps its Confirm card in the tray, whatever that
+/// Parent resolves to, rather than being a card on one Lane and the head of another.
 #[tokio::test]
 async fn classify_board_never_promotes_a_suggested_prd_by_its_parent() {
     let with_parent = |parent: u64| format!("{PRD_TEMPLATE}\n## Parent\n\n#{parent}\n");
@@ -872,389 +993,16 @@ async fn classify_board_never_promotes_a_suggested_prd_by_its_parent() {
         lane_shape(&board),
         vec![(Some(501), true, vec![502]), (Some(503), true, vec![504]),]
     );
-    assert!(board.other.is_empty(), "unexpected tray: {:?}", board.other);
-}
-
-fn with_label(mut issues: Vec<RawIssue>, number: u64, label: &str) -> Vec<RawIssue> {
-    issues
-        .iter_mut()
-        .find(|issue| issue.number == number)
-        .expect("the fixture should hold this issue")
-        .labels
-        .push(label.to_string());
-    issues
-}
-
-fn tray_of(board: &ClassifiedBoard) -> Vec<u64> {
-    board.other.iter().map(|issue| issue.number).collect()
-}
-
-/// A veto beats the heading heuristic, so the Lane is gone. Prose-parented Slices
-/// fall away as they do for any non-PRD parent: an unlabelled one to the tray, a
-/// labelled one to "No PRD". A labelled natively linked Slice stays on its Lane,
-/// which is now unmarked, so it offers no action.
-#[tokio::test]
-async fn classify_board_drops_a_vetoed_suggested_prd_and_its_prose_children() {
-    let issues = with_label(
-        suggested_prd_issues(PRD_TEMPLATE),
-        SUGGESTED_PRD,
-        NOT_A_PRD_LABEL,
-    );
-    let board = classify_issues(issues).await;
-
+    let tray: Vec<(u64, IssueClassification)> = board
+        .other
+        .iter()
+        .map(|issue| (issue.number, issue.classification.clone()))
+        .collect();
     assert_eq!(
-        lane_shape(&board),
+        tray,
         vec![
-            (Some(SUGGESTED_PRD), false, vec![304]),
-            (Some(CONFIDENT_PRD), false, vec![311, 312]),
-            (None, false, vec![302]),
+            (501, IssueClassification::SuggestedPrd),
+            (503, IssueClassification::SuggestedPrd),
         ]
     );
-    assert_eq!(tray_of(&board), vec![SUGGESTED_PRD, 320, 301, 303, 321]);
-    assert_eq!(
-        board.other[0].classification,
-        IssueClassification::Unclassified,
-        "a vetoed issue carries no suggestion, so the tray offers no Confirm"
-    );
-
-    // With only prose-parented children, nothing of the Lane is left.
-    let issues = vec![
-        raw_slice_issue(SUGGESTED_PRD, PRD_TEMPLATE, &[NOT_A_PRD_LABEL], false),
-        raw_slice_issue(301, "## Parent\n\n#300\n", &[], false),
-    ];
-    assert!(lane_shape(&classify_issues(issues).await).is_empty());
-}
-
-/// A veto says only that the issue is not a PRD. It is still an issue with a Parent
-/// of its own, and nothing is suggested from any other headings it has.
-#[tokio::test]
-async fn classify_board_reads_a_vetoed_issue_as_an_ordinary_issue() {
-    let slice_headings = "## What to build\n\nX.\n\n## Acceptance criteria\n\n- Y\n";
-    let board = classify_issues(vec![
-        raw_slice_issue(600, "The plan.", &["prd"], false),
-        raw_slice_issue(
-            601,
-            &format!("{PRD_TEMPLATE}\n## Parent\n\n#600\n"),
-            &[NOT_A_PRD_LABEL],
-            false,
-        ),
-        raw_slice_issue(602, slice_headings, &[NOT_A_PRD_LABEL], false),
-    ])
-    .await;
-
-    assert_eq!(lane_shape(&board), vec![(Some(600), false, vec![601])]);
-    assert_eq!(tray_of(&board), vec![602]);
-    assert_eq!(
-        board.other[0].classification,
-        IssueClassification::Unclassified
-    );
-}
-
-/// `prd` and `not-a-prd` together contradict each other, and the explicit `prd`
-/// wins, so the Lane is exactly a confirmed PRD's.
-#[tokio::test]
-async fn classify_board_resolves_prd_and_not_a_prd_in_favour_of_prd() {
-    let confirmed = with_label(suggested_prd_issues(PRD_TEMPLATE), SUGGESTED_PRD, "prd");
-    let both = with_label(confirmed.clone(), SUGGESTED_PRD, NOT_A_PRD_LABEL);
-
-    let both_board = classify_issues(both).await;
-
-    assert_eq!(
-        lane_shape(&both_board),
-        lane_shape(&classify_issues(confirmed).await)
-    );
-    assert_eq!(
-        lane_shape(&both_board),
-        vec![
-            (Some(SUGGESTED_PRD), false, vec![301, 302, 303, 304]),
-            (Some(CONFIDENT_PRD), false, vec![311, 312]),
-        ]
-    );
-}
-
-/// The issues on "GitHub", which only ever change through `add_label` or a
-/// teammate, so a decision has nowhere else to live.
-#[derive(Clone)]
-struct LabellingPort(Arc<Mutex<Vec<RawIssue>>>, Arc<AtomicBool>);
-
-impl LabellingPort {
-    fn new(issues: Vec<RawIssue>) -> Self {
-        Self(
-            Arc::new(Mutex::new(issues)),
-            Arc::new(AtomicBool::new(false)),
-        )
-    }
-
-    /// Make the board's delta refresh fail or recover; labelling is unaffected.
-    fn set_refresh_fails(&self, fails: bool) {
-        self.1.store(fails, Ordering::SeqCst);
-    }
-
-    /// A fresh service on the same GitHub facts, like a restart after a cache clear.
-    async fn refreshed_board(&self) -> ClassifiedBoard {
-        BoardService::new(self.clone())
-            .classify_board(&repo())
-            .await
-            .expect("the labelling port should classify the board")
-    }
-
-    /// A teammate removing a label on GitHub.
-    fn remove_label(&self, number: u64, label: &str) {
-        self.0
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .filter(|issue| issue.number == number)
-            .for_each(|issue| issue.labels.retain(|l| l != label));
-    }
-}
-
-#[async_trait]
-impl application::GitHubPort for LabellingPort {
-    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
-        Ok(self.0.lock().unwrap().clone())
-    }
-
-    async fn load_issues_since(
-        &self,
-        repo: &RepoRef,
-        _since: DateTime<Utc>,
-    ) -> AppResult<Vec<RawIssue>> {
-        if self.1.load(Ordering::SeqCst) {
-            return Err(AppError::unavailable("GitHub is temporarily unavailable"));
-        }
-        self.load_issues(repo).await
-    }
-
-    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
-        Ok(vec![])
-    }
-
-    async fn list_projects(&self) -> AppResult<Vec<Project>> {
-        Ok(vec![])
-    }
-
-    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
-        Ok(())
-    }
-
-    async fn add_label(&self, _repo: &RepoRef, issue_number: u64, label: &str) -> AppAction {
-        self.0
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .filter(|issue| issue.number == issue_number)
-            .for_each(|issue| issue.labels.push(label.to_string()));
-        Ok(())
-    }
-}
-
-fn repo() -> RepoRef {
-    RepoRef::new("funkode-io", "zfirot")
-}
-
-/// The refresh the board runs right after a decision picks the label up from the
-/// retained snapshot, so the decided Lane is repainted rather than waiting on a poll.
-#[tokio::test]
-async fn refreshing_from_the_retained_snapshot_shows_a_veto() {
-    let port = LabellingPort::new(suggested_prd_issues(PRD_TEMPLATE));
-    let service = BoardService::new(port.clone());
-    let loaded = service
-        .load(&repo())
-        .await
-        .expect("the labelling port should load the board");
-
-    service
-        .veto_suggested_prd(&repo(), SUGGESTED_PRD)
-        .await
-        .expect("the port should accept the labelling");
-
-    match service
-        .refresh(&repo(), &loaded.snapshot)
-        .await
-        .expect("the labelling port should refresh the board")
-    {
-        BoardRefresh::Changed(refreshed) => assert!(
-            !lane_shape(&refreshed.board)
-                .iter()
-                .any(|(_, marked, _)| *marked),
-            "no Lane is left marked unconfirmed: {:?}",
-            lane_shape(&refreshed.board)
-        ),
-        BoardRefresh::Unchanged(_) => panic!("a new label should change the board"),
-    }
-}
-
-fn labels_of(port: &LabellingPort, number: u64) -> Vec<String> {
-    let issues = port.0.lock().unwrap();
-    let issue = issues.iter().find(|issue| issue.number == number);
-    issue
-        .expect("the fixture should hold this issue")
-        .labels
-        .clone()
-}
-
-/// An accepted decision whose refresh fails leaves the guess on screen. It must not
-/// be open to a second decision then: Confirm would add `prd`, which beats the
-/// accepted `not-a-prd`. A later refresh showing the new board ends it.
-#[tokio::test]
-async fn a_failed_refresh_keeps_an_accepted_veto_from_being_undone() {
-    let port = LabellingPort::new(suggested_prd_issues(PRD_TEMPLATE));
-    let service = BoardService::new(port.clone());
-    let shown = service.load(&repo()).await.expect("the board should load");
-    let mut pending = PendingDecisions::default();
-
-    assert!(pending.begin(&repo(), SUGGESTED_PRD));
-    service
-        .veto_suggested_prd(&repo(), SUGGESTED_PRD)
-        .await
-        .expect("the port should accept the labelling");
-
-    port.set_refresh_fails(true);
-    service
-        .refresh(&repo(), &shown.snapshot)
-        .await
-        .expect_err("the refresh should fail");
-    pending.settle(&repo(), &shown.board);
-
-    assert_eq!(pending.issues_in(&repo()), vec![SUGGESTED_PRD]);
-    assert!(
-        !pending.begin(&repo(), SUGGESTED_PRD),
-        "a Confirm on the stale board must not reach GitHub"
-    );
-    assert_eq!(labels_of(&port, SUGGESTED_PRD), vec![NOT_A_PRD_LABEL]);
-
-    port.set_refresh_fails(false);
-    let BoardRefresh::Changed(refreshed) = service
-        .refresh(&repo(), &shown.snapshot)
-        .await
-        .expect("the refresh should recover")
-    else {
-        panic!("a new label should change the board");
-    };
-    pending.settle(&repo(), &refreshed.board);
-
-    assert!(pending.issues_in(&repo()).is_empty());
-}
-
-/// The same the other way round: an accepted Confirm is not open to a Veto until
-/// the board shows it.
-#[tokio::test]
-async fn a_failed_refresh_keeps_an_accepted_confirm_from_being_contradicted() {
-    let port = LabellingPort::new(suggested_prd_issues(PRD_TEMPLATE));
-    let service = BoardService::new(port.clone());
-    let shown = service.load(&repo()).await.expect("the board should load");
-    let mut pending = PendingDecisions::default();
-
-    assert!(pending.begin(&repo(), SUGGESTED_PRD));
-    service
-        .confirm_classification(&repo(), SUGGESTED_PRD, &IssueClassification::SuggestedPrd)
-        .await
-        .expect("the port should accept the labelling");
-
-    port.set_refresh_fails(true);
-    service
-        .refresh(&repo(), &shown.snapshot)
-        .await
-        .expect_err("the refresh should fail");
-    pending.settle(&repo(), &shown.board);
-
-    assert!(!pending.begin(&repo(), SUGGESTED_PRD));
-
-    port.set_refresh_fails(false);
-    let BoardRefresh::Changed(refreshed) = service
-        .refresh(&repo(), &shown.snapshot)
-        .await
-        .expect("the refresh should recover")
-    else {
-        panic!("a new label should change the board");
-    };
-    pending.settle(&repo(), &refreshed.board);
-
-    assert!(pending.issues_in(&repo()).is_empty());
-}
-
-/// A refresh that succeeds but still shows the guess, such as a poll that read
-/// GitHub before the label landed, does not end the decision either.
-#[tokio::test]
-async fn a_decision_outlasts_a_board_still_showing_the_guess() {
-    let board = classify_issues(suggested_prd_issues(PRD_TEMPLATE)).await;
-    let mut pending = PendingDecisions::default();
-
-    assert!(pending.begin(&repo(), SUGGESTED_PRD));
-    pending.settle(&repo(), &board);
-
-    assert_eq!(pending.issues_in(&repo()), vec![SUGGESTED_PRD]);
-}
-
-/// A decision belongs to its repo's board: another board on screen neither ends nor
-/// blocks it, and other issues on the same board stay decidable.
-#[tokio::test]
-async fn a_decision_is_scoped_to_its_repo_and_issue() {
-    let other_repo = RepoRef::new("funkode-io", "other");
-    let empty = classify_issues(vec![]).await;
-    let mut pending = PendingDecisions::default();
-
-    assert!(pending.begin(&repo(), SUGGESTED_PRD));
-    assert!(pending.begin(&repo(), CONFIDENT_PRD));
-    assert!(pending.begin(&other_repo, SUGGESTED_PRD));
-
-    pending.settle(&other_repo, &empty);
-
-    assert_eq!(
-        pending.issues_in(&repo()),
-        vec![SUGGESTED_PRD, CONFIDENT_PRD]
-    );
-    assert!(pending.issues_in(&other_repo).is_empty());
-}
-
-/// Confirm turns the guess into a fact: on the next refresh the Lane is a confident
-/// PRD's, with no unconfirmed marker and no action.
-#[tokio::test]
-async fn confirming_a_suggested_prd_makes_its_lane_confident_on_refresh() {
-    let port = LabellingPort::new(suggested_prd_issues(PRD_TEMPLATE));
-
-    BoardService::new(port.clone())
-        .confirm_classification(&repo(), SUGGESTED_PRD, &IssueClassification::SuggestedPrd)
-        .await
-        .expect("the port should accept the labelling");
-
-    let board = port.refreshed_board().await;
-    assert_eq!(
-        lane_shape(&board),
-        vec![
-            (Some(SUGGESTED_PRD), false, vec![301, 302, 303, 304]),
-            (Some(CONFIDENT_PRD), false, vec![311, 312]),
-        ]
-    );
-    assert_eq!(tray_of(&board), vec![320, 321]);
-}
-
-/// A veto lives only in the label: a fresh service reads the same board, and
-/// removing the label on GitHub brings back exactly the board from before.
-#[tokio::test]
-async fn a_veto_lives_on_github_and_removing_it_restores_the_suggestion() {
-    let port = LabellingPort::new(suggested_prd_issues(PRD_TEMPLATE));
-    let before = port.refreshed_board().await;
-
-    BoardService::new(port.clone())
-        .veto_suggested_prd(&repo(), SUGGESTED_PRD)
-        .await
-        .expect("the port should accept the labelling");
-
-    let vetoed = port.refreshed_board().await;
-    assert!(
-        !lane_shape(&vetoed).iter().any(|(_, marked, _)| *marked),
-        "no Lane is left marked unconfirmed: {:?}",
-        lane_shape(&vetoed)
-    );
-    assert_eq!(
-        vetoed,
-        port.refreshed_board().await,
-        "a fresh service with no local state reads the same veto"
-    );
-
-    port.remove_label(SUGGESTED_PRD, NOT_A_PRD_LABEL);
-
-    assert_eq!(port.refreshed_board().await, before);
 }

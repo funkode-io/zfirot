@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use domain::{
-    derive_lane_graph, order_blocked_column, IssueClassification, LaneGraphEdge,
-    PrdLane as DomainPrdLane, PrdRef, Slice, SliceState,
+    derive_lane_graph, order_blocked_column, LaneGraphEdge, PrdLane as DomainPrdLane, PrdRef,
+    Slice, SliceState,
 };
 
 use super::{state_badge_class, state_label, BoardColumn, SliceCard};
@@ -9,18 +9,14 @@ use super::{state_badge_class, state_label, BoardColumn, SliceCard};
 /// One swimlane: a collapsible PRD header above the Ready / WIP / Blocked
 /// columns holding that PRD's Slices. A lane with no PRD (`prd` is `None`)
 /// renders a plain "No PRD" header, and a **Suggested PRD**'s header is dimmed and
-/// badged "Unconfirmed", so a guess is never mistaken for a fact. Built on the
+/// badged "Unconfirmed", with guidance and a link for settling it on GitHub, so a
+/// guess is never mistaken for a fact. Built on the
 /// daisyUI `collapse` component (a checkbox toggle + `collapse-arrow` chevron), matching the "other open
 /// issues" accordion — so the PRD link is a sibling of the toggle, never nested
 /// inside a `<button>`. The lane starts expanded and the whole header toggles it.
 /// Collapsing the lane hides the columns and summarises them as coloured
 /// per-state count badges (shown only while collapsed, via `group-has-[:checked]:hidden`);
 /// the state name is shown on hover via each badge's `title`.
-///
-/// A Suggested PRD's header also offers **Confirm** and **Veto**, emitted through
-/// `on_confirm` and `on_veto` with no dialog: each costs one label on GitHub, and
-/// removing that label undoes it. `deciding` disables both while a decision on this
-/// PRD is outstanding.
 ///
 /// `highlighted` / `on_highlight` carry the board-wide "highlighted issue" so a
 /// dependency badge can highlight its referenced card even in another lane.
@@ -30,13 +26,11 @@ pub fn PrdLane(
     slices: Vec<Slice>,
     graph_view: bool,
     on_assign: EventHandler<u64>,
-    on_confirm: EventHandler<(u64, IssueClassification)>,
-    on_veto: EventHandler<u64>,
-    deciding: bool,
     highlighted: Option<u64>,
     on_highlight: EventHandler<Option<u64>>,
 ) -> Element {
     let total_slices = slices.len();
+    let suggested = prd.as_ref().is_some_and(|prd| prd.suggested);
     let graph = graph_view.then(|| {
         derive_lane_graph(&DomainPrdLane {
             prd: prd.clone(),
@@ -72,14 +66,18 @@ pub fn PrdLane(
         .collect();
 
     rsx! {
-        section { class: "collapse collapse-arrow bg-base-200 rounded-box group",
+        section {
+            class: "collapse collapse-arrow bg-base-200 rounded-box group",
+            class: if suggested { "border-l-4 border-warning" },
             // Checkbox toggle drives the daisyUI collapse. Starts `checked` so
             // the lane opens expanded. `aria-label` names the control for
             // assistive tech. The `group` on the section lets the collapsed-only
             // summary badges hide themselves via `group-has-[:checked]:hidden`
             // when this checkbox is checked (expanded).
             input { r#type: "checkbox", checked: true, "aria-label": "Toggle lane" }
-            div { class: "collapse-title flex min-w-0 items-center gap-3",
+            div {
+                class: "collapse-title flex min-w-0 items-center gap-3",
+                class: if suggested { "flex-wrap" },
                 match prd {
                     Some(prd) => rsx! {
                         // `relative z-10` lifts the link above the collapse
@@ -98,32 +96,19 @@ pub fn PrdLane(
                                 title: "Reads like a PRD by its headings, but has no \"prd\" label",
                                 "Unconfirmed"
                             }
-                            // `relative z-10` and `stop_propagation` as on the link
-                            // above, so a click decides without toggling the lane.
-                            button {
-                                class: "btn btn-xs btn-primary shrink-0 relative z-10",
-                                disabled: deciding,
-                                title: "Add the \"prd\" label",
-                                "aria-label": "Confirm #{prd.number} as a PRD",
-                                onclick: move |e: Event<MouseData>| {
-                                    e.stop_propagation();
-                                    on_confirm.call((prd.number, IssueClassification::SuggestedPrd));
-                                },
-                                "Confirm PRD"
-                            }
-                            button {
-                                class: "btn btn-xs btn-ghost shrink-0 relative z-10",
-                                disabled: deciding,
-                                title: "Add the \"not-a-prd\" label. Remove it on GitHub to undo.",
-                                "aria-label": "Veto #{prd.number} as a PRD",
-                                onclick: move |e: Event<MouseData>| {
-                                    e.stop_propagation();
-                                    on_veto.call(prd.number);
-                                },
-                                "Veto"
-                            }
                         }
                         span { class: "badge badge-sm badge-neutral shrink-0", "{slices_pill_label(total_slices)}" }
+                        if prd.suggested {
+                            p { class: "basis-full text-xs font-normal",
+                                "{SUGGESTED_PRD_GUIDANCE} "
+                                a {
+                                    class: "link relative z-10",
+                                    href: "{prd.url}",
+                                    onclick: move |e: Event<MouseData>| e.stop_propagation(),
+                                    "Set the label on GitHub"
+                                }
+                            }
+                        }
                     },
                     None => rsx! {
                         span { class: "font-semibold opacity-70", "No PRD" }
@@ -167,6 +152,12 @@ pub fn PrdLane(
         }
     }
 }
+
+/// What a Suggested PRD's header tells the user. The board only reads these labels,
+/// so settling the guess is theirs to do on GitHub.
+const SUGGESTED_PRD_GUIDANCE: &str = "Guessed from its headings. If this is a PRD, add the \
+     \"prd\" label on GitHub. If it is not, add \"not-a-prd\": it stops being suggested, and \
+     its Slices stay visible.";
 
 fn slices_pill_label(total_slices: usize) -> String {
     if total_slices == 1 {
@@ -329,161 +320,87 @@ fn GraphLane(
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
-    use std::rc::Rc;
-    use std::sync::{Arc, Mutex};
-
-    use dioxus::core::{
-        AttributeValue, ElementId, Event as CoreEvent, Mutation, Mutations, VirtualDom,
-    };
-    use dioxus::html::{
-        set_event_converter, PlatformEventData, SerializedHtmlEventConverter, SerializedMouseData,
-    };
+    use dioxus::core::{AttributeValue, Mutation, Mutations, VirtualDom};
 
     use super::*;
 
-    const LANE_PRD: u64 = 12;
-
-    #[derive(Debug, PartialEq)]
-    enum Decision {
-        Confirmed(u64, IssueClassification),
-        Vetoed(u64),
-    }
-
-    #[derive(Clone)]
-    struct Decisions(Arc<Mutex<Vec<Decision>>>);
-
-    impl PartialEq for Decisions {
-        fn eq(&self, other: &Self) -> bool {
-            Arc::ptr_eq(&self.0, &other.0)
-        }
-    }
+    const ISSUE_URL: &str = "https://github.com/funkode-io/zfirot/issues/12";
 
     #[derive(Clone, PartialEq, Props)]
     struct HarnessProps {
         prd: Option<PrdRef>,
-        deciding: bool,
-        decisions: Decisions,
     }
 
-    /// A Lane with no Slices, so every click listener in it belongs to its header.
+    /// A Lane with no Slices, so everything rendered in it belongs to its header.
     #[allow(non_snake_case)]
     fn Harness(props: HarnessProps) -> Element {
-        let on_confirm = props.decisions.clone();
-        let on_veto = props.decisions;
         rsx! {
             PrdLane {
                 prd: props.prd,
                 slices: Vec::new(),
                 graph_view: false,
                 on_assign: |_| {},
-                on_confirm: move |(number, classification)| {
-                    on_confirm.0.lock().unwrap().push(Decision::Confirmed(number, classification));
-                },
-                on_veto: move |number| {
-                    on_veto.0.lock().unwrap().push(Decision::Vetoed(number));
-                },
                 highlighted: None,
-                deciding: props.deciding,
                 on_highlight: |_| {},
             }
         }
     }
 
-    /// Render a Lane with fake props and click everything clickable in it, once
-    /// each, returning the decisions it emitted.
-    fn decisions_from_clicking_everything(prd: Option<PrdRef>) -> Vec<Decision> {
-        set_event_converter(Box::new(SerializedHtmlEventConverter));
-        let decisions = Decisions(Arc::new(Mutex::new(Vec::new())));
-        let mut dom = VirtualDom::new_with_props(
-            Harness,
-            HarnessProps {
-                prd,
-                deciding: false,
-                decisions: decisions.clone(),
-            },
-        );
+    /// The Lane's dynamic text, and how many links in it go to the PRD's issue.
+    fn rendered(prd: Option<PrdRef>) -> (String, usize) {
+        let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { prd });
         let mut mutations = Mutations::default();
         dom.rebuild(&mut mutations);
 
-        let clickable: Vec<ElementId> = mutations
-            .edits
-            .iter()
-            .filter_map(|edit| match edit {
-                Mutation::NewEventListener { name, id } if name == "click" => Some(*id),
-                _ => None,
-            })
-            .collect();
-        for id in clickable {
-            let data = PlatformEventData::new(Box::new(SerializedMouseData::default()));
-            let event = CoreEvent::new(Rc::new(data) as Rc<dyn Any>, true);
-            dom.runtime().handle_event("click", event, id);
+        let mut text = String::new();
+        let mut issue_links = 0;
+        for edit in &mutations.edits {
+            match edit {
+                Mutation::CreateTextNode { value, .. } => {
+                    text.push_str(value);
+                }
+                Mutation::SetAttribute {
+                    name: "href",
+                    value: AttributeValue::Text(href),
+                    ..
+                } if href == ISSUE_URL => issue_links += 1,
+                _ => {}
+            }
         }
-
-        let emitted = std::mem::take(&mut *decisions.0.lock().unwrap());
-        emitted
+        (text, issue_links)
     }
 
     fn prd(suggested: bool) -> PrdRef {
         PrdRef {
-            number: LANE_PRD,
+            number: 12,
             title: "A plan".to_string(),
-            url: "https://github.com/funkode-io/zfirot/issues/12".to_string(),
+            url: ISSUE_URL.to_string(),
             suggested,
         }
     }
 
     #[test]
-    fn a_suggested_lane_header_offers_confirm_and_veto() {
-        assert_eq!(
-            decisions_from_clicking_everything(Some(prd(true))),
-            vec![
-                Decision::Confirmed(LANE_PRD, IssueClassification::SuggestedPrd),
-                Decision::Vetoed(LANE_PRD),
-            ]
-        );
-    }
+    fn a_suggested_lane_header_says_which_labels_to_set_and_links_to_the_issue() {
+        let (text, issue_links) = rendered(Some(prd(true)));
 
-    fn disabled_buttons(deciding: bool) -> usize {
-        let mut dom = VirtualDom::new_with_props(
-            Harness,
-            HarnessProps {
-                prd: Some(prd(true)),
-                deciding,
-                decisions: Decisions(Arc::new(Mutex::new(Vec::new()))),
-            },
-        );
-        let mut mutations = Mutations::default();
-        dom.rebuild(&mut mutations);
-        mutations
-            .edits
-            .iter()
-            .filter(|edit| {
-                matches!(
-                    edit,
-                    Mutation::SetAttribute {
-                        name: "disabled",
-                        value: AttributeValue::Bool(true),
-                        ..
-                    }
-                )
-            })
-            .count()
+        assert!(text.contains("\"prd\" label"), "{text}");
+        assert!(text.contains("\"not-a-prd\""), "{text}");
+        assert_eq!(issue_links, 2, "the title link and the guidance link");
     }
 
     #[test]
-    fn both_decisions_are_disabled_only_while_one_is_outstanding() {
-        assert_eq!(disabled_buttons(true), 2);
-        assert_eq!(disabled_buttons(false), 0);
+    fn a_confident_lane_header_has_no_guidance() {
+        let (text, issue_links) = rendered(Some(prd(false)));
+
+        assert!(!text.contains("not-a-prd"), "{text}");
+        assert_eq!(issue_links, 1, "only the title link");
     }
 
     #[test]
-    fn a_confident_lane_header_offers_neither() {
-        assert_eq!(decisions_from_clicking_everything(Some(prd(false))), vec![]);
-    }
+    fn a_no_prd_lane_header_has_no_guidance() {
+        let (text, issue_links) = rendered(None);
 
-    #[test]
-    fn a_no_prd_lane_header_offers_neither() {
-        assert_eq!(decisions_from_clicking_everything(None), vec![]);
+        assert!(!text.contains("not-a-prd"), "{text}");
+        assert_eq!(issue_links, 0);
     }
 }
