@@ -932,6 +932,11 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// nothing fresher than the caller already held; a failed read is, because
     /// the other path's newer facts may be in there and writing without them
     /// would revert them.
+    ///
+    /// The paths interleave only at their network awaits. From this read to
+    /// the write it feeds nothing may yield, which holds because refreshes run
+    /// as tasks on the single UI thread and the cache adapter's I/O never
+    /// suspends. An adapter that does suspend must serialize this per repo.
     async fn freshest_snapshot(
         &self,
         repo: &RepoRef,

@@ -254,7 +254,15 @@ pub fn App() -> Element {
                           // directly instead of fetching the same board a second time.
         if prefetched_board.peek().is_some() {
             if let Some(prefetched) = prefetched_board.write().take() {
-                return prefetched;
+                // A refresh in flight when the user navigated away lands here
+                // too: it must not pull them back to the board they left.
+                let wanted = match &prefetched {
+                    View::Board { repo, .. } => nav_wants_board(&nav.peek(), repo),
+                    _ => true,
+                };
+                if wanted {
+                    return prefetched;
+                }
             }
         }
         resolve_view(nav()).await
@@ -1051,6 +1059,17 @@ pub fn App() -> Element {
 /// when nothing has been opened yet). A stored token that GitHub rejects while
 /// loading (`Unauthorized`/`Forbidden`) is discarded and routes back to the
 /// screen, carrying the reason. Any other failure is shown as a transient error.
+/// Whether a board a refresh stashed is still the one the user wants to see.
+/// `Auto` names no project of its own: it shows the last-opened one, which is
+/// the board that was open when the refresh started.
+fn nav_wants_board(nav: &Nav, repo: &RepoRef) -> bool {
+    match nav {
+        Nav::Auto => true,
+        Nav::Home => false,
+        Nav::Project(wanted) | Nav::GoTo(wanted) => wanted == repo,
+    }
+}
+
 async fn resolve_view(nav: Nav) -> View {
     let auth = AuthService::new(secure_store());
     let token = match auth.require_token().await {
@@ -1389,7 +1408,7 @@ async fn hot_refresh(
 /// scratch.
 ///
 /// Repaints (`prefetched_board` + `reload`) only on a real difference. Callers
-/// serialize entry through [`ReconcileGate`] so concurrent reconciles cannot
+/// serialize entry through a [`RefreshGate`] so concurrent reconciles cannot
 /// race to overwrite state. A failed reconcile leaves the retained snapshot
 /// and cache untouched (`fetched_at` never advances on failure) and sets a
 /// client-safe `refresh_error`; any successful reconcile — changed or not —
@@ -1815,7 +1834,22 @@ fn OtherIssues(
 
 #[cfg(test)]
 mod tests {
-    use super::clipboard_script;
+    use super::{clipboard_script, nav_wants_board, Nav};
+    use domain::RepoRef;
+
+    #[test]
+    fn a_refresh_landing_after_navigation_does_not_reclaim_the_view() {
+        let open = RepoRef::new("funkode-io", "zfirot");
+        let other = RepoRef::new("funkode-io", "other");
+
+        assert!(nav_wants_board(&Nav::Project(open.clone()), &open));
+        assert!(nav_wants_board(&Nav::GoTo(open.clone()), &open));
+        assert!(nav_wants_board(&Nav::Auto, &open));
+
+        assert!(!nav_wants_board(&Nav::Home, &open));
+        assert!(!nav_wants_board(&Nav::Project(other.clone()), &open));
+        assert!(!nav_wants_board(&Nav::GoTo(other), &open));
+    }
 
     #[test]
     fn clipboard_script_carries_the_repo_name() {
