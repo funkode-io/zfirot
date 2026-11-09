@@ -39,7 +39,7 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
   closing reference to it, so the issue index can never see a new Linked PR. That
   is why the open-PR sweep runs on its own hot loop (and on cold load and cached
   open), never derived from the issue side. The issue-side paths (structural,
-  reconcile) write only issues and adopt the hot path's PR facts from the cache.
+  safety net) write only issues and adopt the hot path's PR facts from the cache.
 - The issue-index sweep is **authoritative**: an issue absent from it is dropped,
   so its parser must fail on anything short of a complete page rather than let a
   truncated answer read as "gone". Never answer it from a `since`-style change
@@ -47,8 +47,8 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
   A change to which PRs close which issues **Cascades**: the hot path hydrates
   those issues by number in the same operation, so it is the one hot write that
   touches issues, and the issue-side paths keep it rather than reverting it.
-- Facts that a full reconcile re-fetches identically can never be healed by more
-  refresh plumbing. When a value looks stale after a reconcile, suspect the
+- Facts that a safety-net hydrate re-fetches identically can never be healed by
+  more refresh plumbing. When a value looks stale after a safety net, suspect the
   query or the projection, not the cache.
 - The board snapshot's stored format carries a version. Change its shape and
   bump the version, so older cached snapshots are discarded and cold-loaded

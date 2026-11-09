@@ -1,145 +1,111 @@
-//! Freshness settings: how often the board re-polls GitHub in the background.
+//! The **Freshness contract**: the three cadences on which the open board asks
+//! GitHub what exists (ADR 0008).
 //!
-//! The cadence is locally-owned settings state (GitHub is the source of truth
-//! for the board itself), modelled here as a small validated value object so the
-//! presentation layer's poll loop and any future settings UI share one rule for
-//! what a valid interval is.
+//! | cadence | default | what it keeps fresh |
+//! |---|---|---|
+//! | [`HotInterval`] | 15s | every fact on a PR, and the **Cascade** a merge triggers |
+//! | [`StructuralInterval`] | 60s | issues: new, retitled, relabelled, assigned, closed |
+//! | [`SafetyNetInterval`] | 5 min | what GitHub did not stamp, deletes, transfers |
+//!
+//! This module is the only place the refresh rhythm is defined; the
+//! presentation layer's loops read it through [`FreshnessContract`]. Each
+//! cadence is a small clamped value object, locally-owned settings state (GitHub
+//! is the source of truth for the board itself), so a later settings UI shares
+//! one rule for what a valid interval is.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// How long the board waits between background refreshes.
-///
-/// Constructed through [`PollInterval::from_secs`], which clamps to a sane range
-/// so a misconfiguration can neither hammer GitHub (too short) nor let the board
-/// drift stale for too long (too long). The default is one minute.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PollInterval {
-    secs: u64,
-}
-
-impl PollInterval {
-    /// The shortest allowed interval. A floor protects the GitHub rate limit
-    /// from an over-eager configuration.
-    pub const MIN_SECS: u64 = 10;
-    /// The longest allowed interval, so the board cannot drift arbitrarily stale.
-    pub const MAX_SECS: u64 = 3600;
-    /// The default cadence: one minute.
-    pub const DEFAULT_SECS: u64 = 60;
-
-    /// A poll interval of `secs` seconds, clamped to `[MIN_SECS, MAX_SECS]`.
-    pub fn from_secs(secs: u64) -> Self {
-        Self {
-            secs: secs.clamp(Self::MIN_SECS, Self::MAX_SECS),
+/// Defines a cadence: a whole number of seconds clamped to `[MIN_SECS, MAX_SECS]`
+/// on construction, so a misconfiguration can neither hammer GitHub's rate limit
+/// (too short) nor let the board drift past its contract (too long).
+macro_rules! cadence {
+    (
+        $(#[$doc:meta])*
+        $name:ident { min: $min:expr, max: $max:expr, default: $default:expr }
+    ) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        pub struct $name {
+            secs: u64,
         }
-    }
 
-    /// The interval in whole seconds.
-    pub fn as_secs(&self) -> u64 {
-        self.secs
-    }
+        impl $name {
+            /// The shortest allowed interval.
+            pub const MIN_SECS: u64 = $min;
+            /// The longest allowed interval.
+            pub const MAX_SECS: u64 = $max;
+            /// The default interval, its tier of the Freshness contract.
+            pub const DEFAULT_SECS: u64 = $default;
 
-    /// The interval as a [`Duration`], for handing to a timer.
-    pub fn as_duration(&self) -> Duration {
-        Duration::from_secs(self.secs)
-    }
-}
+            /// An interval of `secs` seconds, clamped to `[MIN_SECS, MAX_SECS]`.
+            pub fn from_secs(secs: u64) -> Self {
+                Self {
+                    secs: secs.clamp(Self::MIN_SECS, Self::MAX_SECS),
+                }
+            }
 
-impl Default for PollInterval {
-    fn default() -> Self {
-        Self::from_secs(Self::DEFAULT_SECS)
-    }
-}
+            /// The interval in whole seconds.
+            pub fn as_secs(&self) -> u64 {
+                self.secs
+            }
 
-/// How long the board waits between **hot** refreshes — the open-PR **Sweep**
-/// that carries every fact on the critical path (a PR appearing or vanishing, a
-/// new unresolved review comment, CI turning red, a conflict, an approval).
-///
-/// This is the 15-second half of the Freshness contract (ADR 0008): the facts
-/// nobody tells the user about, so the board must go and look. Constructed
-/// through [`HotInterval::from_secs`], which clamps to a sane range so a
-/// misconfiguration can neither hammer GitHub's rate limit (too short) nor let
-/// the promise of "within 15 seconds" quietly become minutes (too long).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HotInterval {
-    secs: u64,
-}
-
-impl HotInterval {
-    /// The shortest allowed hot cadence. A floor keeps a misconfiguration from
-    /// spending the whole GraphQL budget on one board.
-    pub const MIN_SECS: u64 = 5;
-    /// The longest allowed hot cadence, so PR facts cannot drift far past the
-    /// contract they promise.
-    pub const MAX_SECS: u64 = 300;
-    /// The default cadence: fifteen seconds, the Freshness contract's hot tier.
-    pub const DEFAULT_SECS: u64 = 15;
-
-    /// A hot interval of `secs` seconds, clamped to `[MIN_SECS, MAX_SECS]`.
-    pub fn from_secs(secs: u64) -> Self {
-        Self {
-            secs: secs.clamp(Self::MIN_SECS, Self::MAX_SECS),
+            /// The interval as a [`Duration`], for handing to a timer.
+            pub fn as_duration(&self) -> Duration {
+                Duration::from_secs(self.secs)
+            }
         }
-    }
 
-    /// The interval in whole seconds.
-    pub fn as_secs(&self) -> u64 {
-        self.secs
-    }
-
-    /// The interval as a [`Duration`], for handing to a timer.
-    pub fn as_duration(&self) -> Duration {
-        Duration::from_secs(self.secs)
-    }
-}
-
-impl Default for HotInterval {
-    fn default() -> Self {
-        Self::from_secs(Self::DEFAULT_SECS)
-    }
-}
-
-/// How long the board waits between full-load reconcile passes.
-///
-/// Constructed through [`ReconcileInterval::from_secs`], which clamps to a sane
-/// range so reconcile runs often enough to heal cache drift, but not so often
-/// that it duplicates the fast delta poll path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReconcileInterval {
-    secs: u64,
-}
-
-impl ReconcileInterval {
-    /// Shortest reconcile cadence.
-    pub const MIN_SECS: u64 = 60;
-    /// Longest reconcile cadence.
-    pub const MAX_SECS: u64 = 14_400;
-    /// Default cadence: five minutes.
-    pub const DEFAULT_SECS: u64 = 300;
-
-    /// A reconcile interval of `secs` seconds, clamped to `[MIN_SECS, MAX_SECS]`.
-    pub fn from_secs(secs: u64) -> Self {
-        Self {
-            secs: secs.clamp(Self::MIN_SECS, Self::MAX_SECS),
+        impl Default for $name {
+            fn default() -> Self {
+                Self::from_secs(Self::DEFAULT_SECS)
+            }
         }
-    }
-
-    /// The interval in whole seconds.
-    pub fn as_secs(&self) -> u64 {
-        self.secs
-    }
-
-    /// The interval as a [`Duration`], for handing to a timer.
-    pub fn as_duration(&self) -> Duration {
-        Duration::from_secs(self.secs)
-    }
+    };
 }
 
-impl Default for ReconcileInterval {
-    fn default() -> Self {
-        Self::from_secs(Self::DEFAULT_SECS)
-    }
+cadence! {
+    /// How long the board waits between **hot** refreshes: the open-PR **Sweep**
+    /// that carries every fact on the critical path (a PR appearing or vanishing,
+    /// a new unresolved review comment, CI turning red, a conflict, an approval).
+    ///
+    /// The facts nobody tells the user about, so the board must go and look. The
+    /// floor keeps one board from spending the whole GraphQL budget; the ceiling
+    /// keeps "within 15 seconds" from quietly becoming minutes.
+    HotInterval { min: 5, max: 300, default: 15 }
+}
+
+cadence! {
+    /// How long the board waits between **structural** refreshes: the open-issue
+    /// index **Sweep**, plus a **Hydrate** of only what it reports new or moved.
+    ///
+    /// Grooming output (a new PRD or Slice), retitles, relabels, assignments and
+    /// manual closes: change the user expects, so it may lag behind the hot tier.
+    StructuralInterval { min: 10, max: 3_600, default: 60 }
+}
+
+cadence! {
+    /// How long the board waits between **safety-net** refreshes: a full
+    /// **Hydrate** of every open issue.
+    ///
+    /// The one path that assumes GitHub lied about everything else: it heals a
+    /// relationship edit GitHub did not stamp, which no index sweep can see. The
+    /// floor keeps it from duplicating the structural tier; the ceiling bounds how
+    /// long such an edit can stay wrong.
+    SafetyNetInterval { min: 60, max: 14_400, default: 300 }
+}
+
+/// The three cadences of the open board, together: the Freshness contract as one
+/// value. [`FreshnessContract::default`] is the promise the app is held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FreshnessContract {
+    /// The open-PR sweep's cadence.
+    pub hot: HotInterval,
+    /// The issue-index sweep's cadence.
+    pub structural: StructuralInterval,
+    /// The full issue hydrate's cadence.
+    pub safety_net: SafetyNetInterval,
 }
 
 #[cfg(test)]
@@ -147,145 +113,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_one_minute() {
-        assert_eq!(PollInterval::default().as_secs(), 60);
-        assert_eq!(
-            PollInterval::default().as_duration(),
-            Duration::from_secs(60)
-        );
+    fn the_default_contract_is_fifteen_seconds_one_minute_and_five_minutes() {
+        let contract = FreshnessContract::default();
+
+        assert_eq!(contract.hot.as_duration(), Duration::from_secs(15));
+        assert_eq!(contract.structural.as_duration(), Duration::from_secs(60));
+        assert_eq!(contract.safety_net.as_duration(), Duration::from_secs(300));
     }
 
     #[test]
-    fn clamps_out_of_range_intervals_into_the_allowed_band() {
+    fn every_cadence_is_clamped_to_its_allowed_band() {
         struct Case {
             name: &'static str,
+            clamp: fn(u64) -> u64,
             secs: u64,
             expected: u64,
         }
 
-        let cases = [
-            Case {
-                name: "zero is raised to the minimum so the poll never busy-loops",
-                secs: 0,
-                expected: PollInterval::MIN_SECS,
-            },
-            Case {
-                name: "below the floor is raised to the minimum",
-                secs: PollInterval::MIN_SECS - 1,
-                expected: PollInterval::MIN_SECS,
-            },
-            Case {
-                name: "a value in range is kept as-is",
-                secs: 90,
-                expected: 90,
-            },
-            Case {
-                name: "above the ceiling is lowered to the maximum",
-                secs: PollInterval::MAX_SECS + 1,
-                expected: PollInterval::MAX_SECS,
-            },
-        ];
-
-        for case in cases {
-            assert_eq!(
-                PollInterval::from_secs(case.secs).as_secs(),
-                case.expected,
-                "{}",
-                case.name
-            );
-        }
-    }
-
-    #[test]
-    fn hot_default_is_fifteen_seconds() {
-        assert_eq!(HotInterval::default().as_secs(), 15);
-        assert_eq!(
-            HotInterval::default().as_duration(),
-            Duration::from_secs(15)
-        );
-    }
-
-    #[test]
-    fn hot_interval_is_clamped_to_its_allowed_band() {
-        struct Case {
-            name: &'static str,
-            secs: u64,
-            expected: u64,
-        }
+        let hot = |secs| HotInterval::from_secs(secs).as_secs();
+        let structural = |secs| StructuralInterval::from_secs(secs).as_secs();
+        let safety_net = |secs| SafetyNetInterval::from_secs(secs).as_secs();
 
         let cases = [
             Case {
-                name: "zero is raised to the minimum so the sweep never busy-loops",
+                name: "hot: zero is raised to the floor so the sweep never busy-loops",
+                clamp: hot,
                 secs: 0,
                 expected: HotInterval::MIN_SECS,
             },
             Case {
-                name: "below the floor is raised to the minimum",
-                secs: HotInterval::MIN_SECS - 1,
-                expected: HotInterval::MIN_SECS,
-            },
-            Case {
-                name: "a value in range is kept as-is",
+                name: "hot: a value in range is kept as-is",
+                clamp: hot,
                 secs: 20,
                 expected: 20,
             },
             Case {
-                name: "above the ceiling is lowered to the maximum",
+                name: "hot: above the ceiling is lowered to it",
+                clamp: hot,
                 secs: HotInterval::MAX_SECS + 1,
                 expected: HotInterval::MAX_SECS,
             },
-        ];
-
-        for case in cases {
-            assert_eq!(
-                HotInterval::from_secs(case.secs).as_secs(),
-                case.expected,
-                "{}",
-                case.name
-            );
-        }
-    }
-
-    #[test]
-    fn reconcile_default_is_five_minutes() {
-        assert_eq!(ReconcileInterval::default().as_secs(), 300);
-        assert_eq!(
-            ReconcileInterval::default().as_duration(),
-            Duration::from_secs(300)
-        );
-    }
-
-    #[test]
-    fn reconcile_interval_is_clamped_to_its_allowed_band() {
-        struct Case {
-            secs: u64,
-            expected: u64,
-        }
-
-        let cases = [
             Case {
-                secs: 0,
-                expected: ReconcileInterval::MIN_SECS,
+                name: "structural: below the floor is raised to it",
+                clamp: structural,
+                secs: StructuralInterval::MIN_SECS - 1,
+                expected: StructuralInterval::MIN_SECS,
             },
             Case {
-                secs: ReconcileInterval::MIN_SECS - 1,
-                expected: ReconcileInterval::MIN_SECS,
+                name: "structural: a value in range is kept as-is",
+                clamp: structural,
+                secs: 90,
+                expected: 90,
             },
             Case {
+                name: "structural: above the ceiling is lowered to it",
+                clamp: structural,
+                secs: StructuralInterval::MAX_SECS + 1,
+                expected: StructuralInterval::MAX_SECS,
+            },
+            Case {
+                name: "safety net: below the floor is raised to it",
+                clamp: safety_net,
+                secs: SafetyNetInterval::MIN_SECS - 1,
+                expected: SafetyNetInterval::MIN_SECS,
+            },
+            Case {
+                name: "safety net: a value in range is kept as-is",
+                clamp: safety_net,
                 secs: 900,
                 expected: 900,
             },
             Case {
-                secs: ReconcileInterval::MAX_SECS + 1,
-                expected: ReconcileInterval::MAX_SECS,
+                name: "safety net: above the ceiling is lowered to it",
+                clamp: safety_net,
+                secs: SafetyNetInterval::MAX_SECS + 1,
+                expected: SafetyNetInterval::MAX_SECS,
             },
         ];
 
         for case in cases {
-            assert_eq!(
-                ReconcileInterval::from_secs(case.secs).as_secs(),
-                case.expected
-            );
+            assert_eq!((case.clamp)(case.secs), case.expected, "{}", case.name);
         }
     }
 }

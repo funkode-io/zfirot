@@ -136,6 +136,14 @@ impl ScriptedGitHub {
         }
     }
 
+    /// The same GitHub, where every full load after the first answers `issues`
+    /// while the index and a **Hydrate** keep answering as before: an edit GitHub
+    /// did not stamp (an edited native dependency), which only a full load sees.
+    fn with_unstamped_edit(self, issues: Vec<RawIssue>) -> Self {
+        self.issues.lock().expect("lock poisoned").push_back(issues);
+        self
+    }
+
     /// The same GitHub, with `issue` as it now stands on GitHub, for a later
     /// **Hydrate** to read.
     fn with_issue(self, issue: RawIssue) -> Self {
@@ -841,9 +849,9 @@ async fn an_unreadable_cache_fails_every_merging_path_without_writing() {
         .await
         .expect_err("a structural refresh that cannot read the cache must fail");
     service
-        .reconcile_cached(&repo(), &snapshot)
+        .safety_net_refresh_cached(&repo(), &snapshot)
         .await
-        .expect_err("a reconcile that cannot read the cache must fail");
+        .expect_err("a safety-net hydrate that cannot read the cache must fail");
 
     assert_eq!(
         cache.writes(),
@@ -1619,7 +1627,7 @@ async fn a_structural_refresh_in_flight_during_a_cascade_keeps_the_cascade() {
 }
 
 #[tokio::test]
-async fn a_reconcile_in_flight_during_a_cascade_keeps_the_cascade() {
+async fn a_safety_net_in_flight_during_a_cascade_keeps_the_cascade() {
     let cache = Arc::new(CountingBoardCache::default());
     let (opened, cascaded) = opened_and_cascaded(&cache).await;
     let service = CachedBoardService::new(
@@ -1631,29 +1639,25 @@ async fn a_reconcile_in_flight_during_a_cascade_keeps_the_cascade() {
         cache.clone(),
     );
 
-    let reconciled = changed(
+    let healed = changed(
         service
-            .reconcile_cached(&repo(), &opened)
+            .safety_net_refresh_cached(&repo(), &opened)
             .await
-            .expect("reconcile should succeed"),
+            .expect("safety-net hydrate should succeed"),
         "the cascade changes the board",
     );
 
     assert!(
-        !reconciled
-            .board
-            .slices
-            .iter()
-            .any(|slice| slice.number == 38),
+        !healed.board.slices.iter().any(|slice| slice.number == 38),
         "a reload that read the issue before the cascade must not resurrect it",
     );
-    assert_eq!(slice(&reconciled.board, 39).state, SliceState::Ready);
+    assert_eq!(slice(&healed.board, 39).state, SliceState::Ready);
 }
 
 /// Only a write made during the fetch is protected. One that landed before it
 /// began is there for the fetch to supersede, however stale the caller's snapshot.
 #[tokio::test]
-async fn a_reconcile_with_a_stale_caller_still_applies_githubs_newer_answer() {
+async fn a_safety_net_with_a_stale_caller_still_applies_githubs_newer_answer() {
     let cache = Arc::new(CountingBoardCache::default());
     let seeding = CachedBoardService::new(
         ScriptedGitHub::new(vec![slice_issue(41)], vec![vec![], vec![open_pr(410, 41)]])
@@ -1682,16 +1686,16 @@ async fn a_reconcile_with_a_stale_caller_still_applies_githubs_newer_answer() {
         ),
         cache.clone(),
     );
-    let reconciled = changed(
+    let healed = changed(
         service
-            .reconcile_cached(&repo(), &stale)
+            .safety_net_refresh_cached(&repo(), &stale)
             .await
-            .expect("reconcile should succeed"),
+            .expect("safety-net hydrate should succeed"),
         "the reload's newer answer changes the board",
     );
 
-    assert_eq!(slice(&reconciled.board, 41).title, "As GitHub says now");
-    assert_eq!(slice(&reconciled.board, 41).state, SliceState::Wip);
+    assert_eq!(slice(&healed.board, 41).title, "As GitHub says now");
+    assert_eq!(slice(&healed.board, 41).state, SliceState::Wip);
 }
 
 #[tokio::test]
@@ -1817,10 +1821,10 @@ async fn a_hydrate_read_too_early_heals_on_the_next_index_sweep() {
     assert!(!healed.board.slices.iter().any(|slice| slice.number == 46));
 }
 
-/// A hydrate that landed during a reconcile keeps its issue, which the reload read
+/// A hydrate that landed during a safety-net hydrate keeps its issue, which the reload read
 /// too early to see.
 #[tokio::test]
-async fn a_reconcile_in_flight_during_a_hydrate_keeps_its_issue() {
+async fn a_safety_net_in_flight_during_a_hydrate_keeps_its_issue() {
     let cache = Arc::new(CountingBoardCache::default());
     let seeding = CachedBoardService::new(
         ScriptedGitHub::new(vec![slice_issue(49)], vec![vec![], vec![open_pr(480, 48)]])
@@ -1846,19 +1850,15 @@ async fn a_reconcile_in_flight_during_a_hydrate_keeps_its_issue() {
             .with_write_during_fetch(cache.clone(), hydrated),
         cache.clone(),
     );
-    let reconciled = changed(
+    let healed = changed(
         service
-            .reconcile_cached(&repo(), &opened)
+            .safety_net_refresh_cached(&repo(), &opened)
             .await
-            .expect("reconcile should succeed"),
+            .expect("safety-net hydrate should succeed"),
         "the hydrated issue changes the board",
     );
 
-    assert!(reconciled
-        .board
-        .slices
-        .iter()
-        .any(|slice| slice.number == 48));
+    assert!(healed.board.slices.iter().any(|slice| slice.number == 48));
 }
 
 /// `issue` as a comment leaves it: nothing on screen differs, but its stamp moved.
@@ -1997,19 +1997,19 @@ async fn a_stamp_written_during_a_reload_is_not_pinned_on_detail_it_did_not_desc
             .with_write_during_fetch(cache.clone(), stamped),
     );
     let service = CachedBoardService::new(github.clone(), cache.clone());
-    let reconciled = changed(
+    let healed = changed(
         service
-            .reconcile_cached(&repo(), &opened)
+            .safety_net_refresh_cached(&repo(), &opened)
             .await
-            .expect("reconcile should succeed"),
+            .expect("safety-net hydrate should succeed"),
         "the unstamped edit changes the board",
     );
-    assert_eq!(slice(&reconciled.board, 70).state, SliceState::Blocked);
+    assert_eq!(slice(&healed.board, 70).state, SliceState::Blocked);
 
     github.update_issue(stamp_moved(unstamped_edit));
     github.set_hydrate_failing(true);
     service
-        .structural_refresh_cached(&repo(), &reconciled.snapshot)
+        .structural_refresh_cached(&repo(), &healed.snapshot)
         .await
         .expect_err("the next sweep must still re-read #70, whose stamp it has not seen");
 }
@@ -2049,4 +2049,335 @@ async fn a_write_during_a_structural_refresh_keeps_the_cards_in_their_places() {
     let numbers: Vec<u64> = loaded.board.slices.iter().map(|s| s.number).collect();
     assert_eq!(numbers, vec![54, 55, 56]);
     assert_eq!(slice(&loaded.board, 54).title, "Retitled");
+}
+
+// The **safety net** and the manual **Refresh** that runs every pass once.
+
+/// Slice #90 blocked by #91 through a native dependency, then the edit GitHub did
+/// not stamp: the dependency removed, so #90 should be Ready.
+fn unstamped_unblock() -> (Vec<RawIssue>, Vec<RawIssue>) {
+    (
+        vec![slice_blocked_by(90, 91), slice_issue(91)],
+        vec![slice_issue(90), slice_issue(91)],
+    )
+}
+
+#[tokio::test]
+async fn a_relationship_edit_github_did_not_stamp_is_healed_by_the_safety_net() {
+    let (before, after) = unstamped_unblock();
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(before, vec![vec![]]).with_unstamped_edit(after),
+        cache.clone(),
+    );
+    let snapshot = seeded(&service).await;
+
+    let structural = service
+        .structural_refresh_cached(&repo(), &snapshot)
+        .await
+        .expect("structural refresh should succeed");
+    let BoardRefresh::Unchanged(snapshot) = structural else {
+        panic!("an edit that moved no stamp is invisible to the issue index");
+    };
+
+    let healed = changed(
+        service
+            .safety_net_refresh_cached(&repo(), &snapshot)
+            .await
+            .expect("safety-net refresh should succeed"),
+        "the safety net must repaint an edit the index could not see",
+    );
+    assert_eq!(slice(&healed.board, 90).state, SliceState::Ready);
+}
+
+#[tokio::test]
+async fn a_safety_net_that_finds_nothing_repaints_nothing_and_writes_nothing() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(92)], vec![vec![open_pr(920, 92)]]),
+        cache.clone(),
+    );
+    let snapshot = seeded(&service).await;
+    let writes = cache.writes();
+
+    let refresh = service
+        .safety_net_refresh_cached(&repo(), &snapshot)
+        .await
+        .expect("safety-net refresh should succeed");
+
+    assert!(
+        matches!(refresh, BoardRefresh::Unchanged(_)),
+        "a full hydrate matching the board is not news",
+    );
+    assert_eq!(cache.writes(), writes, "nor is it worth a cache write");
+}
+
+#[tokio::test]
+async fn a_safety_net_built_on_an_older_board_keeps_the_fresher_pr_facts() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(93)], vec![vec![], vec![open_pr(930, 93)]]),
+        cache.clone(),
+    );
+    let stale = seeded(&service).await;
+    changed(
+        service
+            .hot_refresh_cached(&repo(), &stale)
+            .await
+            .expect("hot refresh should succeed"),
+        "a PR appearing repaints",
+    );
+
+    // The safety net starts from the board before the PR appeared.
+    let refresh = service
+        .safety_net_refresh_cached(&repo(), &stale)
+        .await
+        .expect("safety-net refresh should succeed");
+
+    assert!(
+        matches!(refresh, BoardRefresh::Unchanged(_)),
+        "the issues match the freshest board, so there is nothing to repaint",
+    );
+    let reopened = match service.open(&repo()).await.expect("reopen should succeed") {
+        BoardOpen::Cached(loaded) => loaded.board,
+        BoardOpen::Cold(_) => panic!("a refreshed board is cached"),
+    };
+    assert_eq!(
+        slice(&reopened, 93).state,
+        SliceState::Wip,
+        "the safety net writes only issues, so the hot sweep's PR stays",
+    );
+}
+
+#[tokio::test]
+async fn a_manual_refresh_runs_every_pass_once_and_reports_one_change() {
+    let (before, mut after) = unstamped_unblock();
+    // A new Slice from grooming, which the index lists and a full load reads too.
+    after.push(slice_issue(94));
+    let cache = Arc::new(CountingBoardCache::default());
+    let github = Arc::new(
+        ScriptedGitHub::new(before, vec![vec![], vec![open_pr(910, 91)]])
+            .with_unstamped_edit(after),
+    );
+    let service = CachedBoardService::new(github.clone(), cache.clone());
+    let snapshot = seeded(&service).await;
+    github.update_issue(slice_issue(94));
+
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
+
+    assert!(full.failures.is_empty(), "every pass succeeded");
+    let loaded = full.board;
+    assert_eq!(
+        slice(&loaded.board, 91).state,
+        SliceState::Wip,
+        "hot: the PR that appeared"
+    );
+    assert_eq!(
+        slice(&loaded.board, 94).state,
+        SliceState::Ready,
+        "structural: the new Slice"
+    );
+    assert_eq!(
+        slice(&loaded.board, 90).state,
+        SliceState::Ready,
+        "safety net: the unstamped edit"
+    );
+    let reopened = match service.open(&repo()).await.expect("reopen should succeed") {
+        BoardOpen::Cached(loaded) => loaded.board,
+        BoardOpen::Cold(_) => panic!("a refreshed board is cached"),
+    };
+    assert_eq!(reopened, loaded.board, "the cache holds what was painted");
+}
+
+#[tokio::test]
+async fn a_manual_refresh_that_finds_nothing_writes_nothing() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(95)], vec![vec![open_pr(950, 95)]]),
+        cache.clone(),
+    );
+    let snapshot = seeded(&service).await;
+    let writes = cache.writes();
+
+    let mut hot_changed = None;
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |changed| {
+            hot_changed = Some(changed.is_some())
+        })
+        .await;
+
+    assert!(full.failures.is_empty());
+    assert_eq!(hot_changed, Some(false), "the hot pass changed nothing");
+    assert_eq!(slice(&full.board.board, 95).state, SliceState::Wip);
+    assert_eq!(cache.writes(), writes);
+}
+
+#[tokio::test]
+async fn a_manual_refresh_with_a_broken_pr_sweep_still_runs_the_issue_passes() {
+    let (before, after) = unstamped_unblock();
+    let cache = Arc::new(CountingBoardCache::default());
+    let snapshot = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(before.clone(), vec![vec![]]),
+        cache.clone(),
+    ))
+    .await;
+    // GitHub after the unstamped edit, with its PR sweep broken.
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(after, vec![]).with_failing_sweep(),
+        cache.clone(),
+    );
+
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
+
+    assert_eq!(full.failures.len(), 1, "only the hot pass failed");
+    let loaded = full.board;
+    assert_eq!(slice(&loaded.board, 90).state, SliceState::Ready);
+}
+
+#[tokio::test]
+async fn a_manual_refresh_with_a_broken_issue_side_still_refreshes_pr_facts() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let snapshot = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(96)], vec![vec![]]),
+        cache.clone(),
+    ))
+    .await;
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(96)], vec![vec![open_pr(960, 96)]])
+            .with_failing_issues(),
+        cache.clone(),
+    );
+
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
+
+    assert_eq!(
+        full.failures.len(),
+        2,
+        "the structural and safety-net passes each failed, and each is reported",
+    );
+    let loaded = full.board;
+    assert_eq!(slice(&loaded.board, 96).state, SliceState::Wip);
+}
+
+#[tokio::test]
+async fn a_manual_refresh_reports_the_pr_facts_a_background_sweep_wrote_during_a_failed_pass() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let snapshot = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(97)], vec![vec![]]),
+        cache.clone(),
+    ))
+    .await;
+    // The background hot sweep's answer, a moment newer: a PR opened on #97.
+    let elsewhere = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(97)], vec![vec![], vec![open_pr(970, 97)]]),
+        Arc::new(CountingBoardCache::default()),
+    );
+    let base = seeded(&elsewhere).await;
+    let newer = changed(
+        elsewhere
+            .hot_refresh_cached(&repo(), &base)
+            .await
+            .expect("hot refresh should succeed"),
+        "a PR appearing repaints",
+    )
+    .snapshot;
+    // The manual refresh's own sweep read GitHub before that PR opened; the
+    // background write lands while its issue side runs, and then fails.
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(97)], vec![vec![]])
+            .with_failing_issues()
+            .with_write_during_fetch(cache.clone(), newer),
+        cache.clone(),
+    );
+
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
+
+    assert_eq!(full.failures.len(), 2, "both issue passes failed");
+    let loaded = full.board;
+    assert_eq!(
+        slice(&loaded.board, 97).state,
+        SliceState::Wip,
+        "the outcome is the freshest board, not the manual pass's older answer",
+    );
+}
+
+#[tokio::test]
+async fn a_manual_refresh_hands_over_the_hot_pass_board_before_the_issue_passes_run() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let snapshot = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(99)], vec![vec![]]),
+        cache.clone(),
+    ))
+    .await;
+    // The issue side is down, so only a board handed over after the hot pass can
+    // show the new PR before the whole refresh ends.
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(99)], vec![vec![open_pr(990, 99)]])
+            .with_failing_issues(),
+        cache.clone(),
+    );
+
+    let mut painted_early = None;
+    service
+        .full_refresh_cached(&repo(), &snapshot, |changed| {
+            painted_early = changed.map(|loaded| slice(&loaded.board, 99).state);
+        })
+        .await;
+
+    assert_eq!(
+        painted_early,
+        Some(SliceState::Wip),
+        "the PR the hot pass found is ready to paint at once",
+    );
+}
+
+#[tokio::test]
+async fn a_manual_refresh_ends_on_the_freshest_board_even_when_it_matches_the_click() {
+    let as_clicked = RawIssue {
+        title: "As clicked".to_string(),
+        ..slice_issue(98)
+    };
+    let cache = Arc::new(CountingBoardCache::default());
+    let snapshot = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(vec![as_clicked.clone()], vec![vec![]]),
+        cache.clone(),
+    ))
+    .await;
+    // A background refresh paints a retitle while the manual refresh runs ...
+    let painted_meanwhile = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![RawIssue {
+                title: "Painted meanwhile".to_string(),
+                ..slice_issue(98)
+            }],
+            vec![vec![]],
+        ),
+        Arc::new(CountingBoardCache::default()),
+    ))
+    .await;
+    // ... and by the safety net GitHub reads as it did at the click.
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![as_clicked], vec![vec![]])
+            .with_write_during_fetch(cache.clone(), painted_meanwhile),
+        cache.clone(),
+    );
+
+    let full = service
+        .full_refresh_cached(&repo(), &snapshot, |_| {})
+        .await;
+
+    assert!(full.failures.is_empty());
+    assert_eq!(
+        slice(&full.board.board, 98).title,
+        "As clicked",
+        "the board to paint is GitHub's last word, though it matches the click-time board",
+    );
 }

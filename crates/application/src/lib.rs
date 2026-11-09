@@ -327,6 +327,19 @@ pub enum BoardRefresh {
     Unchanged(BoardSnapshot),
 }
 
+/// Outcome of a manual **Refresh**, which runs every refresh pass once (see
+/// [`CachedBoardService::full_refresh_cached`]).
+#[derive(Debug)]
+pub struct FullRefresh {
+    /// The freshest board once every pass has run: the one to paint. It is not
+    /// judged against the board the user clicked on, since other refreshes may
+    /// have painted since then, so only the caller can tell what is on screen.
+    pub board: LoadedBoard,
+    /// Every pass that failed, in the order they ran. A failed pass wrote nothing,
+    /// and the passes after it still ran.
+    pub failures: Vec<AppError>,
+}
+
 /// Whether a freshly-written snapshot is worth repainting, given the retained
 /// one it was derived from. Each refresh path writes exactly one of the two
 /// collections and hands the result here, so "did anything change?" is decided
@@ -500,7 +513,7 @@ fn issues_changed_between(before: &[RawIssue], after: &[RawIssue]) -> HashSet<u6
 /// An issue-side result with the issues another path wrote while it was in flight
 /// (`written`) laid back over it: a **Cascade**, or the other issue-side path. That
 /// write wins: this fetch may have read the issue before the PR merged, or before a
-/// reconcile dropped or corrected it, and would otherwise put a closed Slice or an
+/// safety net dropped or corrected it, and would otherwise put a closed Slice or an
 /// older issue back on the board. Issues keep their positions, so the overlay alone
 /// never reorders cards.
 fn with_issues_written_meanwhile(
@@ -1090,10 +1103,11 @@ impl<P: GitHubPort> BoardService<P> {
         ))
     }
 
-    /// Re-read every open issue and replace the snapshot's issue collection
-    /// wholesale, healing what GitHub did not stamp (an edited relationship). Like [`BoardService::refresh`] it writes only issues,
+    /// The **safety-net** refresh: re-read every open issue and replace the
+    /// snapshot's issue collection wholesale, healing what GitHub did not stamp (an
+    /// edited relationship). Like [`BoardService::refresh`] it writes only issues,
     /// carrying the snapshot's Linked PRs through untouched.
-    async fn reload_issues(
+    async fn safety_net_refresh(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
@@ -1169,10 +1183,10 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// found something. An unchanged repo hydrates nothing, repaints nothing and
     /// writes nothing.
     ///
-    /// Issue-side only: whatever the hot path or a reconcile wrote while this
+    /// Issue-side only: whatever the hot path or a safety net wrote while this
     /// refresh was in flight is adopted before the result is returned or cached, so
     /// a slower structural write can never revert 15-second-fresh PR facts, nor
-    /// bring back an issue a reconcile dropped or corrected (ADR 0008).
+    /// bring back an issue a safety net dropped or corrected (ADR 0008).
     pub async fn structural_refresh_cached(
         &self,
         repo: &RepoRef,
@@ -1310,7 +1324,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// the fetch began, when the cache held `start`, so its result carries the hot
     /// path's PR facts and **Cascade**, and the issues the other issue-side path
     /// wrote, rather than older ones: a structural refresh finishing after a
-    /// reconcile keeps what that reconcile dropped or corrected. Only writes made
+    /// safety net keeps what that safety net dropped or corrected. Only writes made
     /// after `start` are protected: anything earlier was there for the fetch to
     /// supersede. If the other write's read was the older one, the next index sweep
     /// finds it out of date.
@@ -1363,21 +1377,83 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             .map_err(|err| err.with_operation("CachedBoardService::cache_issue_side_result"))
     }
 
-    /// Full-load reconcile against a retained snapshot.
+    /// The **safety-net** refresh: a full **Hydrate** of every open issue, the one
+    /// path that assumes GitHub lied about everything else. It heals what no
+    /// stamp reports (for example, an edited native dependency), so such an edit
+    /// is corrected within one safety-net interval.
     ///
-    /// Runs a complete issue load to heal what GitHub did not stamp (for example,
-    /// an edited relationship). Like every issue-side path it writes no PR facts of
-    /// its own, adopting the hot path's instead. Repaints only when facts differ.
-    pub async fn reconcile_cached(
+    /// Issue-side only, like the structural refresh: it adopts whatever the hot
+    /// path wrote meanwhile instead of writing PR facts of its own, so it never
+    /// reverts them. It repaints, and rewrites the cache, only on a real
+    /// difference.
+    pub async fn safety_net_refresh_cached(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
         let start = self.freshest_snapshot(repo, snapshot).await?;
-        let refresh = self.board.reload_issues(repo, &start).await?;
+        let refresh = self.board.safety_net_refresh(repo, &start).await?;
         let refresh = self.with_facts_written_since(repo, &start, refresh).await?;
         self.cache_issue_side_result(repo, &start, &refresh).await?;
         Ok(refresh)
+    }
+
+    /// The manual **Refresh**: the hot, structural and safety-net passes once
+    /// each, in that order, so the user's escape hatch is strictly stronger than
+    /// any single loop.
+    ///
+    /// The passes are reported as one outcome: the board to paint and every
+    /// failure. A failed pass writes nothing and does not stop the passes after
+    /// it, so a broken issue side still refreshes PR facts, and the other way
+    /// round.
+    ///
+    /// `hot_pass_done` runs as soon as the hot pass has finished, with the board
+    /// it changed, if it changed one. A caller can paint fresh PR facts at once
+    /// rather than after the slower issue passes, and a caller that serializes
+    /// hot sweeps can hold its gate for that pass alone.
+    ///
+    /// The board is the freshest one in the cache once the passes are done, not
+    /// the last pass's own answer: a background refresh may have written newer
+    /// facts meanwhile, notably after a failed pass, and reporting the older
+    /// answer would repaint them away.
+    pub async fn full_refresh_cached(
+        &self,
+        repo: &RepoRef,
+        snapshot: &BoardSnapshot,
+        hot_pass_done: impl FnOnce(Option<&LoadedBoard>),
+    ) -> FullRefresh {
+        fn absorb(
+            pass: AppResult<BoardRefresh>,
+            latest: &mut BoardSnapshot,
+            failures: &mut Vec<AppError>,
+        ) {
+            match pass {
+                Ok(BoardRefresh::Changed(loaded)) => *latest = loaded.snapshot,
+                Ok(BoardRefresh::Unchanged(snapshot)) => *latest = snapshot,
+                Err(error) => failures.push(error),
+            }
+        }
+
+        let mut latest = snapshot.clone();
+        let mut failures = Vec::new();
+        let hot = self.hot_refresh_cached(repo, &latest).await;
+        hot_pass_done(match &hot {
+            Ok(BoardRefresh::Changed(loaded)) => Some(loaded),
+            _ => None,
+        });
+        absorb(hot, &mut latest, &mut failures);
+        let structural = self.structural_refresh_cached(repo, &latest).await;
+        absorb(structural, &mut latest, &mut failures);
+        let safety_net = self.safety_net_refresh_cached(repo, &latest).await;
+        absorb(safety_net, &mut latest, &mut failures);
+        match self.freshest_snapshot(repo, &latest).await {
+            Ok(freshest) => latest = freshest,
+            Err(error) => failures.push(error),
+        }
+        FullRefresh {
+            board: latest.loaded(),
+            failures,
+        }
     }
 }
 

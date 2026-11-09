@@ -432,7 +432,7 @@ async fn clearing_all_cache_forces_cold_reopen_and_reseed() {
 }
 
 #[tokio::test]
-async fn reconcile_full_load_noops_when_cache_is_aligned() {
+async fn safety_net_noops_when_cache_is_aligned() {
     let repo = RepoRef::new("funkode-io", "zfirot");
     let cache = Arc::new(CountingBoardCache::default());
     let service = CachedBoardService::new(
@@ -452,32 +452,32 @@ async fn reconcile_full_load_noops_when_cache_is_aligned() {
     };
     assert_eq!(cache.writes(), 1, "seed should write exactly once");
 
-    let reconcile = service
-        .reconcile_cached(&repo, &snapshot)
+    let safety_net = service
+        .safety_net_refresh_cached(&repo, &snapshot)
         .await
-        .expect("reconcile should succeed");
+        .expect("safety-net hydrate should succeed");
 
-    match reconcile {
+    match safety_net {
         BoardRefresh::Unchanged(returned) => {
             // `Unchanged` already says the facts are aligned; the full load still
             // read GitHub, and the time it did comes back.
             assert!(
                 returned.fetched_at > snapshot.fetched_at,
-                "aligned reconcile should report when it read GitHub"
+                "aligned safety-net hydrate should report when it read GitHub"
             );
         }
-        BoardRefresh::Changed(_) => panic!("aligned reconcile should be a no-op"),
+        BoardRefresh::Changed(_) => panic!("aligned safety-net hydrate should be a no-op"),
     }
 
     assert_eq!(
         cache.writes(),
         1,
-        "aligned reconcile should not rewrite the cache"
+        "aligned safety-net hydrate should not rewrite the cache"
     );
 }
 
 #[tokio::test]
-async fn reconcile_full_load_drops_ghost_issue_from_cache() {
+async fn safety_net_drops_ghost_issue_from_cache() {
     let repo = RepoRef::new("funkode-io", "zfirot");
     let cache = Arc::new(CountingBoardCache::default());
     let service = CachedBoardService::new(
@@ -497,27 +497,27 @@ async fn reconcile_full_load_drops_ghost_issue_from_cache() {
     };
     assert_eq!(cache.writes(), 1, "seed should write exactly once");
 
-    let reconcile = service
-        .reconcile_cached(&repo, &snapshot)
+    let safety_net = service
+        .safety_net_refresh_cached(&repo, &snapshot)
         .await
-        .expect("reconcile should succeed");
+        .expect("safety-net hydrate should succeed");
 
-    match reconcile {
+    match safety_net {
         BoardRefresh::Changed(loaded) => {
             assert_eq!(
                 loaded.board.slices.len(),
                 1,
-                "full reconcile should drop a cached ghost issue"
+                "safety-net hydrate should drop a cached ghost issue"
             );
             assert_eq!(loaded.board.slices[0].number, 50);
         }
-        BoardRefresh::Unchanged(_) => panic!("ghost removal must be a changed reconcile"),
+        BoardRefresh::Unchanged(_) => panic!("ghost removal must be a changed safety-net hydrate"),
     }
 
     assert_eq!(
         cache.writes(),
         2,
-        "changed reconcile should rewrite the cache with the full-load snapshot"
+        "changed safety-net hydrate should rewrite the cache with the full-load snapshot"
     );
 }
 
@@ -563,7 +563,7 @@ async fn failed_structural_refresh_leaves_snapshot_and_cache_untouched() {
 }
 
 #[tokio::test]
-async fn failed_reconcile_leaves_snapshot_and_cache_untouched() {
+async fn failed_safety_net_leaves_snapshot_and_cache_untouched() {
     let repo = RepoRef::new("funkode-io", "zfirot");
     let cache = Arc::new(CountingBoardCache::default());
     let seed_service = CachedBoardService::new(
@@ -580,17 +580,17 @@ async fn failed_reconcile_leaves_snapshot_and_cache_untouched() {
     };
     assert_eq!(cache.writes(), 1, "seed should write exactly once");
 
-    // A connectivity blip on the full-load reconcile.
+    // A connectivity blip on the safety-net hydrate.
     let flaky_service = CachedBoardService::new(FailingPort, cache.clone());
     flaky_service
-        .reconcile_cached(&repo, &snapshot)
+        .safety_net_refresh_cached(&repo, &snapshot)
         .await
         .expect_err("a failing port must surface as an error, not a silent no-op");
 
     assert_eq!(
         cache.writes(),
         1,
-        "a failed reconcile must not rewrite the cache"
+        "a failed safety-net hydrate must not rewrite the cache"
     );
     let cached = cache
         .cached_board(&repo)
@@ -599,6 +599,6 @@ async fn failed_reconcile_leaves_snapshot_and_cache_untouched() {
         .expect("cache should still hold the seeded snapshot");
     assert_eq!(
         cached.fetched_at, snapshot.fetched_at,
-        "a failed reconcile must not advance the cached fetched_at"
+        "a failed safety-net hydrate must not advance the cached fetched_at"
     );
 }

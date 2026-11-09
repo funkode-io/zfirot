@@ -577,40 +577,38 @@ async fn a_failing_structural_refresh_does_not_stop_pr_facts_from_refreshing() {
 }
 
 /// Start a structural refresh from `start`, and while its index sweep is in flight,
-/// after it read GitHub, let `edit` change GitHub and a reconcile land its full
+/// after it read GitHub, let `edit` change GitHub and a safety net land its full
 /// load in the shared cache. The structural refresh finishes last.
-async fn structural_outlived_by_a_reconcile(
+async fn structural_outlived_by_a_safety_net(
     github: &Arc<LiveGitHub>,
     cache: &Arc<CountingCache>,
     service: &Service,
     start: &BoardSnapshot,
     edit: impl FnOnce(&LiveGitHub) + Send + 'static,
 ) -> (BoardRefresh, LoadedBoard) {
-    let reconciler = CachedBoardService::new(github.clone(), cache.clone());
-    let (reconciled_tx, reconciled_rx) = std::sync::mpsc::channel();
-    let (edited_github, reconcile_from) = (github.clone(), start.clone());
+    let safety_net = CachedBoardService::new(github.clone(), cache.clone());
+    let (healed_tx, healed_rx) = std::sync::mpsc::channel();
+    let (edited_github, safety_net_from) = (github.clone(), start.clone());
     github.during_next_sweep(async move {
         edit(&edited_github);
-        let reconciled = reconciler
-            .reconcile_cached(&repo(), &reconcile_from)
+        let healed = safety_net
+            .safety_net_refresh_cached(&repo(), &safety_net_from)
             .await
-            .expect("reconcile should succeed");
-        let BoardRefresh::Changed(reconciled) = reconciled else {
-            panic!("the reconcile finds what GitHub changed");
+            .expect("safety net should succeed");
+        let BoardRefresh::Changed(healed) = healed else {
+            panic!("the safety net finds what GitHub changed");
         };
-        reconciled_tx
-            .send(reconciled)
-            .expect("the test is still listening");
+        healed_tx.send(healed).expect("the test is still listening");
     });
 
     let structural = service
         .structural_refresh_cached(&repo(), start)
         .await
         .expect("structural refresh should succeed");
-    let reconciled = reconciled_rx
+    let healed = healed_rx
         .try_recv()
-        .expect("the reconcile landed while the structural refresh was in flight");
-    (structural, reconciled)
+        .expect("the safety net landed while the structural refresh was in flight");
+    (structural, healed)
 }
 
 /// The board a refresh repaints: here it always differs from where it started.
@@ -618,7 +616,7 @@ fn painted(refresh: &BoardRefresh) -> ClassifiedBoard {
     match refresh {
         BoardRefresh::Changed(loaded) => loaded.board.clone(),
         BoardRefresh::Unchanged(_) => {
-            panic!("the refresh repainted the board it started from, undoing the reconcile")
+            panic!("the refresh repainted the board it started from, undoing the safety net")
         }
     }
 }
@@ -631,21 +629,26 @@ async fn reopened(service: &Service) -> ClassifiedBoard {
     }
 }
 
-/// A structural refresh read the index before a reconcile dropped an issue GitHub
+/// A structural refresh read the index before a safety net dropped an issue GitHub
 /// had just closed. Finishing last, it must not bring that issue back: not on the
 /// board it returns, and not in the cache a reopen paints from.
 #[tokio::test]
-async fn a_structural_refresh_finishing_after_a_reconcile_does_not_resurrect_what_it_dropped() {
+async fn a_structural_refresh_finishing_after_a_safety_net_does_not_resurrect_what_it_dropped() {
     let (github, cache, service, loaded) = opened(vec![issue(30), issue(31)]).await;
 
-    let (structural, reconciled) =
-        structural_outlived_by_a_reconcile(&github, &cache, &service, &loaded.snapshot, |github| {
+    let (structural, healed) = structural_outlived_by_a_safety_net(
+        &github,
+        &cache,
+        &service,
+        &loaded.snapshot,
+        |github| {
             github.put(edited(issue(30), |issue| issue.closed = true));
-        })
-        .await;
+        },
+    )
+    .await;
     assert!(
-        !on_board(&reconciled, 30),
-        "the reconcile drops the closed issue"
+        !on_board(&healed, 30),
+        "the safety net drops the closed issue"
     );
 
     let board = painted(&structural);
@@ -661,24 +664,29 @@ async fn a_structural_refresh_finishing_after_a_reconcile_does_not_resurrect_wha
     );
 }
 
-/// A reconcile heals what GitHub did not stamp, such as an edited dependency. A
+/// A safety net heals what GitHub did not stamp, such as an edited dependency. A
 /// structural refresh that read the index before that heal still holds the old
 /// issue, since its stamp never moved, and finishing last must not revert it.
 #[tokio::test]
-async fn a_structural_refresh_finishing_after_a_reconcile_keeps_the_issue_it_corrected() {
+async fn a_structural_refresh_finishing_after_a_safety_net_keeps_the_issue_it_corrected() {
     let (github, cache, service, loaded) = opened(vec![issue(32), issue(33)]).await;
     assert_eq!(slice(&loaded, 33).state, SliceState::Ready);
 
-    let (structural, reconciled) =
-        structural_outlived_by_a_reconcile(&github, &cache, &service, &loaded.snapshot, |github| {
+    let (structural, healed) = structural_outlived_by_a_safety_net(
+        &github,
+        &cache,
+        &service,
+        &loaded.snapshot,
+        |github| {
             // A dependency edit GitHub does not stamp on the issue.
             github.put(RawIssue {
                 native_blockers: vec![32],
                 ..issue(33)
             });
-        })
-        .await;
-    assert_eq!(slice(&reconciled, 33).state, SliceState::Blocked);
+        },
+    )
+    .await;
+    assert_eq!(slice(&healed, 33).state, SliceState::Blocked);
 
     let blocked = |board: &ClassifiedBoard| {
         board
@@ -690,7 +698,7 @@ async fn a_structural_refresh_finishing_after_a_reconcile_keeps_the_issue_it_cor
     assert_eq!(
         blocked(&painted(&structural)),
         Some(SliceState::Blocked),
-        "the older issue must not overwrite the reconcile's correction",
+        "the older issue must not overwrite the safety net's correction",
     );
     let cached = reopened(&service).await;
     assert_eq!(
