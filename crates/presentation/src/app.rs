@@ -8,13 +8,13 @@
 
 use application::{
     AuthService, BoardCacheUsage, BoardOpen, BoardRefresh, BoardSnapshot, ClassifiedBoard,
-    OtherIssue, ProjectsRefresh, SecureStorePort,
+    LoadedBoard, OtherIssue, ProjectsRefresh, SecureStorePort,
 };
 use dioxus::prelude::*;
 use domain::{
     group_into_lanes, AppError, AppErrorKind, BoardSummary, BoardViewMode, CredentialFailure,
-    GitHubToken, IssueClassification, LinkedPrRef, PollInterval, Project, ReconcileInterval,
-    RepoRef, Slice, ThemePreference, Viewer,
+    GitHubToken, HotInterval, IssueClassification, LinkedPrRef, PollInterval, Project,
+    ReconcileInterval, RepoRef, Slice, ThemePreference, Viewer,
 };
 use std::{future::Future, sync::Arc};
 
@@ -25,8 +25,8 @@ use crate::components::{
 use crate::logging::surface_error;
 use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
-    confirm_classification, last_opened, open_and_track_project, open_board, open_project,
-    reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
+    confirm_classification, hot_refresh_board, last_opened, open_and_track_project, open_board,
+    open_project, reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
     remember_theme_preference, remember_view_mode, secure_store, sign_out, theme_preference,
     tracked_repos, untrack_repo, view_mode, viewer as fetch_viewer,
 };
@@ -109,27 +109,33 @@ enum FeatureActionError {
     UnderScoped(String),
 }
 
+/// A single-flight gate around one refresh path, so two runs of that path can
+/// never overlap and a slow call cannot stack. Each path holds its own gate, so
+/// a hot sweep and a full-load reconcile stay independent: one being in flight
+/// (or failing) never blocks or skips the other.
 #[derive(Clone)]
-struct ReconcileGate(Arc<tokio::sync::Mutex<()>>);
+struct RefreshGate(Arc<tokio::sync::Mutex<()>>);
 
-impl ReconcileGate {
+impl RefreshGate {
     fn new() -> Self {
         Self(Arc::new(tokio::sync::Mutex::new(())))
     }
 
-    // Best-effort path for automatic reconciles: skip when another reconcile
-    // already holds the gate.
-    async fn try_run<F, Fut>(&self, body: F)
+    // Best-effort path for automatic refreshes: skip when another run of the
+    // same path already holds the gate. Returns the body's result, or `None`
+    // when the run was skipped.
+    async fn try_run<F, Fut, T>(&self, body: F) -> Option<T>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = ()>,
+        Fut: Future<Output = T>,
     {
-        if let Ok(_permit) = self.0.clone().try_lock_owned() {
-            body().await;
+        match self.0.clone().try_lock_owned() {
+            Ok(_permit) => Some(body().await),
+            Err(_) => None,
         }
     }
 
-    // Manual refresh path: always run, waiting for any in-flight reconcile.
+    // Manual refresh path: always run, waiting for any in-flight run.
     async fn run<F, Fut>(&self, body: F)
     where
         F: FnOnce() -> Fut,
@@ -195,7 +201,11 @@ pub fn App() -> Element {
     let syncing = use_signal(|| false);
     // Single-flight gate for full-load reconciles so background and manual
     // reconciles never overlap and stale results cannot overwrite newer state.
-    let reconcile_gate = use_hook(ReconcileGate::new);
+    let reconcile_gate = use_hook(RefreshGate::new);
+    // Single-flight gate for the hot (open-PR sweep) path, separate from the
+    // reconcile one: a sweep that outlives its 15s tick must not stack, but it
+    // must also never wait on — or be skipped because of — a slow reconcile.
+    let hot_gate = use_hook(RefreshGate::new);
     // A board view fetched by a `Changed` refresh, handed to the next `view`
     // resolution so it repaints the fresh board without a second network fetch.
     let mut prefetched_board = use_signal(|| Option::<View>::None);
@@ -244,7 +254,15 @@ pub fn App() -> Element {
                           // directly instead of fetching the same board a second time.
         if prefetched_board.peek().is_some() {
             if let Some(prefetched) = prefetched_board.write().take() {
-                return prefetched;
+                // A refresh in flight when the user navigated away lands here
+                // too: it must not pull them back to the board they left.
+                let wanted = match &prefetched {
+                    View::Board { repo, .. } => nav_wants_board(&nav.peek(), repo),
+                    _ => true,
+                };
+                if wanted {
+                    return prefetched;
+                }
             }
         }
         resolve_view(nav()).await
@@ -350,15 +368,16 @@ pub fn App() -> Element {
     });
 
     // Stale-while-revalidate for project boards: if a board was painted from the
-    // local cache, refresh it once in the background — a fast delta first, then
-    // a silent authoritative reconcile (same two-phase pattern as the manual
-    // Refresh button) — and repaint only if either phase finds a real change.
-    // The reconcile matters here specifically: GitHub does not bump an issue's
-    // own `updatedAt` when a PR is opened with a closing reference to it, so a
-    // just-opened linked PR can be invisible to the delta's `since` filter for
-    // as long as the board stays open, until the reconcile re-derives it from a
-    // full load.
+    // local cache, refresh it once in the background — the hot open-PR sweep
+    // first (cheapest call, and the facts the user is actually watching), then a
+    // fast issue delta, then a silent authoritative reconcile — and repaint only
+    // if a phase finds a real change. The hot sweep matters here specifically:
+    // GitHub does not bump an issue's own `updatedAt` when a PR is opened with a
+    // closing reference to it, so a just-opened (or just-merged) linked PR is
+    // invisible to the delta's `since` filter and is only ever seen by sweeping
+    // the open PRs.
     let reconcile_gate_on_open = reconcile_gate.clone();
+    let hot_gate_on_open = hot_gate.clone();
     use_effect(move || {
         let cached_board = match view.read().as_ref() {
             Some(View::Board {
@@ -375,10 +394,33 @@ pub fn App() -> Element {
             }
             board_revalidated.set(Some(repo.clone()));
             let gate = reconcile_gate_on_open.clone();
+            let hot = hot_gate_on_open.clone();
             spawn(async move {
+                // The hot sweep goes first: it is the cheapest call and carries
+                // the facts nobody tells the user about, so the instantly
+                // painted cached board becomes a true board about a second
+                // later instead of waiting on the issue side. A hot failure (or
+                // a sweep already in flight) is not allowed to stop the
+                // structural phases: they simply carry on from the cached
+                // snapshot.
+                let base = hot
+                    .clone()
+                    .try_run(|| {
+                        hot_refresh(
+                            repo.clone(),
+                            snapshot.clone(),
+                            board_snapshot,
+                            prefetched_board,
+                            reload,
+                            refresh_error,
+                        )
+                    })
+                    .await
+                    .flatten()
+                    .unwrap_or(snapshot);
                 if let Some(base) = delta_refresh(
                     repo.clone(),
-                    snapshot,
+                    base,
                     board_snapshot,
                     prefetched_board,
                     reload,
@@ -403,6 +445,47 @@ pub fn App() -> Element {
                         .await;
                 }
             });
+        }
+    });
+
+    // The hot loop: while a board is open, re-sweep its open Pull Requests every
+    // 15 seconds (the Freshness contract's hot tier, ADR 0008), so a new review
+    // comment, a CI failure, a conflict, an approval, or a PR someone else opens
+    // or closes reaches the board without the user touching anything. It writes
+    // only the Linked PR collection, so it can neither be delayed by a
+    // structural refresh walking a large repo nor have its facts reverted by
+    // one, and its own gate keeps a slow sweep from stacking.
+    let hot_gate_background = hot_gate.clone();
+    use_future(move || {
+        let gate = hot_gate_background.clone();
+        async move {
+            let interval = HotInterval::default().as_duration();
+            loop {
+                tokio::time::sleep(interval).await;
+                // Drop the `view` borrow before awaiting (see the poll loop
+                // below): a held `peek()` guard across an await races a resource
+                // re-resolve and panics with `AlreadyBorrowed`.
+                let open_repo = match &*view.peek() {
+                    Some(View::Board { repo, .. }) => Some(repo.clone()),
+                    _ => None,
+                };
+                if let Some(repo) = open_repo {
+                    if let Some(snapshot) = board_snapshot() {
+                        gate.clone()
+                            .try_run(|| {
+                                hot_refresh(
+                                    repo,
+                                    snapshot,
+                                    board_snapshot,
+                                    prefetched_board,
+                                    reload,
+                                    refresh_error,
+                                )
+                            })
+                            .await;
+                    }
+                }
+            }
         }
     });
 
@@ -435,17 +518,7 @@ pub fn App() -> Element {
                     match refresh_board(&repo, &snapshot).await {
                         Ok(BoardRefresh::Changed(loaded)) => {
                             refresh_error.set(None);
-                            // Stash the already-fetched board and repaint from it, so
-                            // a change costs one fetch, not two (refresh + reload).
-                            board_snapshot.set(Some(loaded.snapshot.clone()));
-                            prefetched_board.set(Some(View::Board {
-                                repo,
-                                board: loaded.board,
-                                loaded_at: now_hms(),
-                                snapshot: loaded.snapshot,
-                                from_cache: false,
-                            }));
-                            reload += 1;
+                            repaint_board(repo, loaded, board_snapshot, prefetched_board, reload);
                         }
                         // Facts unchanged: don't repaint, but adopt the snapshot so
                         // its advanced `fetched_at` moves the next delta window on.
@@ -986,6 +1059,17 @@ pub fn App() -> Element {
 /// when nothing has been opened yet). A stored token that GitHub rejects while
 /// loading (`Unauthorized`/`Forbidden`) is discarded and routes back to the
 /// screen, carrying the reason. Any other failure is shown as a transient error.
+/// Whether a board a refresh stashed is still the one the user wants to see.
+/// `Auto` names no project of its own: it shows the last-opened one, which is
+/// the board that was open when the refresh started.
+fn nav_wants_board(nav: &Nav, repo: &RepoRef) -> bool {
+    match nav {
+        Nav::Auto => true,
+        Nav::Home => false,
+        Nav::Project(wanted) | Nav::GoTo(wanted) => wanted == repo,
+    }
+}
+
 async fn resolve_view(nav: Nav) -> View {
     let auth = AuthService::new(secure_store());
     let token = match auth.require_token().await {
@@ -1190,6 +1274,30 @@ fn snapshot_hms(fetched_at: chrono::DateTime<chrono::Utc>) -> String {
         .to_string()
 }
 
+/// Adopt an already-fetched refresh result as the board on screen: retain its
+/// snapshot and stash its board for the next `view` resolution, so a change
+/// costs one fetch, not two (refresh + reload). Returns the adopted snapshot,
+/// for callers that carry on from it. Every refresh path — hot, delta and
+/// reconcile — repaints through here, so they cannot drift apart.
+fn repaint_board(
+    repo: RepoRef,
+    loaded: LoadedBoard,
+    mut board_snapshot: Signal<Option<BoardSnapshot>>,
+    mut prefetched_board: Signal<Option<View>>,
+    mut reload: Signal<u32>,
+) -> BoardSnapshot {
+    board_snapshot.set(Some(loaded.snapshot.clone()));
+    prefetched_board.set(Some(View::Board {
+        repo,
+        board: loaded.board,
+        loaded_at: now_hms(),
+        snapshot: loaded.snapshot.clone(),
+        from_cache: false,
+    }));
+    reload += 1;
+    loaded.snapshot
+}
+
 /// The fast half of a two-phase board refresh: a delta fetch that repaints
 /// immediately on a real change (`prefetched_board` + `reload`) and otherwise
 /// just advances the retained snapshot's `fetched_at` so the next delta window
@@ -1207,23 +1315,20 @@ async fn delta_refresh(
     repo: RepoRef,
     snapshot: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
-    mut prefetched_board: Signal<Option<View>>,
-    mut reload: Signal<u32>,
+    prefetched_board: Signal<Option<View>>,
+    reload: Signal<u32>,
     mut refresh_error: Signal<Option<String>>,
 ) -> Option<BoardSnapshot> {
     match refresh_board(&repo, &snapshot).await {
         Ok(BoardRefresh::Changed(loaded)) => {
             refresh_error.set(None);
-            board_snapshot.set(Some(loaded.snapshot.clone()));
-            prefetched_board.set(Some(View::Board {
+            Some(repaint_board(
                 repo,
-                board: loaded.board,
-                loaded_at: now_hms(),
-                snapshot: loaded.snapshot.clone(),
-                from_cache: false,
-            }));
-            reload += 1;
-            Some(loaded.snapshot)
+                loaded,
+                board_snapshot,
+                prefetched_board,
+                reload,
+            ))
         }
         // Facts unchanged: don't repaint, but adopt the snapshot so its
         // advanced `fetched_at` moves the next delta window on.
@@ -1234,6 +1339,55 @@ async fn delta_refresh(
         }
         Err(error) => {
             refresh_error.set(Some(surface_error("board_delta_refresh", &error)));
+            None
+        }
+    }
+}
+
+/// The **hot** half of the board's freshness: an open-PR **Sweep** that repaints
+/// the moment the PR facts change (`prefetched_board` + `reload`) and does
+/// nothing at all when they do not — no repaint, no cache write, and no
+/// advancing of the issue-side `since` watermark, since it fetches no issues.
+/// Shared by the revalidate-on-open effect and the 15-second hot loop, so both
+/// apply the same rule.
+///
+/// This is the path that carries everything nobody tells the user about: a new
+/// unresolved review thread, CI turning red, a conflict, an approval, and a PR
+/// appearing on (or leaving) a Slice. Returns the resulting snapshot on success
+/// (changed or not), for a caller that wants to continue from it; `None` on a
+/// failed sweep, so the caller keeps the snapshot it already had. Clears
+/// `refresh_error` on success and sets a client-safe message on failure — one
+/// banner, with the full cause chain in the log — leaving the last good board
+/// and the cache exactly as they were, so a blip on this path neither blanks the
+/// board nor stops the issue-side paths.
+async fn hot_refresh(
+    repo: RepoRef,
+    snapshot: BoardSnapshot,
+    board_snapshot: Signal<Option<BoardSnapshot>>,
+    prefetched_board: Signal<Option<View>>,
+    reload: Signal<u32>,
+    mut refresh_error: Signal<Option<String>>,
+) -> Option<BoardSnapshot> {
+    match hot_refresh_board(&repo, &snapshot).await {
+        Ok(BoardRefresh::Changed(loaded)) => {
+            refresh_error.set(None);
+            Some(repaint_board(
+                repo,
+                loaded,
+                board_snapshot,
+                prefetched_board,
+                reload,
+            ))
+        }
+        // An identical open-PR set is not news: leave the board untouched (no
+        // flicker, no reorder), but a successful sweep still proves the
+        // connection is healthy, so it heals a previous failure.
+        Ok(BoardRefresh::Unchanged(unchanged)) => {
+            refresh_error.set(None);
+            Some(unchanged)
+        }
+        Err(error) => {
+            refresh_error.set(Some(surface_error("board_hot_refresh", &error)));
             None
         }
     }
@@ -1254,7 +1408,7 @@ async fn delta_refresh(
 /// scratch.
 ///
 /// Repaints (`prefetched_board` + `reload`) only on a real difference. Callers
-/// serialize entry through [`ReconcileGate`] so concurrent reconciles cannot
+/// serialize entry through a [`RefreshGate`] so concurrent reconciles cannot
 /// race to overwrite state. A failed reconcile leaves the retained snapshot
 /// and cache untouched (`fetched_at` never advances on failure) and sets a
 /// client-safe `refresh_error`; any successful reconcile — changed or not —
@@ -1263,8 +1417,8 @@ async fn authoritative_reconcile(
     repo: RepoRef,
     base: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
-    mut prefetched_board: Signal<Option<View>>,
-    mut reload: Signal<u32>,
+    prefetched_board: Signal<Option<View>>,
+    reload: Signal<u32>,
     mut syncing: Signal<bool>,
     mut refresh_error: Signal<Option<String>>,
 ) {
@@ -1272,19 +1426,16 @@ async fn authoritative_reconcile(
     match reconcile_board(&repo, &base).await {
         Ok(BoardRefresh::Changed(loaded)) => {
             refresh_error.set(None);
-            board_snapshot.set(Some(loaded.snapshot.clone()));
-            prefetched_board.set(Some(View::Board {
-                repo,
-                board: loaded.board,
-                loaded_at: now_hms(),
-                snapshot: loaded.snapshot,
-                from_cache: false,
-            }));
-            reload += 1;
+            repaint_board(repo, loaded, board_snapshot, prefetched_board, reload);
         }
         // A reconcile that found nothing to heal still confirms the connection
-        // is healthy, so it clears a previous failure too.
-        Ok(BoardRefresh::Unchanged(_)) => refresh_error.set(None),
+        // is healthy, so it clears a previous failure too. Nothing to repaint,
+        // but adopt the snapshot so its advanced `fetched_at` moves the next
+        // delta window on from this full load.
+        Ok(BoardRefresh::Unchanged(unchanged)) => {
+            refresh_error.set(None);
+            board_snapshot.set(Some(unchanged));
+        }
         Err(error) => refresh_error.set(Some(surface_error("board_reconcile", &error))),
     }
     syncing.set(false);
@@ -1683,7 +1834,22 @@ fn OtherIssues(
 
 #[cfg(test)]
 mod tests {
-    use super::clipboard_script;
+    use super::{clipboard_script, nav_wants_board, Nav};
+    use domain::RepoRef;
+
+    #[test]
+    fn a_refresh_landing_after_navigation_does_not_reclaim_the_view() {
+        let open = RepoRef::new("funkode-io", "zfirot");
+        let other = RepoRef::new("funkode-io", "other");
+
+        assert!(nav_wants_board(&Nav::Project(open.clone()), &open));
+        assert!(nav_wants_board(&Nav::GoTo(open.clone()), &open));
+        assert!(nav_wants_board(&Nav::Auto, &open));
+
+        assert!(!nav_wants_board(&Nav::Home, &open));
+        assert!(!nav_wants_board(&Nav::Project(other.clone()), &open));
+        assert!(!nav_wants_board(&Nav::GoTo(other), &open));
+    }
 
     #[test]
     fn clipboard_script_carries_the_repo_name() {
