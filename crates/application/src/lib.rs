@@ -183,7 +183,8 @@ pub struct ClassifiedBoard {
 /// another version fails to deserialize, so the cache adapter discards it and
 /// the board cold-loads instead of being mis-read (ADR 0008). Version 2 is the
 /// split into two independently-owned collections — issues and Linked PRs.
-const SNAPSHOT_FORMAT_VERSION: u32 = 2;
+/// Version 3 adds the issues still awaiting their close.
+const SNAPSHOT_FORMAT_VERSION: u32 = 3;
 
 /// Reject a stored snapshot written by another version of the format, so an
 /// older shape is discarded rather than silently half-read.
@@ -216,6 +217,12 @@ pub struct BoardSnapshot {
     raw_issues: Vec<RawIssue>,
     /// Every open Linked PR of the repo, as the last sweep reported it.
     linked_prs: Vec<RawLinkedPr>,
+    /// The issues a **Cascade** read as still open after the PR closing them left
+    /// the sweep, and that the next hot refresh reads once more. A merged PR leaves
+    /// the sweep at once but GitHub closes its issues a moment later (1-3s,
+    /// measured), so a sweep landing in that gap reads too early, and the sweep
+    /// after it looks unchanged. Bookkeeping, not a board fact: it never repaints.
+    awaiting_close: Vec<u64>,
     /// The UTC timestamp captured at fetch start.
     pub fetched_at: DateTime<Utc>,
 }
@@ -230,6 +237,7 @@ impl BoardSnapshot {
             version: SNAPSHOT_FORMAT_VERSION,
             raw_issues,
             linked_prs,
+            awaiting_close: Vec::new(),
             fetched_at,
         }
     }
@@ -242,7 +250,10 @@ impl BoardSnapshot {
     /// structural and safety-net paths, which own the issues and nothing else.
     /// `fetched_at` moves with it, since it is the issue-side watermark.
     fn with_issues(&self, raw_issues: Vec<RawIssue>, fetched_at: DateTime<Utc>) -> Self {
-        Self::new(raw_issues, self.linked_prs.clone(), fetched_at)
+        Self {
+            awaiting_close: self.awaiting_close.clone(),
+            ..Self::new(raw_issues, self.linked_prs.clone(), fetched_at)
+        }
     }
 
     /// This snapshot with its **Linked PR** collection replaced — the hot path's
@@ -250,18 +261,24 @@ impl BoardSnapshot {
     /// issues, so advancing the issue-side watermark would skip issue changes the
     /// structural path has not seen yet (ADR 0008).
     fn with_linked_prs(&self, linked_prs: Vec<RawLinkedPr>) -> Self {
-        Self::new(self.raw_issues.clone(), linked_prs, self.fetched_at)
+        Self {
+            awaiting_close: self.awaiting_close.clone(),
+            ..Self::new(self.raw_issues.clone(), linked_prs, self.fetched_at)
+        }
     }
 
     /// This snapshot with a **Cascade**'s answer written over the issues it asked
     /// for. `fetched_at` stays put for the same reason as in
     /// [`Self::with_linked_prs`]: those few issues say nothing about the rest.
     fn with_hydrated_issues(&self, requested: &[u64], hydrated: &[RawIssue]) -> Self {
-        Self::new(
-            merge_hydrated_issues(&self.raw_issues, requested, hydrated),
-            self.linked_prs.clone(),
-            self.fetched_at,
-        )
+        Self {
+            awaiting_close: self.awaiting_close.clone(),
+            ..Self::new(
+                merge_hydrated_issues(&self.raw_issues, requested, hydrated),
+                self.linked_prs.clone(),
+                self.fetched_at,
+            )
+        }
     }
 
     /// The board this snapshot paints: the pure join of its two collections.
@@ -371,6 +388,35 @@ fn cascade_issues(previous: &[RawLinkedPr], swept: &[RawLinkedPr]) -> Vec<u64> {
         .map(|(_, issue)| *issue)
         .collect();
     moved.into_iter().collect()
+}
+
+/// The issues to read once more on the next hot refresh: those still open on the
+/// `merged` board that were closed by a PR gone from the sweep, or whose earlier
+/// look was `undone` because the read was discarded. Only a PR that left the sweep
+/// can be a merge; one merely retargeted is still open, so no close is on the way.
+/// Judged on the merged issues, so a read an issue-side write discarded still counts
+/// when that write left the issue open. Sorted, as [`GitHubPort::hydrate_issues`]
+/// expects.
+fn issues_awaiting_close(
+    previous: &[RawLinkedPr],
+    swept: &[RawLinkedPr],
+    undone: impl IntoIterator<Item = u64>,
+    merged: &[RawIssue],
+) -> Vec<u64> {
+    let still_swept: HashSet<u64> = swept.iter().map(|linked| linked.pr.number).collect();
+    let open: HashSet<u64> = merged
+        .iter()
+        .filter(|issue| !issue.closed)
+        .map(|issue| issue.number)
+        .collect();
+    let awaiting: BTreeSet<u64> = previous
+        .iter()
+        .filter(|linked| !still_swept.contains(&linked.pr.number))
+        .flat_map(|linked| linked.closes.iter().copied())
+        .chain(undone)
+        .filter(|issue| open.contains(issue))
+        .collect();
+    awaiting.into_iter().collect()
 }
 
 /// `retained` with a hydrate's answer applied: every issue it returned is merged
@@ -1030,7 +1076,8 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// The **hot** refresh: sweep the repo's open Pull Requests, replace the
     /// board's Linked PR collection with the result, and rewrite the cache
     /// **only** when the open-PR set actually changed — an identical sweep
-    /// repaints nothing, hydrates nothing and writes nothing.
+    /// repaints nothing, hydrates nothing and writes nothing, unless an issue is
+    /// still awaiting its close (below).
     ///
     /// This is the 15-second path of the Freshness contract, and the only writer
     /// of PR facts. It sweeps no issues, so it can neither be delayed by a
@@ -1045,6 +1092,13 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// The sweep and its hydrate land together or not at all: writing the PRs
     /// alone would make the next sweep look unchanged and lose the cascade, so a
     /// failed hydrate fails the refresh and the next tick finds the same change.
+    ///
+    /// GitHub closes a merged PR's issues a moment after the PR leaves the sweep,
+    /// so an issue a vanished PR leaves reading open is read **once more** on the
+    /// next tick, whatever that sweep says (see `BoardSnapshot::awaiting_close`).
+    /// That second read still honours "an identical sweep repaints nothing": when
+    /// the issue simply stayed open, as after a PR closed without merging, only the
+    /// bookkeeping is written.
     pub async fn hot_refresh_cached(
         &self,
         repo: &RepoRef,
@@ -1058,11 +1112,23 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         // merely carries forward were already painted and cached by the path
         // that fetched them. Checked first because this runs every 15 seconds
         // and the snapshot it would otherwise build copies every issue.
-        if same_open_prs(&linked_prs, &freshest.linked_prs) {
+        let same_prs = same_open_prs(&linked_prs, &freshest.linked_prs);
+        if same_prs && freshest.awaiting_close.is_empty() {
             return Ok(BoardRefresh::Unchanged(freshest));
         }
-        let cascade = cascade_issues(&freshest.linked_prs, &linked_prs);
-        let loaded = if cascade.is_empty() {
+        // An identical set keeps its order, which alone is not news.
+        let linked_prs = if same_prs {
+            freshest.linked_prs.clone()
+        } else {
+            linked_prs
+        };
+        let cascade: Vec<u64> = cascade_issues(&freshest.linked_prs, &linked_prs)
+            .into_iter()
+            .chain(freshest.awaiting_close.iter().copied())
+            .collect::<BTreeSet<u64>>()
+            .into_iter()
+            .collect();
+        let refreshed = if cascade.is_empty() {
             freshest.with_linked_prs(linked_prs)
         } else {
             let hydrated = self.board.hydrate_issues(repo, &cascade).await?;
@@ -1085,6 +1151,16 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             let mut merged = current
                 .with_linked_prs(linked_prs)
                 .with_hydrated_issues(&cascade, &hydrated);
+            merged.awaiting_close = issues_awaiting_close(
+                &freshest.linked_prs,
+                &merged.linked_prs,
+                freshest
+                    .awaiting_close
+                    .iter()
+                    .copied()
+                    .filter(|number| written.contains(number)),
+                &merged.raw_issues,
+            );
             // Even an issue the cache never held can have closed in that window,
             // leaving no write to compare. So a read that lands while the
             // watermark moved takes it back: the next delta reads those issues
@@ -1093,13 +1169,12 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
                 merged.fetched_at = freshest.fetched_at;
             }
             merged
-        }
-        .loaded();
+        };
         self.cache
-            .cache_board(repo, &loaded.snapshot)
+            .cache_board(repo, &refreshed)
             .await
             .map_err(|err| err.with_operation("CachedBoardService::hot_refresh_cached"))?;
-        Ok(BoardRefresh::Changed(loaded))
+        Ok(refresh_outcome(refreshed, &freshest))
     }
 
     /// The freshest board facts known for `repo`: the last write any refresh
@@ -1175,7 +1250,10 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             start.fetched_at.min(freshest.fetched_at)
         };
         Ok(refresh_outcome(
-            BoardSnapshot::new(raw_issues, freshest.linked_prs, fetched_at),
+            BoardSnapshot {
+                awaiting_close: freshest.awaiting_close,
+                ..BoardSnapshot::new(raw_issues, freshest.linked_prs, fetched_at)
+            },
             start,
         ))
     }
