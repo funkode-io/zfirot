@@ -222,6 +222,7 @@ impl application::GitHubPort for ClosedParentFixturePort {
                 assignee: None,
                 assignee_avatar_url: None,
                 is_native_child_of_prd: false,
+                updated_at: String::new(),
             },
             RawIssue {
                 number: 51,
@@ -235,6 +236,7 @@ impl application::GitHubPort for ClosedParentFixturePort {
                 assignee: None,
                 assignee_avatar_url: None,
                 is_native_child_of_prd: false,
+                updated_at: String::new(),
             },
         ])
     }
@@ -291,6 +293,7 @@ fn raw_slice_issue(number: u64, body: &str, labels: &[&str], closed: bool) -> Ra
         assignee: None,
         assignee_avatar_url: None,
         is_native_child_of_prd: false,
+        updated_at: String::new(),
     }
 }
 

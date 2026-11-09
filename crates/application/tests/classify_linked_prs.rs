@@ -21,6 +21,7 @@ fn slice_issue(number: u64) -> RawIssue {
         assignee: None,
         assignee_avatar_url: None,
         is_native_child_of_prd: false,
+        updated_at: String::new(),
     }
 }
 
