@@ -211,3 +211,30 @@ fn a_closing_reference_outranks_a_related_mention() {
         "a mention must not claim a second Slice from a PR that names its own"
     );
 }
+
+#[test]
+fn a_prs_title_and_body_relate_to_issues_independently() {
+    let cases = [
+        (
+            "a relation ending the title",
+            "fix: update refs",
+            "#12 reproduces it",
+            vec![],
+        ),
+        (
+            "a not ending the title",
+            "Support SQL NOT",
+            "Related to #12",
+            vec![12],
+        ),
+        ("a relation in the title", "Related to #12", "", vec![12]),
+    ];
+
+    for (name, title, body, expected) in cases {
+        let page = page_with_pr(90, body, &[]).replace("PR 90", title);
+
+        let (prs, _) = parse_open_prs_response(&page).expect("a clean response should parse");
+
+        assert_eq!(prs[0].closes, expected, "{name}");
+    }
+}

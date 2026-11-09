@@ -74,7 +74,9 @@ const RELATION_PHRASES: [&str; 8] = [
 /// callers read a PR's closing references first and use this as the fallback
 /// when there are none.
 ///
-/// Only an explicit relation counts: a bare `#12` mention, `unrelated to #12`
+/// A relation and its references must share a line, so a PR title ending in
+/// `refs` or `not` says nothing about a body joined after it. Only an explicit
+/// relation counts: a bare `#12` mention, `unrelated to #12`
 /// and `not related to #12` do not. Only same-repo `#N` forms count, since
 /// `owner/repo#12` or a URL may name another repository's issue. Numbers are
 /// de-duplicated, in order.
@@ -83,21 +85,23 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
     let lowered = text.to_ascii_lowercase();
     let mut numbers = Vec::new();
 
-    for (start, _) in lowered.char_indices() {
-        let rest = &lowered[start..];
-        let Some(phrase) = RELATION_PHRASES.iter().find(|p| rest.starts_with(**p)) else {
-            continue;
-        };
-        let before = &lowered[..start];
-        // `other/refs#12` and `example.com/refs#12` are paths, not relations.
-        let starts_a_word =
-            !before.ends_with(|c: char| c.is_alphanumeric() || "/-_.#@".contains(c));
-        if !starts_a_word || is_negated(before) {
-            continue;
-        }
-        for number in references_after_relation(&rest[phrase.len()..]) {
-            if !numbers.contains(&number) {
-                numbers.push(number);
+    for line in lowered.lines() {
+        for (start, _) in line.char_indices() {
+            let rest = &line[start..];
+            let Some(phrase) = RELATION_PHRASES.iter().find(|p| rest.starts_with(**p)) else {
+                continue;
+            };
+            let before = &line[..start];
+            // `other/refs#12` and `example.com/refs#12` are paths, not relations.
+            let starts_a_word =
+                !before.ends_with(|c: char| c.is_alphanumeric() || "/-_.#@".contains(c));
+            if !starts_a_word || is_negated(before) {
+                continue;
+            }
+            for number in references_after_relation(&rest[phrase.len()..]) {
+                if !numbers.contains(&number) {
+                    numbers.push(number);
+                }
             }
         }
     }
@@ -156,7 +160,13 @@ fn references_after_relation(text: &str) -> Vec<u64> {
         else {
             break;
         };
-        rest = next.trim_start();
+        // A list's last item may be joined by both: `#1, #2, and #3`.
+        let next = next.trim_start();
+        rest = next
+            .strip_prefix("and ")
+            .or_else(|| next.strip_prefix('&'))
+            .unwrap_or(next)
+            .trim_start();
         hash_required = true;
     }
     numbers
@@ -313,7 +323,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_relates_to_without_closing_them() {
-        let cases: [(&str, &str, Vec<u64>); 23] = [
+        let cases: [(&str, &str, Vec<u64>); 26] = [
             ("the reported wording", "Related to #12", vec![12]),
             ("any case", "RELATES TO #12.", vec![12]),
             ("the word issue", "related to issue #12", vec![12]),
@@ -341,6 +351,21 @@ mod tests {
             ("another repository", "Related to other/repo#12", vec![]),
             ("an unfilled template", "Related to #", vec![]),
             ("not an issue number", "refs #1a2b", vec![]),
+            (
+                "a list with a final comma",
+                "Related to #1, #2, and #3",
+                vec![1, 2, 3],
+            ),
+            (
+                "a reference on the next line",
+                "update refs\n#12 reproduces it",
+                vec![],
+            ),
+            (
+                "a not on the previous line",
+                "Support SQL NOT\nRelated to #12",
+                vec![12],
+            ),
             ("a repository path", "Related to other/refs#12", vec![]),
             ("a URL", "https://example.com/refs#12", vec![]),
             ("a hyphenated word", "cross-refs #12", vec![]),
