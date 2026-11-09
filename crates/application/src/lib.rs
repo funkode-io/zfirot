@@ -999,7 +999,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
-        let start = self.freshest_snapshot(repo, snapshot).await?;
+        let start = self.issue_side_start(repo, snapshot).await?;
         let refresh = self.board.refresh(repo, &start).await?;
         let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
         let snapshot_to_cache = match &refresh {
@@ -1068,9 +1068,17 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
                 .into_iter()
                 .filter(|issue| !written.contains(&issue.number))
                 .collect();
-            current
+            let mut merged = current
                 .with_linked_prs(linked_prs)
-                .with_hydrated_issues(&cascade, &hydrated)
+                .with_hydrated_issues(&cascade, &hydrated);
+            // Even an issue the cache never held can have closed in that window,
+            // leaving no write to compare. So a read that lands while the
+            // watermark moved takes it back: the next delta reads those issues
+            // again, and heals one this hydrate read too early.
+            if !hydrated.is_empty() && current.fetched_at != freshest.fetched_at {
+                merged.fetched_at = freshest.fetched_at;
+            }
+            merged
         }
         .loaded();
         self.cache
@@ -1104,6 +1112,22 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             .await
             .map_err(|err| err.with_operation("CachedBoardService::freshest_snapshot"))?;
         Ok(cached.unwrap_or_else(|| base.clone()))
+    }
+
+    /// What an issue-side fetch starts from: the freshest facts known, with the
+    /// caller's watermark if it holds those same facts at a later one. An unchanged
+    /// reconcile hands its watermark back without rewriting the cache, and dropping
+    /// it would re-fetch a window that full load already proved.
+    async fn issue_side_start(
+        &self,
+        repo: &RepoRef,
+        snapshot: &BoardSnapshot,
+    ) -> AppResult<BoardSnapshot> {
+        let mut start = self.freshest_snapshot(repo, snapshot).await?;
+        if start.same_facts_as(snapshot) {
+            start.fetched_at = start.fetched_at.max(snapshot.fetched_at);
+        }
+        Ok(start)
     }
 
     /// Re-decide an issue-side refresh's outcome against everything the hot path
@@ -1154,7 +1178,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
-        let start = self.freshest_snapshot(repo, snapshot).await?;
+        let start = self.issue_side_start(repo, snapshot).await?;
         let refresh = self.board.reload_issues(repo, &start).await?;
         let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
         let loaded = match refresh {

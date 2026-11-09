@@ -97,6 +97,7 @@ struct ScriptedGitHub {
     sweep_fails: bool,
     hydrate_fails: AtomicBool,
     write_during_fetch: Mutex<Option<(Arc<CountingBoardCache>, BoardSnapshot)>>,
+    delta_windows: Mutex<Vec<DateTime<Utc>>>,
 }
 
 impl ScriptedGitHub {
@@ -110,6 +111,7 @@ impl ScriptedGitHub {
             sweep_fails: false,
             hydrate_fails: AtomicBool::new(false),
             write_during_fetch: Mutex::new(None),
+            delta_windows: Mutex::new(vec![]),
         }
     }
 
@@ -215,8 +217,12 @@ impl GitHubPort for ScriptedGitHub {
     async fn load_issues_since(
         &self,
         _repo: &RepoRef,
-        _since: DateTime<Utc>,
+        since: DateTime<Utc>,
     ) -> AppResult<Vec<RawIssue>> {
+        self.delta_windows
+            .lock()
+            .expect("lock poisoned")
+            .push(since);
         self.land_write_during_fetch().await;
         if self.issues_fail {
             return Err(AppError::unavailable("GitHub is temporarily unavailable"));
@@ -1481,4 +1487,93 @@ async fn a_hydrate_in_flight_during_an_issue_side_write_keeps_that_write() {
     );
     assert_eq!(slice(&loaded.board, 43).state, SliceState::Ready);
     assert_eq!(loaded.snapshot.fetched_at, structural.fetched_at);
+}
+
+/// A closure of an issue the cache never held leaves no write to compare, so the
+/// hydrate's older read lands. Taking the watermark back is what lets the next
+/// delta see the closure, rather than leaving the Slice on the board until the
+/// safety net.
+#[tokio::test]
+async fn a_hydrate_landing_while_the_watermark_moved_takes_it_back_so_the_next_delta_heals() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(45)], vec![vec![]])
+            .with_deltas(vec![vec![closed(slice_issue(46))]]),
+        cache.clone(),
+    );
+    let opened = seeded(&seeding).await;
+    let structural = match seeding
+        .refresh_cached(&repo(), &opened)
+        .await
+        .expect("structural refresh should succeed")
+    {
+        BoardRefresh::Unchanged(structural) => structural,
+        BoardRefresh::Changed(_) => panic!("closing an issue the board never held changes nothing"),
+    };
+    cache
+        .cache_board(&repo(), &opened)
+        .await
+        .expect("the fake cache's write should succeed");
+
+    let github = Arc::new(
+        ScriptedGitHub::new(vec![], vec![vec![open_pr(460, 46)]])
+            .with_issue(slice_issue(46))
+            .with_deltas(vec![vec![closed(slice_issue(46))]])
+            .with_write_during_fetch(cache.clone(), structural),
+    );
+    let service = CachedBoardService::new(github.clone(), cache.clone());
+
+    let hot = changed(
+        service
+            .hot_refresh_cached(&repo(), &opened)
+            .await
+            .expect("hot refresh should succeed"),
+        "the new PR changes the board",
+    );
+    assert_eq!(hot.snapshot.fetched_at, opened.fetched_at);
+
+    let healed = changed(
+        service
+            .refresh_cached(&repo(), &hot.snapshot)
+            .await
+            .expect("structural refresh should succeed"),
+        "the next delta must see the closure the hydrate read too early",
+    );
+    assert!(!healed.board.slices.iter().any(|slice| slice.number == 46));
+    assert_eq!(
+        *github.delta_windows.lock().expect("lock poisoned"),
+        vec![opened.fetched_at],
+    );
+}
+
+/// An unchanged reconcile hands back its watermark without rewriting the cache,
+/// so the next delta must start from it, not from the older one on disk.
+#[tokio::test]
+async fn a_delta_after_an_unchanged_reconcile_starts_from_the_reconciles_watermark() {
+    let github = Arc::new(ScriptedGitHub::new(vec![slice_issue(47)], vec![vec![]]));
+    let service = CachedBoardService::new(github.clone(), Arc::new(CountingBoardCache::default()));
+
+    let opened = match service.open(&repo()).await.expect("cold open should seed") {
+        BoardOpen::Cold(loaded) => loaded.snapshot,
+        BoardOpen::Cached(_) => panic!("the first open of a project is cold"),
+    };
+    let reconciled = match service
+        .reconcile_cached(&repo(), &opened)
+        .await
+        .expect("reconcile should succeed")
+    {
+        BoardRefresh::Unchanged(reconciled) => reconciled,
+        BoardRefresh::Changed(_) => panic!("the reload found nothing new"),
+    };
+    assert!(reconciled.fetched_at >= opened.fetched_at);
+
+    service
+        .refresh_cached(&repo(), &reconciled)
+        .await
+        .expect("structural refresh should succeed");
+
+    assert_eq!(
+        *github.delta_windows.lock().expect("lock poisoned"),
+        vec![reconciled.fetched_at],
+    );
 }
