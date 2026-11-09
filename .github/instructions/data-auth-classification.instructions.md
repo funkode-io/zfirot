@@ -31,6 +31,10 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
   which is how a merged PR held a Slice in WIP forever (#161, #179). Sweeping
   open PRs makes "a Linked PR is an *open* PR" true by construction, and keeps
   the issue queries shallow enough never to approach GitHub's node limit (#168).
+- `closingIssuesReferences` is filled in **only for a PR targeting the default
+  branch**. A Stacked PR reports `[]` until the PR beneath it merges and GitHub
+  retargets it, whatever its body says, so a PR with no closing reference falls
+  back to the closing keywords in its body (#196).
 - An issue's `updatedAt` does **not** advance when a PR gains or changes a
   closing reference to it, so an issues-since delta can never see a new Linked
   PR. That is why the open-PR sweep runs on its own hot loop (and on cold load and
@@ -56,10 +60,10 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
   "looks like a PRD/Slice — confirm?" badge and a confirm-and-add-label action.
 - Tier 3: no match -> Unclassified, shown inline in "other open issues".
 - Second pass (ADR 0007): an issue left at Suggested Slice or tier 3 becomes a Slice when its
-  Parent (native, else prose) is an open PRD or Suggested PRD, or is closed or
+  Parent (native, else prose) is an open PRD, Suggested PRD or Slice, or is closed or
   outside the fetched board ("No PRD" Lane). A Parent that is any other open issue
   promotes nothing.
 - A Suggested PRD heads a Lane marked unconfirmed. Its evidence is its headings,
   so editing them away drops the Lane: a prose `## Parent` names a Lane only while
-  it resolves to a PRD or Suggested PRD. A labelled Slice with a native link keeps
-  its Lane whatever the parent is.
+  it resolves to a PRD, Suggested PRD or Slice. A labelled Slice with a native link
+  keeps its Lane whatever the parent is.
