@@ -1156,7 +1156,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         let fetched_at = if raw_issues == refreshed.raw_issues {
             refreshed.fetched_at
         } else {
-            start.fetched_at
+            // The earlier one: a hydrate that landed meanwhile may have taken the
+            // cache's watermark back for the same reason.
+            start.fetched_at.min(freshest.fetched_at)
         };
         Ok(refresh_outcome(
             BoardSnapshot::new(raw_issues, freshest.linked_prs, fetched_at),

@@ -1577,3 +1577,57 @@ async fn a_delta_after_an_unchanged_reconcile_starts_from_the_reconciles_waterma
         vec![reconciled.fetched_at],
     );
 }
+
+/// A hydrate that took the watermark back landed during this reconcile. Keeping
+/// its issue while restoring the later watermark would undo that rollback, and
+/// the next delta would skip what the hydrate may have read too early.
+#[tokio::test]
+async fn a_reconcile_keeping_a_hydrate_keeps_the_watermark_it_took_back() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(49)], vec![vec![], vec![open_pr(480, 48)]])
+            .with_issue(slice_issue(48)),
+        cache.clone(),
+    );
+    let opened = seeded(&seeding).await;
+    let hydrated = changed(
+        seeding
+            .hot_refresh_cached(&repo(), &opened)
+            .await
+            .expect("hot refresh should succeed"),
+        "the new PR changes the board",
+    )
+    .snapshot;
+    cache
+        .cache_board(&repo(), &opened)
+        .await
+        .expect("the fake cache's write should succeed");
+    let advanced = match seeding
+        .refresh_cached(&repo(), &opened)
+        .await
+        .expect("structural refresh should succeed")
+    {
+        BoardRefresh::Unchanged(advanced) => advanced,
+        BoardRefresh::Changed(_) => panic!("an empty delta changes nothing"),
+    };
+
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(49)], vec![vec![]])
+            .with_write_during_fetch(cache.clone(), hydrated),
+        cache.clone(),
+    );
+    let reconciled = changed(
+        service
+            .reconcile_cached(&repo(), &advanced)
+            .await
+            .expect("reconcile should succeed"),
+        "the hydrated issue changes the board",
+    );
+
+    assert!(reconciled
+        .board
+        .slices
+        .iter()
+        .any(|slice| slice.number == 48));
+    assert_eq!(reconciled.snapshot.fetched_at, opened.fetched_at);
+}
