@@ -1943,22 +1943,37 @@ async fn a_stamp_only_write_during_a_structural_refresh_repaints_nothing() {
     )
     .await;
 
-    let service = CachedBoardService::new(
+    let github = Arc::new(
         ScriptedGitHub::new(vec![], vec![vec![]])
             .with_issue(slice_issue(52))
             .with_issue(slice_issue(53))
             .with_write_during_fetch(cache.clone(), stamped),
-        cache.clone(),
     );
+    let service = CachedBoardService::new(github.clone(), cache.clone());
     let refresh = service
         .structural_refresh_cached(&repo(), &opened)
         .await
         .expect("structural refresh should succeed");
 
-    assert!(
-        matches!(refresh, BoardRefresh::Unchanged(_)),
-        "a stamp in flight must not repaint or reorder the board",
-    );
+    let BoardRefresh::Unchanged(adopted) = refresh else {
+        panic!("a stamp in flight must not repaint or reorder the board");
+    };
+
+    // The newer stamp survived, in memory and on disk: GitHub now lists it, and a
+    // sweep that tried to hydrate anything would fail here.
+    github.update_issue(stamp_moved(slice_issue(52)));
+    github.set_hydrate_failing(true);
+    let cached = cache
+        .cached_board(&repo())
+        .await
+        .expect("cache read should succeed")
+        .expect("the cache holds a snapshot");
+    for snapshot in [&adopted, &cached] {
+        service
+            .structural_refresh_cached(&repo(), snapshot)
+            .await
+            .expect("the next sweep must find nothing to hydrate");
+    }
 }
 
 /// A real write landing mid-fetch repaints, but overlaying it must leave every card

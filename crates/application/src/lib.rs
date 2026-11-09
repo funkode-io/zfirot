@@ -520,6 +520,32 @@ fn with_issues_written_meanwhile(
     merge_issues(&survivors, &written)
 }
 
+/// `issues` with the stamps written to the cache while their fetch was in flight. An
+/// issue still carrying the stamp it had in `start` was reused rather than read, so
+/// the cache's stamp is newer, and writing the old one back would have the next sweep
+/// hydrate it again. An issue this fetch did read keeps the stamp it read.
+fn with_stamps_moved_meanwhile(
+    mut issues: Vec<RawIssue>,
+    start: &[RawIssue],
+    cached: &[RawIssue],
+) -> Vec<RawIssue> {
+    let stamps = |issues: &[RawIssue]| -> HashMap<u64, String> {
+        issues
+            .iter()
+            .map(|issue| (issue.number, issue.updated_at.clone()))
+            .collect()
+    };
+    let (start, cached) = (stamps(start), stamps(cached));
+    for issue in &mut issues {
+        if start.get(&issue.number) == Some(&issue.updated_at) {
+            if let Some(stamp) = cached.get(&issue.number) {
+                issue.updated_at.clone_from(stamp);
+            }
+        }
+    }
+    issues
+}
+
 /// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
 /// the board's identity map. Numbers absent from the board (e.g. closed or beyond
 /// the fetched page) yield `None`, so they are simply not shown as a badge.
@@ -1284,6 +1310,8 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         let written = issues_changed_between(&start.raw_issues, &freshest.raw_issues);
         let raw_issues =
             with_issues_written_meanwhile(&refreshed.raw_issues, &written, &freshest.raw_issues);
+        let raw_issues =
+            with_stamps_moved_meanwhile(raw_issues, &start.raw_issues, &freshest.raw_issues);
         Ok(refresh_outcome(
             BoardSnapshot {
                 awaiting_close: freshest.awaiting_close,
