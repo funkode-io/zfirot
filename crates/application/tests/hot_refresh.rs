@@ -7,7 +7,7 @@
 //! `BoardCachePort` fakes.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use application::{
@@ -25,9 +25,16 @@ use domain::{
 struct CountingBoardCache {
     snapshots: Mutex<HashMap<String, BoardSnapshot>>,
     writes: AtomicUsize,
+    reads_fail: AtomicBool,
 }
 
 impl CountingBoardCache {
+    /// From now on every read fails (a permissions or disk error), while writes
+    /// still land, so a write made without consulting the cache is observable.
+    fn break_reads(&self) {
+        self.reads_fail.store(true, Ordering::SeqCst);
+    }
+
     fn writes(&self) -> usize {
         self.writes.load(Ordering::SeqCst)
     }
@@ -36,6 +43,9 @@ impl CountingBoardCache {
 #[async_trait]
 impl BoardCachePort for CountingBoardCache {
     async fn cached_board(&self, repo: &RepoRef) -> AppResult<Option<BoardSnapshot>> {
+        if self.reads_fail.load(Ordering::SeqCst) {
+            return Err(AppError::internal("Could not read the cached board."));
+        }
         Ok(self
             .snapshots
             .lock()
@@ -469,6 +479,80 @@ async fn an_identical_open_pr_set_repaints_nothing_and_rewrites_no_cache() {
     );
 }
 
+/// A real change adopts GitHub's order too, so the Unlinked PR list keeps the
+/// most recently updated PR first.
+#[tokio::test]
+async fn a_changed_sweep_lists_unlinked_prs_in_sweep_order() {
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(10)],
+            vec![vec![], vec![unlinked_pr(99), unlinked_pr(101)]],
+        ),
+        Arc::new(CountingBoardCache::default()),
+    );
+
+    let snapshot = seeded(&service).await;
+    let loaded = changed(
+        service
+            .hot_refresh_cached(&repo(), &snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "new Unlinked PRs must repaint the board",
+    );
+
+    let unlinked: Vec<u64> = loaded
+        .board
+        .unlinked_prs
+        .iter()
+        .map(|pr| pr.number)
+        .collect();
+    assert_eq!(unlinked, vec![99, 101]);
+}
+
+/// The sweep is ordered by `updatedAt`, so any bump on GitHub reshuffles it
+/// without changing a single fact. The contract is about the open-PR **set**:
+/// a reshuffle is not news.
+#[tokio::test]
+async fn a_reordered_open_pr_set_repaints_nothing_and_rewrites_no_cache() {
+    let closing_both = |number| RawLinkedPr {
+        closes: vec![10, 11],
+        ..open_pr(number, 10)
+    };
+    let closing_both_reversed = |number| RawLinkedPr {
+        closes: vec![11, 10],
+        ..open_pr(number, 10)
+    };
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(10), slice_issue(11)],
+            vec![
+                vec![closing_both(100), open_pr(101, 11)],
+                vec![open_pr(101, 11), closing_both_reversed(100)],
+            ],
+        ),
+        cache.clone(),
+    );
+
+    let snapshot = seeded(&service).await;
+    let writes_after_seed = cache.writes();
+
+    let hot = service
+        .hot_refresh_cached(&repo(), &snapshot)
+        .await
+        .expect("hot refresh should succeed");
+
+    assert!(
+        matches!(hot, BoardRefresh::Unchanged(_)),
+        "the same open PRs in another order must not repaint",
+    );
+    assert_eq!(
+        cache.writes(),
+        writes_after_seed,
+        "the same open PRs in another order must not rewrite the cache",
+    );
+}
+
 #[tokio::test]
 async fn an_identical_open_pr_set_writes_nothing_even_when_the_issue_side_moved_on() {
     let cache = Arc::new(CountingBoardCache::default());
@@ -668,6 +752,41 @@ async fn a_failed_hot_sweep_leaves_the_last_good_board_and_cache_untouched() {
             .expect("the cache still holds the last good snapshot"),
         snapshot,
         "a failed hot refresh leaves the last good board in place",
+    );
+}
+
+/// Every path writes on top of the freshest facts in the cache. When the cache
+/// cannot be read those facts are unknown, so a write would risk reverting the
+/// other path's newer collection: each path must fail visibly and write nothing.
+#[tokio::test]
+async fn an_unreadable_cache_fails_every_merging_path_without_writing() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(10)], vec![vec![], vec![open_pr(100, 10)]]),
+        cache.clone(),
+    );
+
+    let snapshot = seeded(&service).await;
+    let writes_after_seed = cache.writes();
+    cache.break_reads();
+
+    service
+        .hot_refresh_cached(&repo(), &snapshot)
+        .await
+        .expect_err("a hot refresh that cannot read the cache must fail");
+    service
+        .refresh_cached(&repo(), &snapshot)
+        .await
+        .expect_err("a structural refresh that cannot read the cache must fail");
+    service
+        .reconcile_cached(&repo(), &snapshot)
+        .await
+        .expect_err("a reconcile that cannot read the cache must fail");
+
+    assert_eq!(
+        cache.writes(),
+        writes_after_seed,
+        "no path may write what it could not merge with the cache",
     );
 }
 

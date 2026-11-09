@@ -280,6 +280,21 @@ fn refresh_outcome(refreshed: BoardSnapshot, retained: &BoardSnapshot) -> BoardR
     BoardRefresh::Changed(refreshed.loaded())
 }
 
+/// Whether two sweeps report the same open-PR **set**. The sweep is ordered by
+/// `updatedAt`, so any bump on GitHub reshuffles it without changing a single
+/// fact on the board: order alone is not news. A real change repaints with the
+/// new order, which is how the Unlinked PR list catches up.
+fn same_open_prs(left: &[RawLinkedPr], right: &[RawLinkedPr]) -> bool {
+    let by_number: HashMap<u64, &RawLinkedPr> = right
+        .iter()
+        .map(|linked| (linked.pr.number, linked))
+        .collect();
+    left.len() == right.len()
+        && left
+            .iter()
+            .all(|linked| by_number.get(&linked.pr.number) == Some(&linked))
+}
+
 fn merge_issues(retained: &[RawIssue], delta: &[RawIssue]) -> Vec<RawIssue> {
     let mut merged: Vec<RawIssue> = retained.to_vec();
     for issue in delta {
@@ -729,11 +744,21 @@ impl<P: GitHubPort> BoardService<P> {
 
     /// The open-PR sweep for `repo`, the authority on which Linked PRs exist.
     /// The hot refresh path's only fetch (ADR 0008).
+    ///
+    /// The PRs stay in GitHub's order (most recently updated first, which the
+    /// Unlinked PR list shows), but each PR's closed issues are sorted, so that
+    /// [`same_open_prs`] need not care how GitHub listed them.
     async fn sweep_open_prs(&self, repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
-        self.port
+        let mut linked_prs = self
+            .port
             .sweep_open_prs(repo)
             .await
-            .map_err(|err| err.with_context("repo", repo))
+            .map_err(|err| err.with_context("repo", repo))?;
+        for linked in &mut linked_prs {
+            linked.closes.sort_unstable();
+            linked.closes.dedup();
+        }
+        Ok(linked_prs)
     }
 
     /// Refresh against a retained snapshot and report whether the board changed.
@@ -851,7 +876,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
         let refresh = self.board.refresh(repo, snapshot).await?;
-        let refresh = self.with_freshest_linked_prs(repo, snapshot, refresh).await;
+        let refresh = self
+            .with_freshest_linked_prs(repo, snapshot, refresh)
+            .await?;
         let snapshot_to_cache = match &refresh {
             BoardRefresh::Changed(loaded) => &loaded.snapshot,
             BoardRefresh::Unchanged(snapshot) => snapshot,
@@ -879,41 +906,43 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
         let linked_prs = self.board.sweep_open_prs(repo).await?;
-        let freshest = self.freshest_snapshot(repo, snapshot).await;
-        let refreshed = freshest.with_linked_prs(linked_prs);
-        // Judged against the facts it built on, not against the caller's
+        let freshest = self.freshest_snapshot(repo, snapshot).await?;
+        // Judged against the facts it builds on, not against the caller's
         // possibly-staler base: the hot path owns the Linked PRs and nothing
         // else, so only a changed open-PR set is its news. Issue facts it
-        // merely carried forward were already painted and cached by the path
-        // that fetched them.
-        let refresh = refresh_outcome(refreshed, &freshest);
-        if let BoardRefresh::Changed(loaded) = &refresh {
-            self.cache
-                .cache_board(repo, &loaded.snapshot)
-                .await
-                .map_err(|err| err.with_operation("CachedBoardService::hot_refresh_cached"))?;
+        // merely carries forward were already painted and cached by the path
+        // that fetched them. Checked first because this runs every 15 seconds
+        // and the snapshot it would otherwise build copies every issue.
+        if same_open_prs(&linked_prs, &freshest.linked_prs) {
+            return Ok(BoardRefresh::Unchanged(freshest));
         }
-        Ok(refresh)
+        let loaded = freshest.with_linked_prs(linked_prs).loaded();
+        self.cache
+            .cache_board(repo, &loaded.snapshot)
+            .await
+            .map_err(|err| err.with_operation("CachedBoardService::hot_refresh_cached"))?;
+        Ok(BoardRefresh::Changed(loaded))
     }
 
     /// The freshest board facts known for `repo`: the last write any refresh
     /// path made to the cache they share, falling back to `base` when the cache
-    /// holds nothing (or cannot be read). Each path rebuilds its result on top
-    /// of this before writing, so whichever finishes last keeps the other's
-    /// collection instead of reverting it — a cache miss is not a failure, it
-    /// only means there is nothing fresher than the caller already held.
-    async fn freshest_snapshot(&self, repo: &RepoRef, base: &BoardSnapshot) -> BoardSnapshot {
-        match self.cache.cached_board(repo).await {
-            Ok(Some(cached)) => cached,
-            Ok(None) => base.clone(),
-            Err(error) => {
-                tracing::warn!(
-                    error = ?error,
-                    "board cache unreadable while merging a refresh; carrying the caller's facts forward",
-                );
-                base.clone()
-            }
-        }
+    /// holds nothing. Each path rebuilds its result on top of this before
+    /// writing, so whichever finishes last keeps the other's collection instead
+    /// of reverting it. A cache miss is not a failure, it only means there is
+    /// nothing fresher than the caller already held; a failed read is, because
+    /// the other path's newer facts may be in there and writing without them
+    /// would revert them.
+    async fn freshest_snapshot(
+        &self,
+        repo: &RepoRef,
+        base: &BoardSnapshot,
+    ) -> AppResult<BoardSnapshot> {
+        let cached = self
+            .cache
+            .cached_board(repo)
+            .await
+            .map_err(|err| err.with_operation("CachedBoardService::freshest_snapshot"))?;
+        Ok(cached.unwrap_or_else(|| base.clone()))
     }
 
     /// Re-decide an issue-side refresh's outcome against the freshest Linked PRs
@@ -924,16 +953,16 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         repo: &RepoRef,
         base: &BoardSnapshot,
         refresh: BoardRefresh,
-    ) -> BoardRefresh {
+    ) -> AppResult<BoardRefresh> {
         let refreshed = match &refresh {
             BoardRefresh::Changed(loaded) => &loaded.snapshot,
             BoardRefresh::Unchanged(snapshot) => snapshot,
         };
-        let linked_prs = self.freshest_snapshot(repo, base).await.linked_prs;
+        let linked_prs = self.freshest_snapshot(repo, base).await?.linked_prs;
         if linked_prs == refreshed.linked_prs {
-            return refresh;
+            return Ok(refresh);
         }
-        refresh_outcome(refreshed.with_linked_prs(linked_prs), base)
+        Ok(refresh_outcome(refreshed.with_linked_prs(linked_prs), base))
     }
 
     /// Full-load reconcile against a retained snapshot.
@@ -951,7 +980,9 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
         let refresh = self.board.reload_issues(repo, snapshot).await?;
-        let refresh = self.with_freshest_linked_prs(repo, snapshot, refresh).await;
+        let refresh = self
+            .with_freshest_linked_prs(repo, snapshot, refresh)
+            .await?;
         let loaded = match refresh {
             BoardRefresh::Changed(loaded) => loaded,
             unchanged => return Ok(unchanged),

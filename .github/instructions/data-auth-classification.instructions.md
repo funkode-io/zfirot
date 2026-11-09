@@ -33,8 +33,9 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
   the issue queries shallow enough never to approach GitHub's node limit (#168).
 - An issue's `updatedAt` does **not** advance when a PR gains or changes a
   closing reference to it, so an issues-since delta can never see a new Linked
-  PR. That is why the open-PR sweep runs on **every** refresh path (cold load,
-  cached open, poll, reconcile) rather than being derived from the issue delta.
+  PR. That is why the open-PR sweep runs on its own hot loop (and on cold load and
+  cached open), never derived from the issue delta. The issue-side paths (poll,
+  reconcile) write only issues and adopt the hot path's PR facts from the cache.
 - Facts that a full reconcile re-fetches identically can never be healed by more
   refresh plumbing. When a value looks stale after a reconcile, suspect the
   query or the projection, not the cache.
