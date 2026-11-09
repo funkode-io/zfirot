@@ -125,7 +125,7 @@ fn rendered_prose(body: &str) -> String {
                 prose.push('\n');
             }
             Event::Text(text) if hidden == 0 => prose.push_str(&text),
-            Event::Code(_) => prose.push('\n'),
+            Event::Code(_) | Event::InlineHtml(_) => prose.push('\n'),
             // Inline tags stay on their line: `**Closes:** #12`.
             Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {}
             Event::SoftBreak | Event::HardBreak | Event::End(_) => prose.push('\n'),
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_body_says_it_closes() {
-        let cases: [(&str, &str, Vec<u64>); 38] = [
+        let cases: [(&str, &str, Vec<u64>); 40] = [
             ("the reported wording", "- Closes #2217", vec![2217]),
             ("a colon", "- Closes: #2217", vec![2217]),
             ("any case", "FIXES #12.", vec![12]),
@@ -475,6 +475,16 @@ mod tests {
                 vec![4],
             ),
             ("a comment", "<!-- Closes #123 -->\nCloses #4", vec![4]),
+            (
+                "a keyword split by a comment",
+                "Fi<!-- x -->xes #12",
+                vec![],
+            ),
+            (
+                "a reference split by a comment",
+                "Closes <!-- x -->#12",
+                vec![],
+            ),
             ("a comment over lines", "<!--\nCloses #123\n-->", vec![]),
             ("a fenced block", "```\nCloses #12\n```\nCloses #4", vec![4]),
         ];
