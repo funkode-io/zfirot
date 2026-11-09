@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use application::{
     AccountService, AuthService, BoardCachePort, BoardCacheUsage, BoardOpen, BoardRefresh,
-    BoardService, BoardSnapshot, CachedBoardService, GitHubPort, LastOpenedService, LoadedBoard,
-    ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
+    BoardService, BoardSnapshot, CachedBoardService, FullRefresh, GitHubPort, LastOpenedService,
+    LoadedBoard, ProjectStorePort, ProjectsRefresh, RecentProjectsService, SecureStorePort,
     TrackedProjectsService,
 };
 use domain::{
@@ -245,15 +245,33 @@ pub async fn clear_all_board_cache() -> AppAction {
     board_cache()?.clear_all().await
 }
 
-/// Reconcile the open board with a full load against its retained snapshot and
-/// report if it changed. Reads the stored token and wires the live adapter for
-/// `repo`.
-pub async fn reconcile_board(repo: &RepoRef, snapshot: &BoardSnapshot) -> AppResult<BoardRefresh> {
+/// The **safety-net** refresh of the open board: a full hydrate of every open
+/// issue, healing what GitHub did not stamp, reporting if the board changed.
+/// Reads the stored token and wires the live adapter for `repo`.
+pub async fn safety_net_refresh_board(
+    repo: &RepoRef,
+    snapshot: &BoardSnapshot,
+) -> AppResult<BoardRefresh> {
     let token = AuthService::new(secure_store()).require_token().await?;
     let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
     CachedBoardService::new(port, board_cache()?)
-        .reconcile_cached(repo, snapshot)
+        .safety_net_refresh_cached(repo, snapshot)
         .await
+}
+
+/// The manual **Refresh** of the open board: hot, structural and safety-net
+/// passes once each, in that order, reported as one outcome. Fails as a whole
+/// only when no pass could start (no token, no cache); a pass that fails is
+/// reported in the outcome instead.
+pub async fn full_refresh_board(
+    repo: &RepoRef,
+    snapshot: &BoardSnapshot,
+) -> AppResult<FullRefresh> {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    let port: Arc<dyn GitHubPort> = Arc::new(GitHubClient::new(token.expose())?);
+    Ok(CachedBoardService::new(port, board_cache()?)
+        .full_refresh_cached(repo, snapshot)
+        .await)
 }
 
 /// Assign the authenticated user to a Ready Slice's issue, claiming it on

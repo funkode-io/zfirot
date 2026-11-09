@@ -8,13 +8,13 @@
 
 use application::{
     AuthService, BoardCacheUsage, BoardOpen, BoardRefresh, BoardSnapshot, ClassifiedBoard,
-    LoadedBoard, OtherIssue, ProjectsRefresh, SecureStorePort,
+    FullRefresh, LoadedBoard, OtherIssue, ProjectsRefresh, SecureStorePort,
 };
 use dioxus::prelude::*;
 use domain::{
     group_into_lanes, AppError, AppErrorKind, BoardSummary, BoardViewMode, CredentialFailure,
-    GitHubToken, HotInterval, IssueClassification, LinkedPrRef, PollInterval, Project,
-    ReconcileInterval, RepoRef, Slice, ThemePreference, Viewer,
+    FreshnessContract, GitHubToken, IssueClassification, LinkedPrRef, Project, RepoRef, Slice,
+    ThemePreference, Viewer,
 };
 use std::{future::Future, sync::Arc};
 
@@ -25,10 +25,10 @@ use crate::components::{
 use crate::logging::surface_error;
 use crate::state::{
     assign_self, cache_usage, cached_projects, clear_all_board_cache, clear_board_cache,
-    confirm_classification, hot_refresh_board, last_opened, open_and_track_project, open_board,
-    open_project, reconcile_board, refresh_projects, refresh_recent_projects,
-    remember_theme_preference, remember_view_mode, secure_store, sign_out,
-    structural_refresh_board, theme_preference, tracked_repos, untrack_repo, view_mode,
+    confirm_classification, full_refresh_board, hot_refresh_board, last_opened,
+    open_and_track_project, open_board, open_project, refresh_projects, refresh_recent_projects,
+    remember_theme_preference, remember_view_mode, safety_net_refresh_board, secure_store,
+    sign_out, structural_refresh_board, theme_preference, tracked_repos, untrack_repo, view_mode,
     viewer as fetch_viewer,
 };
 
@@ -112,7 +112,7 @@ enum FeatureActionError {
 
 /// A single-flight gate around one refresh path, so two runs of that path can
 /// never overlap and a slow call cannot stack. Each path holds its own gate, so
-/// a hot sweep and a full-load reconcile stay independent: one being in flight
+/// a hot sweep and a safety-net hydrate stay independent: one being in flight
 /// (or failing) never blocks or skips the other.
 #[derive(Clone)]
 struct RefreshGate(Arc<tokio::sync::Mutex<()>>);
@@ -163,13 +163,13 @@ pub fn App() -> Element {
     // Set to a client-safe message when signing out fails, shown above the
     // current screen (Home or Board); cleared on a successful sign-out.
     let mut sign_out_error = use_signal(|| Option::<String>::None);
-    // Set to a client-safe message when a structural refresh or authoritative
-    // reconcile fails (e.g. a connectivity blip) — automatic sources and manual
+    // Set to a client-safe message when a hot, structural or safety-net refresh
+    // fails (e.g. a connectivity blip) — automatic sources and manual
     // Refresh alike, so a flaky network is visible instead of the board just
     // silently sitting on stale data. Cleared on the next successful refresh
     // from any source. Never touches `board_snapshot`/the cache: a failed fetch
-    // must not advance `fetched_at` (see `structural_refresh`/`authoritative_reconcile`).
-    let mut refresh_error = use_signal(|| Option::<String>::None);
+    // must not advance `fetched_at` (see `structural_refresh`/`safety_net_refresh`).
+    let refresh_error = use_signal(|| Option::<String>::None);
     // Bumped after a successful save or project selection so the view re-resolves.
     let mut reload = use_signal(|| 0u32);
     // Where the user wants to be; starts at `Auto` so the last-opened project
@@ -189,23 +189,20 @@ pub fn App() -> Element {
     // Retained board snapshot used by `BoardService::refresh` to decide
     // Changed/Unchanged during polls and manual refreshes.
     let mut board_snapshot = use_signal(|| Option::<BoardSnapshot>::None);
-    // True while the fast/manual structural refresh is in flight; it clears before
-    // the authoritative reconcile runs (see `syncing` for that phase).
+    // True while a manual Refresh (all three passes) is in flight.
     let mut board_refreshing = use_signal(|| false);
-    // True while an authoritative (full-load) reconcile is in flight, from any
-    // source — automatic or manual. Folded into the Refresh button's spinner
-    // (see `refreshing` below) alongside `board_refreshing`, so the button
-    // keeps indicating in-flight work for the whole two-phase refresh instead
-    // of going idle the moment the fast structural phase clears `board_refreshing`,
-    // while the slower reconcile that actually catches things like a just-
-    // merged PR keeps running silently behind an icon that already looks done.
+    // True while a safety-net hydrate is in flight, from any source — the
+    // revalidate-on-open or the safety-net loop. Folded into the Refresh button's
+    // spinner (see `refreshing` below) alongside `board_refreshing`, so the
+    // button never looks idle while a pass that may still change the board runs.
     let syncing = use_signal(|| false);
-    // Single-flight gate for full-load reconciles so background and manual
-    // reconciles never overlap and stale results cannot overwrite newer state.
-    let reconcile_gate = use_hook(RefreshGate::new);
+    // Single-flight gate for the safety-net hydrate, so a background pass and a
+    // manual Refresh never overlap their full hydrates and a stale result
+    // cannot overwrite newer state.
+    let safety_net_gate = use_hook(RefreshGate::new);
     // Single-flight gate for the hot (open-PR sweep) path, separate from the
-    // reconcile one: a sweep that outlives its 15s tick must not stack, but it
-    // must also never wait on — or be skipped because of — a slow reconcile.
+    // safety-net one: a sweep that outlives its 15s tick must not stack, but it
+    // must also never wait on — or be skipped because of — a slow full hydrate.
     let hot_gate = use_hook(RefreshGate::new);
     // A board view fetched by a `Changed` refresh, handed to the next `view`
     // resolution so it repaints the fresh board without a second network fetch.
@@ -371,13 +368,13 @@ pub fn App() -> Element {
     // Stale-while-revalidate for project boards: if a board was painted from the
     // local cache, refresh it once in the background — the hot open-PR sweep
     // first (cheapest call, and the facts the user is actually watching), then the
-    // structural issue-index sweep, then a silent authoritative reconcile — and
+    // structural issue-index sweep, then the safety-net full hydrate — and
     // repaint only if a phase finds a real change. The hot sweep matters here
     // specifically: GitHub does not bump an issue's own `updatedAt` when a PR is
     // opened with a closing reference to it, so a just-opened (or just-merged)
     // linked PR is invisible to the issue index and is only ever seen by sweeping
     // the open PRs.
-    let reconcile_gate_on_open = reconcile_gate.clone();
+    let safety_net_gate_on_open = safety_net_gate.clone();
     let hot_gate_on_open = hot_gate.clone();
     use_effect(move || {
         let cached_board = match view.read().as_ref() {
@@ -394,7 +391,7 @@ pub fn App() -> Element {
                 return;
             }
             board_revalidated.set(Some(repo.clone()));
-            let gate = reconcile_gate_on_open.clone();
+            let gate = safety_net_gate_on_open.clone();
             let hot = hot_gate_on_open.clone();
             spawn(async move {
                 // The hot sweep goes first: it is the cheapest call and carries
@@ -430,10 +427,10 @@ pub fn App() -> Element {
                 .await
                 {
                     // Best-effort: automatic background checks skip if another
-                    // reconcile is already in flight.
+                    // safety-net hydrate is already in flight.
                     gate.clone()
                         .try_run(|| {
-                            authoritative_reconcile(
+                            safety_net_refresh(
                                 repo,
                                 base,
                                 board_snapshot,
@@ -449,8 +446,13 @@ pub fn App() -> Element {
         }
     });
 
-    // The hot loop: while a board is open, re-sweep its open Pull Requests every
-    // 15 seconds (the Freshness contract's hot tier, ADR 0008), so a new review
+    // The three loops below run on the cadences of the Freshness contract, the
+    // one place the refresh rhythm is defined (ADR 0008). Each is independent of
+    // the others, so one failing never stops the rest.
+    let contract = FreshnessContract::default();
+
+    // The hot loop: while a board is open, re-sweep its open Pull Requests on the
+    // hot cadence (15 seconds), so a new review
     // comment, a CI failure, a conflict, an approval, or a PR someone else opens
     // or closes reaches the board without the user touching anything. It writes
     // only the Linked PR collection, so it can neither be delayed by a
@@ -460,10 +462,10 @@ pub fn App() -> Element {
     use_future(move || {
         let gate = hot_gate_background.clone();
         async move {
-            let interval = HotInterval::default().as_duration();
+            let interval = contract.hot.as_duration();
             loop {
                 tokio::time::sleep(interval).await;
-                // Drop the `view` borrow before awaiting (see the poll loop
+                // Drop the `view` borrow before awaiting (see the structural loop
                 // below): a held `peek()` guard across an await races a resource
                 // re-resolve and panics with `AlreadyBorrowed`.
                 let open_repo = match &*view.peek() {
@@ -494,11 +496,11 @@ pub fn App() -> Element {
     // cadence so a new Slice or PRD, a retitle, a relabel, an assignment or a manual
     // close reaches the board without the user clicking Refresh. It writes only the
     // issue collection and is independent of the hot loop above, so a failure here
-    // leaves the last good board on screen and PR facts refreshing. The interval is
-    // the configurable `PollInterval` (default ~60s); it only bumps `reload` when a
-    // board is showing, so the home and paste-token screens are never disturbed.
+    // leaves the last good board on screen and PR facts refreshing. It runs on the
+    // structural cadence (60 seconds) and only bumps `reload` when a board is
+    // showing, so the home and paste-token screens are never disturbed.
     use_future(move || async move {
-        let interval = PollInterval::default().as_duration();
+        let interval = contract.structural.as_duration();
         loop {
             // `tokio::time::sleep` is fine while v1 is a standalone desktop app
             // running on Dioxus's tokio runtime. It depends on tokio's time
@@ -518,37 +520,33 @@ pub fn App() -> Element {
             };
             if let Some(repo) = open_repo {
                 if let Some(snapshot) = board_snapshot() {
-                    match structural_refresh_board(&repo, &snapshot).await {
-                        Ok(BoardRefresh::Changed(loaded)) => {
-                            refresh_error.set(None);
-                            repaint_board(repo, loaded, board_snapshot, prefetched_board, reload);
-                        }
-                        // Facts unchanged: don't repaint, but adopt the snapshot so
-                        // any stamp that moved is not hydrated again.
-                        Ok(BoardRefresh::Unchanged(snapshot)) => {
-                            refresh_error.set(None);
-                            board_snapshot.set(Some(snapshot));
-                        }
-                        Err(error) => {
-                            refresh_error.set(Some(surface_error("board_poll", &error)));
-                        }
-                    }
+                    structural_refresh(
+                        repo,
+                        snapshot,
+                        board_snapshot,
+                        prefetched_board,
+                        reload,
+                        refresh_error,
+                    )
+                    .await;
                 }
             }
         }
     });
 
-    // Slow background reconcile: full-load occasionally to heal what GitHub did not
-    // stamp (for example, an edited relationship), which the structural sweep cannot
-    // observe. Silent and non-blocking: repaint only on a real diff.
-    let reconcile_gate_background = reconcile_gate.clone();
+    // The safety-net loop: on the slowest cadence (5 minutes), hydrate every open
+    // issue to heal what GitHub did not stamp (for example, an edited native
+    // dependency), which the structural sweep cannot observe. It writes only
+    // issues and repaints only on a real difference, so it never disturbs the
+    // fresher PR facts.
+    let safety_net_gate_background = safety_net_gate.clone();
     use_future(move || {
-        let gate = reconcile_gate_background.clone();
+        let gate = safety_net_gate_background.clone();
         async move {
-            let interval = ReconcileInterval::default().as_duration();
+            let interval = contract.safety_net.as_duration();
             loop {
                 tokio::time::sleep(interval).await;
-                // Drop the `view` borrow before awaiting (see the poll loop above):
+                // Drop the `view` borrow before awaiting (see the structural loop above):
                 // a held `peek()` guard across the await races a resource re-resolve
                 // and panics with `AlreadyBorrowed`.
                 let open_repo = match &*view.peek() {
@@ -558,10 +556,10 @@ pub fn App() -> Element {
                 if let Some(repo) = open_repo {
                     if let Some(snapshot) = board_snapshot() {
                         // Best-effort: periodic background checks skip if another
-                        // reconcile is already in flight.
+                        // safety-net hydrate is already in flight.
                         gate.clone()
                             .try_run(|| {
-                                authoritative_reconcile(
+                                safety_net_refresh(
                                     repo,
                                     snapshot,
                                     board_snapshot,
@@ -578,18 +576,16 @@ pub fn App() -> Element {
         }
     });
 
-    // Manual refresh: a fast structural sweep for instant feedback, then a silent,
-    // authoritative reconcile to heal anything GitHub did not stamp. The sweep
-    // paints first and clears the spinner; the reconcile runs full-load and repaints
-    // only on a real difference.
+    // Manual refresh: the user's escape hatch, strictly stronger than any single
+    // loop. It runs the hot, structural and safety-net passes once each, in that
+    // order, and reports one outcome: one repaint if anything changed, one banner
+    // if any pass failed (every failure logged).
     //
-    // The reconcile call below is deliberately unconditional (unlike the two
-    // automatic reconcile sources): a user clicking Update must always get a
-    // full reconciliation, never a silent no-op because a background reconcile
-    // happened to be running at that moment — losing that guarantee is exactly
-    // what let a Slice's linked-PR badge go stale despite the user clicking
-    // Update (#149, hardening the guarantee #126 first established).
-    let reconcile_gate_manual = reconcile_gate.clone();
+    // It waits for — rather than skips behind — a safety-net hydrate already in
+    // flight: a user clicking Refresh must always get a full pass, never a
+    // silent no-op because a background one happened to be running at that
+    // moment (#149, hardening the guarantee #126 first established).
+    let safety_net_gate_manual = safety_net_gate.clone();
     let on_refresh = move |_| {
         if board_refreshing() || syncing() {
             return;
@@ -600,39 +596,25 @@ pub fn App() -> Element {
         };
         if let Some(repo) = open_repo {
             if let Some(snapshot) = board_snapshot() {
-                let gate = reconcile_gate_manual.clone();
+                let gate = safety_net_gate_manual.clone();
                 // Set the in-flight guard synchronously (before the spawn) so
                 // rapid clicks cannot start a second refresh between the check
                 // above and the flag being set inside the task.
                 board_refreshing.set(true);
                 spawn(async move {
-                    let base = structural_refresh(
-                        repo.clone(),
-                        snapshot,
-                        board_snapshot,
-                        prefetched_board,
-                        reload,
-                        refresh_error,
-                    )
-                    .await;
-                    // Spinner clears after the fast structural paint.
+                    gate.clone()
+                        .run(|| {
+                            full_refresh(
+                                repo,
+                                snapshot,
+                                board_snapshot,
+                                prefetched_board,
+                                reload,
+                                refresh_error,
+                            )
+                        })
+                        .await;
                     board_refreshing.set(false);
-
-                    if let Some(base) = base {
-                        gate.clone()
-                            .run(|| {
-                                authoritative_reconcile(
-                                    repo,
-                                    base,
-                                    board_snapshot,
-                                    prefetched_board,
-                                    reload,
-                                    syncing,
-                                    refresh_error,
-                                )
-                            })
-                            .await;
-                    }
                 });
                 return;
             }
@@ -876,10 +858,9 @@ pub fn App() -> Element {
     // background poll, the Refresh button, or the re-poll after assigning or
     // confirming. The board stays on screen (see `board_loading`), so this only
     // drives a small in-flight indicator on the Refresh button rather than
-    // replacing any content. Includes `syncing` so the indicator spans the
-    // whole two-phase refresh (structural + authoritative reconcile), not just the
-    // faster structural half — otherwise the button looked idle while a reconcile
-    // that might still change the board (e.g. catching a just-merged PR) kept
+    // replacing any content. Includes `syncing` so the indicator also spans a
+    // safety-net hydrate from the revalidate-on-open or its loop — otherwise the
+    // button looked idle while a pass that might still change the board kept
     // running silently behind it.
     let refreshing = (matches!(*view.state().read(), UseResourceState::Pending)
         && matches!(&*view.read_unchecked(), Some(View::Board { .. }))
@@ -1279,8 +1260,9 @@ fn snapshot_hms(fetched_at: chrono::DateTime<chrono::Utc>) -> String {
 /// Adopt an already-fetched refresh result as the board on screen: retain its
 /// snapshot and stash its board for the next `view` resolution, so a change
 /// costs one fetch, not two (refresh + reload). Returns the adopted snapshot,
-/// for callers that carry on from it. Every refresh path — hot, structural and
-/// reconcile — repaints through here, so they cannot drift apart.
+/// for callers that carry on from it. Every refresh path — hot, structural,
+/// safety net and the manual Refresh — repaints through here, so they cannot
+/// drift apart.
 fn repaint_board(
     repo: RepoRef,
     loaded: LoadedBoard,
@@ -1300,15 +1282,14 @@ fn repaint_board(
     loaded.snapshot
 }
 
-/// The fast half of a two-phase board refresh: an issue-index sweep that repaints
-/// immediately on a real change (`prefetched_board` + `reload`) and otherwise
-/// just adopts the resulting snapshot. Returns that snapshot on success (`Changed`
-/// or `Unchanged`), for the caller to feed into [`authoritative_reconcile`];
-/// `None` on a fetch failure, so the caller skips reconciling from a result
-/// that may not reflect reality — the retained snapshot and cache are left
-/// exactly as they were.
-/// Shared by the auto-revalidate-on-cache-open effect, the periodic poll, and
-/// the manual Refresh button, so all three apply the same rule. Clears
+/// The **structural** refresh: an issue-index sweep that repaints immediately on
+/// a real change (`prefetched_board` + `reload`) and otherwise just adopts the
+/// resulting snapshot. Returns that snapshot on success (`Changed` or
+/// `Unchanged`), for the caller to feed into [`safety_net_refresh`]; `None` on a
+/// fetch failure, so the caller skips building on a result that may not reflect
+/// reality — the retained snapshot and cache are left exactly as they were.
+/// Shared by the auto-revalidate-on-cache-open effect and the structural loop,
+/// so both apply the same rule. Clears
 /// `refresh_error` on success (any source healed it) and sets a client-safe
 /// message on failure, so a connectivity blip is visible instead of the board
 /// silently sitting on stale data.
@@ -1394,21 +1375,17 @@ async fn hot_refresh(
     }
 }
 
-/// The slow, authoritative half of a two-phase board refresh: not silent any
-/// more — it holds `syncing` true for its whole duration (from every source:
-/// auto-revalidate-on-open, the periodic reconcile loop, or the manual Refresh
-/// button), which the Refresh button's spinner also watches, so the button
-/// keeps indicating in-flight work through this phase instead of going idle
-/// right after the faster `structural_refresh` clears `board_refreshing` while this
-/// heals what GitHub did not stamp, which the structural sweep cannot observe.
+/// The **safety-net** refresh: a full hydrate of every open issue that heals
+/// what GitHub did not stamp, which the structural sweep cannot observe. It
+/// holds `syncing` true for its whole duration (from the revalidate-on-open and
+/// the safety-net loop alike), which the Refresh button's spinner watches.
 ///
 /// Repaints (`prefetched_board` + `reload`) only on a real difference. Callers
-/// serialize entry through a [`RefreshGate`] so concurrent reconciles cannot
-/// race to overwrite state. A failed reconcile leaves the retained snapshot
-/// and cache untouched and sets a
-/// client-safe `refresh_error`; any successful reconcile — changed or not —
-/// clears it.
-async fn authoritative_reconcile(
+/// serialize entry through a [`RefreshGate`] so concurrent full hydrates cannot
+/// race to overwrite state. A failed pass leaves the retained snapshot and cache
+/// untouched and sets a client-safe `refresh_error`; any successful pass —
+/// changed or not — clears it.
+async fn safety_net_refresh(
     repo: RepoRef,
     base: BoardSnapshot,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
@@ -1418,21 +1395,54 @@ async fn authoritative_reconcile(
     mut refresh_error: Signal<Option<String>>,
 ) {
     syncing.set(true);
-    match reconcile_board(&repo, &base).await {
+    match safety_net_refresh_board(&repo, &base).await {
         Ok(BoardRefresh::Changed(loaded)) => {
             refresh_error.set(None);
             repaint_board(repo, loaded, board_snapshot, prefetched_board, reload);
         }
-        // A reconcile that found nothing to heal still confirms the connection
-        // is healthy, so it clears a previous failure too. Nothing to repaint,
-        // but adopt the snapshot and any stamps it read.
+        // A pass that found nothing to heal still confirms the connection is
+        // healthy, so it clears a previous failure too. Nothing to repaint, but
+        // adopt the snapshot and any stamps it read.
         Ok(BoardRefresh::Unchanged(unchanged)) => {
             refresh_error.set(None);
             board_snapshot.set(Some(unchanged));
         }
-        Err(error) => refresh_error.set(Some(surface_error("board_reconcile", &error))),
+        Err(error) => refresh_error.set(Some(surface_error("board_safety_net_refresh", &error))),
     }
     syncing.set(false);
+}
+
+/// The manual **Refresh**: hot, structural and safety-net passes once each, in
+/// that order, reported as one outcome. One repaint (`prefetched_board` +
+/// `reload`) if together they changed anything; otherwise the resulting
+/// snapshot is adopted silently. The banner shows the first failed pass, and
+/// every failure is logged with its full cause chain; a refresh with no failure
+/// clears the banner. A pass that failed wrote nothing, so the board on screen
+/// and the cache stay the last good ones.
+async fn full_refresh(
+    repo: RepoRef,
+    snapshot: BoardSnapshot,
+    mut board_snapshot: Signal<Option<BoardSnapshot>>,
+    prefetched_board: Signal<Option<View>>,
+    reload: Signal<u32>,
+    mut refresh_error: Signal<Option<String>>,
+) {
+    match full_refresh_board(&repo, &snapshot).await {
+        Ok(FullRefresh { refresh, failures }) => {
+            match refresh {
+                BoardRefresh::Changed(loaded) => {
+                    repaint_board(repo, loaded, board_snapshot, prefetched_board, reload);
+                }
+                BoardRefresh::Unchanged(unchanged) => board_snapshot.set(Some(unchanged)),
+            }
+            let surfaced: Vec<String> = failures
+                .iter()
+                .map(|error| surface_error("board_manual_refresh", error))
+                .collect();
+            refresh_error.set(surfaced.into_iter().next());
+        }
+        Err(error) => refresh_error.set(Some(surface_error("board_manual_refresh", &error))),
+    }
 }
 
 /// The board chrome (header + logo) wrapping either the columns or an error.

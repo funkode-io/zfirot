@@ -327,6 +327,17 @@ pub enum BoardRefresh {
     Unchanged(BoardSnapshot),
 }
 
+/// Outcome of a manual **Refresh**, which runs every refresh pass once (see
+/// [`CachedBoardService::full_refresh_cached`]).
+#[derive(Debug)]
+pub struct FullRefresh {
+    /// What the passes found together, judged against the board on screen.
+    pub refresh: BoardRefresh,
+    /// Every pass that failed, in the order they ran. A failed pass wrote nothing,
+    /// and the passes after it still ran.
+    pub failures: Vec<AppError>,
+}
+
 /// Whether a freshly-written snapshot is worth repainting, given the retained
 /// one it was derived from. Each refresh path writes exactly one of the two
 /// collections and hands the result here, so "did anything change?" is decided
@@ -1076,10 +1087,11 @@ impl<P: GitHubPort> BoardService<P> {
         ))
     }
 
-    /// Re-read every open issue and replace the snapshot's issue collection
-    /// wholesale, healing what GitHub did not stamp (an edited relationship). Like [`BoardService::refresh`] it writes only issues,
+    /// The **safety-net** refresh: re-read every open issue and replace the
+    /// snapshot's issue collection wholesale, healing what GitHub did not stamp (an
+    /// edited relationship). Like [`BoardService::refresh`] it writes only issues,
     /// carrying the snapshot's Linked PRs through untouched.
-    async fn reload_issues(
+    async fn safety_net_refresh(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
@@ -1346,21 +1358,65 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             .map_err(|err| err.with_operation("CachedBoardService::cache_issue_side_result"))
     }
 
-    /// Full-load reconcile against a retained snapshot.
+    /// The **safety-net** refresh: a full **Hydrate** of every open issue, the one
+    /// path that assumes GitHub lied about everything else. It heals what no
+    /// stamp reports (for example, an edited native dependency), so such an edit
+    /// is corrected within one safety-net interval.
     ///
-    /// Runs a complete issue load to heal what GitHub did not stamp (for example,
-    /// an edited relationship). Like every issue-side path it writes no PR facts of
-    /// its own, adopting the hot path's instead. Repaints only when facts differ.
-    pub async fn reconcile_cached(
+    /// Issue-side only, like the structural refresh: it adopts whatever the hot
+    /// path wrote meanwhile instead of writing PR facts of its own, so it never
+    /// reverts them. It repaints, and rewrites the cache, only on a real
+    /// difference.
+    pub async fn safety_net_refresh_cached(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
     ) -> AppResult<BoardRefresh> {
         let start = self.freshest_snapshot(repo, snapshot).await?;
-        let refresh = self.board.reload_issues(repo, &start).await?;
+        let refresh = self.board.safety_net_refresh(repo, &start).await?;
         let refresh = self.with_hot_facts_since(repo, &start, refresh).await?;
         self.cache_issue_side_result(repo, &start, &refresh).await?;
         Ok(refresh)
+    }
+
+    /// The manual **Refresh**: the hot, structural and safety-net passes once
+    /// each, in that order, so the user's escape hatch is strictly stronger than
+    /// any single loop.
+    ///
+    /// The passes are reported as one outcome, judged against `snapshot` (the
+    /// board on screen): `Changed` if together they found anything to repaint.
+    /// A failed pass writes nothing and does not stop the passes after it, so a
+    /// broken issue side still refreshes PR facts, and the other way round; every
+    /// failure is reported beside the outcome.
+    pub async fn full_refresh_cached(
+        &self,
+        repo: &RepoRef,
+        snapshot: &BoardSnapshot,
+    ) -> FullRefresh {
+        fn absorb(
+            pass: AppResult<BoardRefresh>,
+            latest: &mut BoardSnapshot,
+            failures: &mut Vec<AppError>,
+        ) {
+            match pass {
+                Ok(BoardRefresh::Changed(loaded)) => *latest = loaded.snapshot,
+                Ok(BoardRefresh::Unchanged(snapshot)) => *latest = snapshot,
+                Err(error) => failures.push(error),
+            }
+        }
+
+        let mut latest = snapshot.clone();
+        let mut failures = Vec::new();
+        let hot = self.hot_refresh_cached(repo, &latest).await;
+        absorb(hot, &mut latest, &mut failures);
+        let structural = self.structural_refresh_cached(repo, &latest).await;
+        absorb(structural, &mut latest, &mut failures);
+        let safety_net = self.safety_net_refresh_cached(repo, &latest).await;
+        absorb(safety_net, &mut latest, &mut failures);
+        FullRefresh {
+            refresh: refresh_outcome(latest, snapshot),
+            failures,
+        }
     }
 }
 
