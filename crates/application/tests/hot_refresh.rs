@@ -2163,7 +2163,7 @@ async fn a_manual_refresh_runs_every_pass_once_and_reports_one_change() {
     let snapshot = seeded(&service).await;
     github.update_issue(slice_issue(94));
 
-    let full = service.full_refresh_cached(&repo(), &snapshot).await;
+    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
 
     assert!(full.failures.is_empty(), "every pass succeeded");
     let loaded = changed(full.refresh, "three passes that each found news repaint");
@@ -2199,7 +2199,7 @@ async fn a_manual_refresh_that_finds_nothing_repaints_nothing_and_writes_nothing
     let snapshot = seeded(&service).await;
     let writes = cache.writes();
 
-    let full = service.full_refresh_cached(&repo(), &snapshot).await;
+    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
 
     assert!(full.failures.is_empty());
     assert!(matches!(full.refresh, BoardRefresh::Unchanged(_)));
@@ -2221,7 +2221,7 @@ async fn a_manual_refresh_with_a_broken_pr_sweep_still_runs_the_issue_passes() {
         cache.clone(),
     );
 
-    let full = service.full_refresh_cached(&repo(), &snapshot).await;
+    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
 
     assert_eq!(full.failures.len(), 1, "only the hot pass failed");
     let loaded = changed(full.refresh, "the safety net's heal still repaints");
@@ -2242,7 +2242,7 @@ async fn a_manual_refresh_with_a_broken_issue_side_still_refreshes_pr_facts() {
         cache.clone(),
     );
 
-    let full = service.full_refresh_cached(&repo(), &snapshot).await;
+    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
 
     assert_eq!(
         full.failures.len(),
@@ -2251,4 +2251,49 @@ async fn a_manual_refresh_with_a_broken_issue_side_still_refreshes_pr_facts() {
     );
     let loaded = changed(full.refresh, "the hot pass's PR still repaints");
     assert_eq!(slice(&loaded.board, 96).state, SliceState::Wip);
+}
+
+#[tokio::test]
+async fn a_manual_refresh_reports_the_pr_facts_a_background_sweep_wrote_during_a_failed_pass() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let snapshot = seeded(&CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(97)], vec![vec![]]),
+        cache.clone(),
+    ))
+    .await;
+    // The background hot sweep's answer, a moment newer: a PR opened on #97.
+    let elsewhere = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(97)], vec![vec![], vec![open_pr(970, 97)]]),
+        Arc::new(CountingBoardCache::default()),
+    );
+    let base = seeded(&elsewhere).await;
+    let newer = changed(
+        elsewhere
+            .hot_refresh_cached(&repo(), &base)
+            .await
+            .expect("hot refresh should succeed"),
+        "a PR appearing repaints",
+    )
+    .snapshot;
+    // The manual refresh's own sweep read GitHub before that PR opened; the
+    // background write lands while its issue side runs, and then fails.
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(vec![slice_issue(97)], vec![vec![]])
+            .with_failing_issues()
+            .with_write_during_fetch(cache.clone(), newer),
+        cache.clone(),
+    );
+
+    let full = service.full_refresh_cached(&repo(), &snapshot, || {}).await;
+
+    assert_eq!(full.failures.len(), 2, "both issue passes failed");
+    let loaded = changed(
+        full.refresh,
+        "the board on screen lacks the PR the background sweep cached",
+    );
+    assert_eq!(
+        slice(&loaded.board, 97).state,
+        SliceState::Wip,
+        "the outcome is the freshest board, not the manual pass's older answer",
+    );
 }

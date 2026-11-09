@@ -136,6 +136,12 @@ impl RefreshGate {
         }
     }
 
+    // Hold the gate until the returned permit drops, waiting for any in-flight
+    // run: for a caller that needs it for only part of a longer task.
+    async fn hold(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.0.clone().lock_owned().await
+    }
+
     // Manual refresh path: always run, waiting for any in-flight run.
     async fn run<F, Fut>(&self, body: F)
     where
@@ -586,6 +592,7 @@ pub fn App() -> Element {
     // silent no-op because a background one happened to be running at that
     // moment (#149, hardening the guarantee #126 first established).
     let safety_net_gate_manual = safety_net_gate.clone();
+    let hot_gate_manual = hot_gate.clone();
     let on_refresh = move |_| {
         if board_refreshing() || syncing() {
             return;
@@ -597,6 +604,7 @@ pub fn App() -> Element {
         if let Some(repo) = open_repo {
             if let Some(snapshot) = board_snapshot() {
                 let gate = safety_net_gate_manual.clone();
+                let hot = hot_gate_manual.clone();
                 // Set the in-flight guard synchronously (before the spawn) so
                 // rapid clicks cannot start a second refresh between the check
                 // above and the flag being set inside the task.
@@ -607,6 +615,7 @@ pub fn App() -> Element {
                             full_refresh(
                                 repo,
                                 snapshot,
+                                hot,
                                 board_snapshot,
                                 prefetched_board,
                                 reload,
@@ -1419,15 +1428,23 @@ async fn safety_net_refresh(
 /// every failure is logged with its full cause chain; a refresh with no failure
 /// clears the banner. A pass that failed wrote nothing, so the board on screen
 /// and the cache stay the last good ones.
+///
+/// Its hot pass goes through `hot_gate` like every other sweep, so it cannot
+/// race one and let an older answer land last; the gate is released as soon as
+/// that pass is done, so the slower issue passes never hold up PR updates. The
+/// caller holds the safety-net gate, and the hot gate is taken only inside it,
+/// so it is never held while waiting.
 async fn full_refresh(
     repo: RepoRef,
     snapshot: BoardSnapshot,
+    hot_gate: RefreshGate,
     mut board_snapshot: Signal<Option<BoardSnapshot>>,
     prefetched_board: Signal<Option<View>>,
     reload: Signal<u32>,
     mut refresh_error: Signal<Option<String>>,
 ) {
-    match full_refresh_board(&repo, &snapshot).await {
+    let hot_permit = hot_gate.hold().await;
+    match full_refresh_board(&repo, &snapshot, move || drop(hot_permit)).await {
         Ok(FullRefresh { refresh, failures }) => {
             match refresh {
                 BoardRefresh::Changed(loaded) => {

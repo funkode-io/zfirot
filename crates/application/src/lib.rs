@@ -1405,10 +1405,20 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// A failed pass writes nothing and does not stop the passes after it, so a
     /// broken issue side still refreshes PR facts, and the other way round; every
     /// failure is reported beside the outcome.
+    ///
+    /// `hot_pass_done` runs as soon as the hot pass has finished, so a caller that
+    /// serializes hot sweeps can hold its gate for that pass alone, rather than
+    /// blocking every PR update behind the slower issue passes.
+    ///
+    /// The outcome is the freshest board in the cache once the passes are done,
+    /// not the last pass's own answer: a background refresh may have written newer
+    /// facts meanwhile, notably after a failed pass, and reporting the older answer
+    /// would repaint them away.
     pub async fn full_refresh_cached(
         &self,
         repo: &RepoRef,
         snapshot: &BoardSnapshot,
+        hot_pass_done: impl FnOnce(),
     ) -> FullRefresh {
         fn absorb(
             pass: AppResult<BoardRefresh>,
@@ -1426,10 +1436,15 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         let mut failures = Vec::new();
         let hot = self.hot_refresh_cached(repo, &latest).await;
         absorb(hot, &mut latest, &mut failures);
+        hot_pass_done();
         let structural = self.structural_refresh_cached(repo, &latest).await;
         absorb(structural, &mut latest, &mut failures);
         let safety_net = self.safety_net_refresh_cached(repo, &latest).await;
         absorb(safety_net, &mut latest, &mut failures);
+        match self.freshest_snapshot(repo, &latest).await {
+            Ok(freshest) => latest = freshest,
+            Err(error) => failures.push(error),
+        }
         FullRefresh {
             refresh: refresh_outcome(latest, snapshot),
             failures,
