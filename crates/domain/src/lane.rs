@@ -27,6 +27,10 @@ pub struct LaneGraph {
     pub columns: Vec<Vec<Slice>>,
     /// Intra-lane blocker edges only; cross-lane blockers are excluded.
     pub edges: Vec<LaneGraphEdge>,
+    /// Slices with no honest position on the dependency axis: not workable, and
+    /// with no same-lane edge in either direction. They appear in no column and
+    /// no edge, so the leftmost column only ever means "start here".
+    pub rail: Vec<Slice>,
 }
 
 /// Group Slices into one lane per PRD, in first-seen order, with a trailing
@@ -89,6 +93,10 @@ pub fn group_into_lanes(slices: impl IntoIterator<Item = Slice>) -> Vec<PrdLane>
 /// - Any other Slice sits strictly to the right of every same-lane blocker.
 /// - `edges` contains only same-lane blocker links (`blocker -> blocked`).
 /// - Cross-lane blockers are ignored for layout and edge rendering.
+/// - A Blocked Slice with no same-lane edge in either direction sits in `rail`,
+///   in input order, rather than in a column: it has no honest depth, and at
+///   depth `0` it would read as "start here". Every other Slice lays out as if
+///   the rail Slices were not in the lane.
 pub fn derive_lane_graph(lane: &PrdLane) -> LaneGraph {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -154,9 +162,19 @@ pub fn derive_lane_graph(lane: &PrdLane) -> LaneGraph {
         depth
     }
 
+    let connected: HashSet<u64> = edges
+        .iter()
+        .flat_map(|edge| [edge.blocker, edge.blocked])
+        .collect();
+
     let mut cache = HashMap::new();
     let mut columns_by_depth: BTreeMap<usize, Vec<Slice>> = BTreeMap::new();
+    let mut rail = Vec::new();
     for slice in &lane.slices {
+        if slice.state == SliceState::Blocked && !connected.contains(&slice.number) {
+            rail.push(slice.clone());
+            continue;
+        }
         let depth = dependency_depth(
             slice.number,
             &blockers_by_slice,
@@ -172,13 +190,14 @@ pub fn derive_lane_graph(lane: &PrdLane) -> LaneGraph {
     LaneGraph {
         columns: columns_by_depth.into_values().collect(),
         edges,
+        rail,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DependencyRef;
+    use crate::{BlockedReason, DependencyRef};
 
     fn prd(number: u64) -> PrdRef {
         PrdRef {
@@ -225,6 +244,14 @@ mod tests {
             blockers,
             unblocks: vec![],
             linked_prs: vec![],
+        }
+    }
+
+    fn blocked_slice(number: u64, reason: BlockedReason, blockers: Vec<DependencyRef>) -> Slice {
+        Slice {
+            state: SliceState::Blocked,
+            blocked_reasons: vec![reason],
+            ..ready_slice(number, blockers)
         }
     }
 
@@ -285,6 +312,7 @@ mod tests {
             slices: Vec<Slice>,
             expected_columns: Vec<Vec<u64>>,
             expected_edges: Vec<(u64, u64)>,
+            expected_rail: Vec<u64>,
         }
 
         let cases = vec![
@@ -297,6 +325,7 @@ mod tests {
                 ],
                 expected_columns: vec![vec![1], vec![2], vec![3]],
                 expected_edges: vec![(1, 2), (2, 3)],
+                expected_rail: vec![],
             },
             Case {
                 name: "fan out and diamond",
@@ -308,12 +337,14 @@ mod tests {
                 ],
                 expected_columns: vec![vec![10], vec![11, 12], vec![13]],
                 expected_edges: vec![(10, 11), (10, 12), (11, 13), (12, 13)],
+                expected_rail: vec![],
             },
             Case {
                 name: "isolated node",
                 slices: vec![ready_slice(20, vec![])],
                 expected_columns: vec![vec![20]],
                 expected_edges: vec![],
+                expected_rail: vec![],
             },
             Case {
                 name: "cross lane blocker excluded",
@@ -323,12 +354,98 @@ mod tests {
                 ],
                 expected_columns: vec![vec![30], vec![31]],
                 expected_edges: vec![(30, 31)],
+                expected_rail: vec![],
             },
             Case {
                 name: "empty lane",
                 slices: vec![],
                 expected_columns: vec![],
                 expected_edges: vec![],
+                expected_rail: vec![],
+            },
+            Case {
+                name: "edge-less non-workable Slices go to the rail, in input order",
+                slices: vec![
+                    blocked_slice(40, BlockedReason::Deferred, vec![]),
+                    blocked_slice(41, BlockedReason::ExternalBlocker, vec![]),
+                    blocked_slice(42, BlockedReason::NeedsTriage, vec![]),
+                    blocked_slice(43, BlockedReason::LabelledBlocked, vec![]),
+                ],
+                expected_columns: vec![],
+                expected_edges: vec![],
+                expected_rail: vec![40, 41, 42, 43],
+            },
+            Case {
+                name: "Dependency-blocked Slice keeps its column and edge",
+                slices: vec![
+                    ready_slice(50, vec![]),
+                    blocked_slice(51, BlockedReason::Dependency, vec![blocker(50)]),
+                ],
+                expected_columns: vec![vec![50], vec![51]],
+                expected_edges: vec![(50, 51)],
+                expected_rail: vec![],
+            },
+            Case {
+                name: "Ready edge-less Slice stays a root beside a railed one",
+                slices: vec![
+                    blocked_slice(60, BlockedReason::Deferred, vec![]),
+                    ready_slice(61, vec![]),
+                ],
+                expected_columns: vec![vec![61]],
+                expected_edges: vec![],
+                expected_rail: vec![60],
+            },
+            Case {
+                name: "WIP edge-less Slice stays a root",
+                slices: vec![Slice {
+                    state: SliceState::Wip,
+                    ..ready_slice(65, vec![])
+                }],
+                expected_columns: vec![vec![65]],
+                expected_edges: vec![],
+                expected_rail: vec![],
+            },
+            Case {
+                name: "non-workable Slice that only unblocks others stays in the graph",
+                slices: vec![
+                    blocked_slice(70, BlockedReason::Deferred, vec![]),
+                    blocked_slice(71, BlockedReason::Dependency, vec![blocker(70)]),
+                ],
+                expected_columns: vec![vec![70], vec![71]],
+                expected_edges: vec![(70, 71)],
+                expected_rail: vec![],
+            },
+            Case {
+                name: "workable Slice that only unblocks others stays in the graph",
+                slices: vec![
+                    ready_slice(75, vec![]),
+                    blocked_slice(76, BlockedReason::Dependency, vec![blocker(75)]),
+                ],
+                expected_columns: vec![vec![75], vec![76]],
+                expected_edges: vec![(75, 76)],
+                expected_rail: vec![],
+            },
+            Case {
+                name: "Slice blocked only across lanes has no same-lane edge, so it rails",
+                slices: vec![
+                    ready_slice(80, vec![]),
+                    blocked_slice(81, BlockedReason::Dependency, vec![blocker(999)]),
+                ],
+                expected_columns: vec![vec![80]],
+                expected_edges: vec![],
+                expected_rail: vec![81],
+            },
+            Case {
+                name: "a chain lays out exactly as without the railed Slice",
+                slices: vec![
+                    ready_slice(90, vec![]),
+                    blocked_slice(91, BlockedReason::Deferred, vec![]),
+                    blocked_slice(92, BlockedReason::Dependency, vec![blocker(90)]),
+                    blocked_slice(93, BlockedReason::Dependency, vec![blocker(92)]),
+                ],
+                expected_columns: vec![vec![90], vec![92], vec![93]],
+                expected_edges: vec![(90, 92), (92, 93)],
+                expected_rail: vec![91],
             },
         ];
 
@@ -338,6 +455,20 @@ mod tests {
                 slices: case.slices,
             };
             let graph = derive_lane_graph(&lane);
+
+            // Whatever the arrangement, Graph view shows exactly the Slices of
+            // the lane — the same ones Columns view shows — each once, unchanged.
+            let mut laid_out: Vec<Slice> = graph
+                .columns
+                .iter()
+                .flatten()
+                .chain(&graph.rail)
+                .cloned()
+                .collect();
+            laid_out.sort_by_key(|slice| slice.number);
+            let mut lane_slices = lane.slices.clone();
+            lane_slices.sort_by_key(|slice| slice.number);
+            assert_eq!(laid_out, lane_slices, "{}", case.name);
 
             let columns: Vec<Vec<u64>> = graph
                 .columns
@@ -352,6 +483,17 @@ mod tests {
 
             assert_eq!(columns, case.expected_columns, "{}", case.name);
             assert_eq!(edges, case.expected_edges, "{}", case.name);
+
+            let rail: Vec<u64> = graph.rail.iter().map(|slice| slice.number).collect();
+            assert_eq!(rail, case.expected_rail, "{}", case.name);
+            assert!(
+                graph
+                    .edges
+                    .iter()
+                    .all(|edge| !rail.contains(&edge.blocker) && !rail.contains(&edge.blocked)),
+                "{}: a rail Slice drew an edge",
+                case.name
+            );
         }
     }
 }
