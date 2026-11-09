@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use domain::{
-    derive_lane_graph, LaneGraphEdge, PrdLane as DomainPrdLane, PrdRef, Slice, SliceState,
+    derive_lane_graph, order_blocked_column, LaneGraphEdge, PrdLane as DomainPrdLane, PrdRef,
+    Slice, SliceState,
 };
 
 use super::{state_badge_class, state_label, BoardColumn, SliceCard};
@@ -44,6 +45,15 @@ pub fn PrdLane(
         if let Some((_, bucket)) = buckets.iter_mut().find(|(state, _)| *state == slice.state) {
             bucket.push(slice.clone());
         }
+    }
+
+    // The Blocked column reads top-down as "soonest to free up": dependencies
+    // first (they clear themselves), decisions last.
+    if let Some((_, blocked)) = buckets
+        .iter_mut()
+        .find(|(state, _)| *state == SliceState::Blocked)
+    {
+        order_blocked_column(blocked);
     }
 
     // Per-state counts for the collapsed summary, in board column order.

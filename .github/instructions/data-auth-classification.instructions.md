@@ -10,8 +10,9 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
 - Data source: GitHub **GraphQL** only. The board is read as two collections:
   one query returns a project's issues with parent, dependencies, assignees and
   labels (and **no** Pull Request data), and an open-PR **Sweep** returns every
-  open PR with its status, Decorations, and the issue numbers it closes. The
-  pure `classify` joins them by issue number. Mutations: assign self
+  open PR with its status, Decorations, and the issue numbers it closes (or,
+  with no closing reference, relates to in prose). The pure `classify` joins
+  them by issue number. Mutations: assign self
   (`addAssigneesToAssignable`) and add a classifying label.
 - Auth: a user-supplied fine-grained **Personal Access Token** stored in the OS
   secure store. Scopes: Issues read/write, Pull requests read, Contents read.

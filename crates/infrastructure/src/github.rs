@@ -4,8 +4,8 @@ use application::GitHubPort;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue, RawLinkedPr, RepoRef,
-    ReviewDecision, Viewer,
+    parse_related_issues, AppAction, AppError, AppResult, LinkedPrRef, PrStatus, Project, RawIssue,
+    RawLinkedPr, RepoRef, ReviewDecision, Viewer,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -73,7 +73,8 @@ query IssuesSince($owner: String!, $name: String!, $cursor: String, $since: Date
 
 /// The open-PR **Sweep**: every currently-open Pull Request of the repo with the
 /// facts a Linked PR renders (spine, Decorations) and the issue numbers it
-/// closes.
+/// closes, plus the title and body a PR with no closing reference relates to an
+/// issue through.
 ///
 /// `states: [OPEN]` is what makes "a Linked PR is an *open* PR" true by
 /// construction: a merged or closed PR is simply not in the answer, so nothing
@@ -94,6 +95,7 @@ query OpenPullRequests($owner: String!, $name: String!, $cursor: String) {
         number
         url
         title
+        body
         author { login }
         isDraft
         reviewDecision
@@ -1181,13 +1183,29 @@ fn review_decision(raw: Option<&str>) -> Option<ReviewDecision> {
 
 /// Project one swept pull request node into a [`RawLinkedPr`]: the facts a
 /// `pr #n @u` badge renders (spine + Decorations) plus the issue numbers it
-/// closes.
+/// closes. A PR with no closing reference is joined through the issues its
+/// title or body says it relates to instead (the same native-first, prose
+/// fallback as blockers), so "related to #N" still reaches that Slice's card.
 ///
 /// No open/closed filtering happens here, and none is needed: the sweep asks
 /// for `states: [OPEN]`, so a merged or closed PR never reaches this function.
 /// A null `author` (e.g. a deleted account) leaves the `@u` segment off the
 /// badge.
 fn map_linked_pr(node: OpenPrNode) -> RawLinkedPr {
+    let mut closes: Vec<u64> = node
+        .closing_issues_references
+        .nodes
+        .into_iter()
+        .map(|issue| issue.number)
+        .collect();
+    if closes.is_empty() {
+        closes = parse_related_issues(&format!(
+            "{}\n{}",
+            node.title,
+            node.body.as_deref().unwrap_or_default()
+        ));
+    }
+
     RawLinkedPr {
         pr: LinkedPrRef {
             number: node.number,
@@ -1213,12 +1231,7 @@ fn map_linked_pr(node: OpenPrNode) -> RawLinkedPr {
                 .filter(|thread| !thread.is_resolved)
                 .count() as u32,
         },
-        closes: node
-            .closing_issues_references
-            .nodes
-            .into_iter()
-            .map(|issue| issue.number)
-            .collect(),
+        closes,
     }
 }
 
@@ -1376,6 +1389,8 @@ struct OpenPrNode {
     number: u64,
     url: String,
     title: String,
+    #[serde(default)]
+    body: Option<String>,
     author: Option<AuthorNode>,
     #[serde(default)]
     is_draft: bool,
@@ -1673,6 +1688,18 @@ mod tests {
         "#;
 
         assert_eq!(worst_case_nodes(query), 60);
+    }
+
+    #[test]
+    fn the_sweep_reads_every_open_pr_from_the_repository_itself() {
+        // Not through issues or closing references: a PR reached only that way
+        // vanishes when its issue closes, or if it never closed one (#194).
+        let query: String = OPEN_PRS_QUERY.split_whitespace().collect();
+        assert!(
+            query.contains("repository(owner:$owner,name:$name){pullRequests(")
+                && query.contains("states:[OPEN]"),
+            "the sweep must list open PRs directly under the repository: {OPEN_PRS_QUERY}"
+        );
     }
 
     #[test]

@@ -216,6 +216,14 @@ fn open_pr(number: u64, issue: u64) -> RawLinkedPr {
     }
 }
 
+/// An open PR closing no issue, as the sweep reports it.
+fn unlinked_pr(number: u64) -> RawLinkedPr {
+    RawLinkedPr {
+        closes: vec![],
+        ..open_pr(number, 0)
+    }
+}
+
 fn slice(board: &ClassifiedBoard, number: u64) -> &domain::Slice {
     board
         .slices
@@ -384,6 +392,51 @@ async fn review_and_ci_facts_reach_the_board_on_the_next_hot_sweep() {
             .clone();
         (case.expect)(&best);
     }
+}
+
+/// A PR closing nothing has no Slice to move, so nothing but the Unlinked PR
+/// list can change. The hot sweep owns that list as much as any other PR fact:
+/// it must still repaint, and a PR that leaves the sweep must leave the list.
+#[tokio::test]
+async fn an_unlinked_pr_appears_and_leaves_with_the_hot_sweep() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let service = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(10)],
+            vec![vec![], vec![unlinked_pr(99)], vec![]],
+        ),
+        cache.clone(),
+    );
+
+    let snapshot = seeded(&service).await;
+
+    let appeared = changed(
+        service
+            .hot_refresh_cached(&repo(), &snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "a new Unlinked PR must repaint the board",
+    );
+    let unlinked: Vec<u64> = appeared
+        .board
+        .unlinked_prs
+        .iter()
+        .map(|pr| pr.number)
+        .collect();
+    assert_eq!(unlinked, vec![99]);
+    assert!(
+        slice(&appeared.board, 10).linked_prs.is_empty(),
+        "a PR closing nothing lands on no Slice card"
+    );
+
+    let left = changed(
+        service
+            .hot_refresh_cached(&repo(), &appeared.snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "a merged Unlinked PR must repaint the board",
+    );
+    assert!(left.board.unlinked_prs.is_empty());
 }
 
 #[tokio::test]

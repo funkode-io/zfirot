@@ -1,8 +1,9 @@
 use dioxus::prelude::*;
-use domain::{Slice, SliceState};
+use domain::{BlockedReason, Slice, SliceState};
 
 use super::{
-    pr_headline_color, pr_headline_icon_class, pr_headline_label, state_badge_class, state_label,
+    blocked_reason_badge_class, blocked_reason_label, blocked_reasons_tooltip,
+    pr_headline_icon_class, state_badge_class, state_label, PrHeadline,
 };
 
 /// A card for a single Slice. Emits `on_assign` with the issue number when the
@@ -23,18 +24,24 @@ pub fn SliceCard(
 ) -> Element {
     let number = slice.number;
     let is_ready = slice.state == SliceState::Ready;
-    let is_blocked = slice.state == SliceState::Blocked;
+    // Only a real open dependency means "this PR started out of order"; a Slice
+    // held back by a label or a prose wait says nothing about its PR.
+    let blocked_by_dependency = slice.primary_blocked_reason() == Some(BlockedReason::Dependency);
+    let blocked_reason = slice.primary_blocked_reason();
+    let reasons_tooltip = blocked_reasons_tooltip(&slice.blocked_reasons);
     // With more than one open PR, each badge shows its own status + Decorations
     // so it is obvious which redundant PR to close; a lone PR badge stays plain.
     let has_multiple_prs = slice.linked_prs.len() > 1;
     let is_highlighted = highlighted == Some(number);
 
-    // Blocked cards surface their blockers; every other card surfaces what it
-    // unblocks. An empty list renders no badge row.
-    let (deps_label, deps) = if slice.state == SliceState::Blocked {
-        ("Blocked by", slice.blockers.clone())
-    } else {
+    // A card surfaces its blockers when it has any, otherwise what it unblocks.
+    // Keyed on the blockers themselves rather than on Blocked, because a Slice
+    // held back by a label or an External blocker has no blocker issues to show
+    // — and would otherwise lose its "unblocks" badges to an empty row.
+    let (deps_label, deps) = if slice.blockers.is_empty() {
         ("Unblocks", slice.unblocks.clone())
+    } else {
+        ("Blocked by", slice.blockers.clone())
     };
 
     let card_class = if is_highlighted {
@@ -68,6 +75,15 @@ pub fn SliceCard(
                 span { class: "text-xs text-base-content/50 shrink-0",
                     "#{slice.number}"
                 }
+                // Why this Slice is not workable: the strongest reason leads,
+                // the rest are one hover away.
+                if let Some(reason) = blocked_reason {
+                    span {
+                        class: "badge badge-xs badge-soft {blocked_reason_badge_class(reason)} shrink-0",
+                        title: "{reasons_tooltip}",
+                        "{blocked_reason_label(reason)}"
+                    }
+                }
                 if let Some(assignee) = slice.assignee.as_deref() {
                     // The visible "@handle" already names the assignee, so the
                     // avatar is decorative: empty alt keeps screen readers from
@@ -97,30 +113,7 @@ pub fn SliceCard(
             // --- PR status headline: the Slice's review-lifecycle spine, driven by its Best PR.
             // Shown whenever the Slice has at least one open PR; decorations ride on top.
             if let Some(pr) = slice.best_pr() {
-                div { class: "flex items-center gap-1.5 mt-1.5 {pr_headline_color(pr)}",
-                    span { class: "{pr_headline_icon_class(pr)} size-4 shrink-0" }
-                    span { class: "text-xs font-medium", "{pr_headline_label(pr)}" }
-                    // Merge-health Decorations ride on top of the status, orthogonally.
-                    if pr.conflicts {
-                        span {
-                            class: "icon-[octicon--alert-16] text-warning size-4 shrink-0",
-                            title: "Conflicts with base branch — needs a merge",
-                        }
-                    }
-                    if pr.ci_failing {
-                        span {
-                            class: "icon-[octicon--x-circle-fill-16] text-error size-4 shrink-0",
-                            title: "CI failing",
-                        }
-                    }
-                    if pr.unresolved_comment_count > 0 {
-                        span { class: "flex items-center gap-0.5 text-base-content/60 shrink-0",
-                            title: "{pr.unresolved_comment_count} unresolved comments",
-                            span { class: "icon-[octicon--comment-discussion-16] size-4" }
-                            span { class: "text-xs", "{pr.unresolved_comment_count}" }
-                        }
-                    }
-                }
+                PrHeadline { pr: pr.clone() }
             }
 
             // --- linked PR badges (all states) ---
@@ -132,7 +125,7 @@ pub fn SliceCard(
                             class: "badge badge-sm badge-outline link link-hover no-underline hover:underline",
                             title: "{pr.title}",
                             href: "{pr.url}",
-                            if is_blocked {
+                            if blocked_by_dependency {
                                 span {
                                     class: "icon-[lucide--triangle-alert] text-warning size-3",
                                     title: "This Slice is Blocked — the PR is in progress while a dependency Slice is still open",

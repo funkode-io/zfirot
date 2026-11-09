@@ -21,7 +21,8 @@ mod view_mode;
 mod viewer;
 
 pub use classification::{
-    classify_issue, parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
+    classify_issue, has_unreferenced_blocked_by, parse_blockers_from_body, parse_parent_from_body,
+    IssueClassification, RawIssue,
 };
 pub use credential_failure::CredentialFailure;
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};
@@ -31,11 +32,11 @@ pub use lane::{derive_lane_graph, group_into_lanes, LaneGraph, LaneGraphEdge, Pr
 pub use pr::{PrStatus, ReviewDecision};
 pub use prd::{Prd, PrdRef};
 pub use project::Project;
-pub use prose::{parse_prose, ProseLinks};
+pub use prose::{parse_prose, parse_related_issues, ProseLinks};
 pub use repo::RepoRef;
 pub use slice::{
-    resolve_unblocks, BoardSummary, DependencyRef, LinkedPrRef, RawLinkedPr, RawSlice, Slice,
-    SliceState,
+    order_blocked_column, resolve_unblocks, BlockedReason, BoardSummary, DependencyRef,
+    LinkedPrRef, RawLinkedPr, RawSlice, Slice, SliceState,
 };
 pub use theme::ThemePreference;
 pub use token::GitHubToken;

@@ -176,3 +176,123 @@ fn classify_is_a_pure_projection_of_issues_and_swept_prs() {
         "the same inputs must always classify to the same board"
     );
 }
+
+fn prd_issue(number: u64) -> RawIssue {
+    RawIssue {
+        labels: vec!["prd".to_string()],
+        ..slice_issue(number)
+    }
+}
+
+fn other_issue(number: u64) -> RawIssue {
+    RawIssue {
+        labels: vec![],
+        ..slice_issue(number)
+    }
+}
+
+#[test]
+fn lists_every_open_pr_on_no_slice_card_as_unlinked() {
+    struct Case {
+        name: &'static str,
+        issues: Vec<RawIssue>,
+        prs: Vec<RawLinkedPr>,
+        expected: Vec<u64>,
+    }
+
+    let cases = [
+        Case {
+            name: "a PR closing nothing is unlinked",
+            issues: vec![slice_issue(1)],
+            prs: vec![swept_pr(90, PrStatus::AwaitingReview, vec![])],
+            expected: vec![90],
+        },
+        Case {
+            name: "a PR closing a Slice is on its card, not unlinked",
+            issues: vec![slice_issue(1)],
+            prs: vec![swept_pr(90, PrStatus::AwaitingReview, vec![1])],
+            expected: vec![],
+        },
+        Case {
+            name: "a PR closing only a PRD is unlinked",
+            issues: vec![prd_issue(1)],
+            prs: vec![swept_pr(90, PrStatus::Draft, vec![1])],
+            expected: vec![90],
+        },
+        Case {
+            name: "a PR closing only an other open issue is unlinked",
+            issues: vec![other_issue(1)],
+            prs: vec![swept_pr(90, PrStatus::Draft, vec![1])],
+            expected: vec![90],
+        },
+        Case {
+            name: "a PR closing only an issue the board does not hold is unlinked",
+            issues: vec![slice_issue(1)],
+            prs: vec![swept_pr(90, PrStatus::Draft, vec![404])],
+            expected: vec![90],
+        },
+        Case {
+            name: "a PR closing a Slice and an other issue stays on the Slice alone",
+            issues: vec![slice_issue(1), other_issue(2)],
+            prs: vec![swept_pr(90, PrStatus::Draft, vec![1, 2])],
+            expected: vec![],
+        },
+        Case {
+            name: "unlinked PRs keep sweep order",
+            issues: vec![],
+            prs: vec![
+                swept_pr(91, PrStatus::Draft, vec![]),
+                swept_pr(90, PrStatus::Draft, vec![]),
+            ],
+            expected: vec![91, 90],
+        },
+    ];
+
+    for case in cases {
+        let board = classify(&case.issues, &case.prs);
+        let unlinked: Vec<u64> = board.unlinked_prs.iter().map(|pr| pr.number).collect();
+        assert_eq!(unlinked, case.expected, "{}", case.name);
+    }
+}
+
+#[test]
+fn two_open_prs_closing_one_open_slice_both_show_on_its_card() {
+    let issues = vec![slice_issue(1)];
+    let prs = vec![
+        swept_pr(90, PrStatus::AwaitingReview, vec![1]),
+        swept_pr(91, PrStatus::Draft, vec![1]),
+    ];
+
+    let board = classify(&issues, &prs);
+
+    assert_eq!(badges(&board, 1), vec![90, 91]);
+    assert!(
+        board.unlinked_prs.is_empty(),
+        "a PR on a card is not also unlinked"
+    );
+}
+
+#[test]
+fn a_second_pr_stays_visible_after_the_first_merges_and_closes_their_issue() {
+    // Both PRs close #1. Merging #90 closes the issue and drops #90 from the
+    // sweep, leaving #91 open with a closing reference to a closed issue. With
+    // no card left to sit on, it must surface as an Unlinked PR.
+    let swept = vec![swept_pr(91, PrStatus::AwaitingReview, vec![1])];
+    let closed_issue = RawIssue {
+        closed: true,
+        ..slice_issue(1)
+    };
+
+    for (name, issues) in [
+        ("the closed issue is absent from the board", vec![]),
+        (
+            "the closed issue is still held as closed",
+            vec![closed_issue],
+        ),
+    ] {
+        let board = classify(&issues, &swept);
+
+        let unlinked: Vec<u64> = board.unlinked_prs.iter().map(|pr| pr.number).collect();
+        assert_eq!(unlinked, vec![91], "{name}");
+    }
+}

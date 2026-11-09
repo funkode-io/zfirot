@@ -90,19 +90,35 @@ pub fn sample_projects() -> Vec<Project> {
 /// Slice #3 is being worked on would return. Joined onto the sample issues by
 /// `classify`, so #3 renders a `pr #12 @carlos-verdes` badge and derives WIP.
 pub fn sample_open_prs() -> Vec<RawLinkedPr> {
-    vec![RawLinkedPr {
-        pr: LinkedPrRef {
-            number: 12,
-            author: Some("carlos-verdes".to_string()),
-            title: "Derive SliceState as a pure domain function".to_string(),
-            url: "https://github.com/funkode-io/zfirot/pull/12".to_string(),
-            pr_status: domain::PrStatus::AwaitingReview,
-            conflicts: false,
-            ci_failing: false,
-            unresolved_comment_count: 0,
+    vec![
+        RawLinkedPr {
+            pr: LinkedPrRef {
+                number: 12,
+                author: Some("carlos-verdes".to_string()),
+                title: "Derive SliceState as a pure domain function".to_string(),
+                url: "https://github.com/funkode-io/zfirot/pull/12".to_string(),
+                pr_status: domain::PrStatus::AwaitingReview,
+                conflicts: false,
+                ci_failing: false,
+                unresolved_comment_count: 0,
+            },
+            closes: vec![3],
         },
-        closes: vec![3],
-    }]
+        // Closes no issue, so it is an Unlinked PR.
+        RawLinkedPr {
+            pr: LinkedPrRef {
+                number: 14,
+                author: Some("carlos-verdes".to_string()),
+                title: "Bump the Dioxus toolchain".to_string(),
+                url: "https://github.com/funkode-io/zfirot/pull/14".to_string(),
+                pr_status: domain::PrStatus::Draft,
+                conflicts: false,
+                ci_failing: false,
+                unresolved_comment_count: 0,
+            },
+            closes: vec![],
+        },
+    ]
 }
 
 /// Canned raw issues for the fake, covering all classification tiers:

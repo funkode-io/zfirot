@@ -269,3 +269,172 @@ async fn classify_board_places_slice_with_closed_native_parent_in_no_prd_lane() 
         "a slice whose native parent PRD is closed must render under No PRD"
     );
 }
+
+/// Board fixture for the **Blocked reason** rules: every Slice below is tier-1
+/// (`slice` label) so this test exercises the reasons alone, not promotion.
+#[derive(Clone)]
+struct BlockedReasonFixturePort;
+
+fn raw_slice_issue(number: u64, body: &str, labels: &[&str], closed: bool) -> RawIssue {
+    RawIssue {
+        number,
+        title: format!("Slice {number}"),
+        url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+        body: Some(body.to_string()),
+        labels: labels.iter().map(|l| l.to_string()).collect(),
+        closed,
+        native_parent: None,
+        native_blockers: vec![],
+        assignee: None,
+        assignee_avatar_url: None,
+        is_native_child_of_prd: false,
+    }
+}
+
+#[async_trait]
+impl application::GitHubPort for BlockedReasonFixturePort {
+    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        Ok(vec![
+            // Waiting on a prod environment that is not an issue (dxp-data-loom#1250).
+            raw_slice_issue(
+                100,
+                "## What to build\n\nShip it.\n\n## Blocked by\n\n- A prod values file existing for this app.\n",
+                &["slice"],
+                false,
+            ),
+            // The same, plus the sticky labels: three reasons at once.
+            raw_slice_issue(
+                101,
+                "## Blocked by\n\nWaiting on the platform team.\n",
+                &["slice", "deferred", "blocked", "severity:low"],
+                false,
+            ),
+            // A maintainer must decide; nothing else says so.
+            raw_slice_issue(102, "Plain body.", &["slice", "needs-triage"], false),
+            // Names a blocker that has since closed: workable again, not an
+            // External blocker.
+            raw_slice_issue(
+                103,
+                "## Blocked by\n\n- #104\n",
+                &["slice"],
+                false,
+            ),
+            raw_slice_issue(104, "Done and dusted.", &["slice"], true),
+            // No signal at all.
+            raw_slice_issue(105, "Plain body.", &["slice", "enhancement"], false),
+            // The "no blockers" placeholder the planning skills emit for every
+            // unblocked Slice: it asserts the opposite of a wait, so it must
+            // not read as an External blocker.
+            raw_slice_issue(
+                106,
+                "## What to build\n\nShip it.\n\n## Blocked by\n\n- None — can start immediately.\n",
+                &["slice"],
+                false,
+            ),
+        ])
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(vec![])
+    }
+
+    async fn list_projects(&self) -> AppResult<Vec<Project>> {
+        Ok(vec![])
+    }
+
+    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
+        Ok(())
+    }
+
+    async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
+        Ok(())
+    }
+}
+
+/// The board keeps Ready meaning "an Agent can take this now": a Slice waiting
+/// on anything at all leaves Ready and says why.
+#[tokio::test]
+async fn classify_board_derives_blocked_reasons_and_keeps_them_out_of_ready() {
+    use domain::{BlockedReason, SliceState};
+
+    let service = BoardService::new(BlockedReasonFixturePort);
+    let repo = RepoRef::new("funkode-io", "zfirot");
+
+    let ClassifiedBoard { slices, .. } = service
+        .classify_board(&repo)
+        .await
+        .expect("fixture port should classify the board");
+
+    struct Case {
+        issue: u64,
+        expected_state: SliceState,
+        expected_reasons: Vec<BlockedReason>,
+    }
+    let cases = [
+        Case {
+            issue: 100,
+            expected_state: SliceState::Blocked,
+            expected_reasons: vec![BlockedReason::ExternalBlocker],
+        },
+        Case {
+            issue: 101,
+            expected_state: SliceState::Blocked,
+            expected_reasons: vec![
+                BlockedReason::ExternalBlocker,
+                BlockedReason::Deferred,
+                BlockedReason::LabelledBlocked,
+            ],
+        },
+        Case {
+            issue: 102,
+            expected_state: SliceState::Blocked,
+            expected_reasons: vec![BlockedReason::NeedsTriage],
+        },
+        Case {
+            issue: 103,
+            expected_state: SliceState::Ready,
+            expected_reasons: vec![],
+        },
+        Case {
+            issue: 105,
+            expected_state: SliceState::Ready,
+            expected_reasons: vec![],
+        },
+        Case {
+            issue: 106,
+            expected_state: SliceState::Ready,
+            expected_reasons: vec![],
+        },
+    ];
+
+    for case in cases {
+        let slice = slices
+            .iter()
+            .find(|s| s.number == case.issue)
+            .unwrap_or_else(|| panic!("issue #{} should be a Slice", case.issue));
+        assert_eq!(
+            slice.state, case.expected_state,
+            "issue #{} landed in the wrong column",
+            case.issue
+        );
+        assert_eq!(
+            slice.blocked_reasons, case.expected_reasons,
+            "issue #{} derived the wrong reasons",
+            case.issue
+        );
+    }
+
+    // A Blocked Slice can have no blocker issues at all — the card must cope.
+    let external = slices.iter().find(|s| s.number == 100).unwrap();
+    assert!(
+        external.blockers.is_empty(),
+        "an External blocker names no issue, so there are no blocker badges"
+    );
+
+    // Closed Slices are Done: hidden from the board entirely, whatever reason
+    // labels they carry.
+    assert!(
+        !slices.iter().any(|s| s.number == 104),
+        "a closed Slice stays Done and off the board"
+    );
+}

@@ -8,7 +8,7 @@ applyTo: "crates/presentation/**/*.rs"
 - Home screen lists recently-active projects (by last push, top 5–10) with a
   "Show more" and an empty state. Selecting a project opens its Kanban board
   (columns Ready | WIP | Blocked, cards tagged by PRD, plus an
-  "other open issues" bucket). The last-opened project is persisted on-device and
+  "Unlinked pull requests" section and an "other open issues" bucket). The last-opened project is persisted on-device and
   reopened on launch.
 - The board is grouped into **Lanes**, one per PRD: each lane is a horizontal
   swimlane with a header linking to its PRD Issue, wrapping that PRD's

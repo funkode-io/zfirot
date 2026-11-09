@@ -7,10 +7,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    classify_issue, parse_blockers_from_body, parse_parent_from_body, resolve_unblocks, AppAction,
-    AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken, IssueClassification,
-    LinkedPrRef, Prd, PrdRef, Project, RawIssue, RawLinkedPr, RawSlice, RepoRef, Slice,
-    ThemePreference, Viewer,
+    classify_issue, has_unreferenced_blocked_by, parse_blockers_from_body, parse_parent_from_body,
+    resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode, DependencyRef, GitHubToken,
+    IssueClassification, LinkedPrRef, Prd, PrdRef, Project, RawIssue, RawLinkedPr, RawSlice,
+    RepoRef, Slice, ThemePreference, Viewer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -142,11 +142,13 @@ pub struct OtherIssue {
 /// - `slices` — tier-1 confirmed Slices, ready for the Kanban columns.
 /// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
 /// - `other`  — suggested and unclassified issues for the "other open issues" bucket.
+/// - `unlinked_prs` — **Unlinked PRs**: open PRs on no Slice card, in sweep order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedBoard {
     pub slices: Vec<Slice>,
     pub prds: Vec<Prd>,
     pub other: Vec<OtherIssue>,
+    pub unlinked_prs: Vec<LinkedPrRef>,
 }
 
 /// The stored format of a [`BoardSnapshot`].
@@ -326,7 +328,8 @@ fn resolve_open_blockers(
 
 /// Index the swept open Linked PRs by the issue numbers they close, so each
 /// Slice can pick up its own badges in sweep order. A PR closing several issues
-/// appears under each of them; a PR closing nothing contributes nothing.
+/// appears under each of them; a PR closing nothing contributes nothing here
+/// and is picked up by [`unlinked_prs`] instead.
 fn linked_prs_by_issue(linked_prs: &[RawLinkedPr]) -> HashMap<u64, Vec<LinkedPrRef>> {
     let mut by_issue: HashMap<u64, Vec<LinkedPrRef>> = HashMap::new();
     for linked in linked_prs {
@@ -337,14 +340,31 @@ fn linked_prs_by_issue(linked_prs: &[RawLinkedPr]) -> HashMap<u64, Vec<LinkedPrR
     by_issue
 }
 
+/// The **Unlinked PRs**: the swept PRs that made it onto no Slice card, because
+/// they close nothing or only close issues that are not Slices. Without this an
+/// open PR the join cannot place would vanish from the board. Sweep order is
+/// kept, so the most recently updated PR comes first.
+fn unlinked_prs(linked_prs: &[RawLinkedPr], slices: &[Slice]) -> Vec<LinkedPrRef> {
+    let on_a_card: HashSet<u64> = slices
+        .iter()
+        .flat_map(|slice| &slice.linked_prs)
+        .map(|pr| pr.number)
+        .collect();
+    linked_prs
+        .iter()
+        .filter(|linked| !on_a_card.contains(&linked.pr.number))
+        .map(|linked| linked.pr.clone())
+        .collect()
+}
+
 /// Pure projection from the board's two authoritative collections — the open
 /// raw issues and the open Linked PRs of the last **Sweep** — to a classified
 /// board.
 ///
 /// The two are joined by issue number: a Slice's `pr #n @u` badges, its **WIP**
 /// state, its **Best PR** and its Decorations all come from the PRs whose
-/// closing references name it. A PR closing an issue the board does not hold is
-/// ignored, and a Slice no PR closes simply has none — which is how a merged PR
+/// closing references name it. A PR the join places on no Slice is an **Unlinked
+/// PR**, and a Slice no PR closes simply has none — which is how a merged PR
 /// disappears, since it is absent from the sweep (ADR 0008).
 pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> ClassifiedBoard {
     let mut prs_by_issue = linked_prs_by_issue(linked_prs);
@@ -422,6 +442,13 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
                     assignee_avatar_url: raw.assignee_avatar_url,
                     linked_prs: prs_by_issue.remove(&raw.number).unwrap_or_default(),
                     blockers,
+                    // A `## Blocked by` section naming no issue is a real wait
+                    // the dependency graph cannot see. Native links are checked
+                    // first: an issue GitHub already links is never "external",
+                    // however its blockers resolve.
+                    external_blocker: raw.native_blockers.is_empty()
+                        && has_unreferenced_blocked_by(body_str),
+                    labels: raw.labels,
                     // Filled by `resolve_unblocks` once the board is mapped.
                     unblocks: Vec::new(),
                 });
@@ -446,12 +473,14 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
     // Derive the reverse "unblocks" edge across the whole board, then project
     // each raw Slice into its read model with the derived state.
     resolve_unblocks(&mut slices);
-    let slices = slices.into_iter().map(RawSlice::into_slice).collect();
+    let slices: Vec<Slice> = slices.into_iter().map(RawSlice::into_slice).collect();
+    let unlinked_prs = unlinked_prs(linked_prs, &slices);
 
     ClassifiedBoard {
         slices,
         prds,
         other,
+        unlinked_prs,
     }
 }
 

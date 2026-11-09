@@ -9,22 +9,85 @@ mod board_column;
 mod error_banner;
 mod home_screen;
 mod other_issue_card;
+mod pr_headline;
 mod prd_lane;
 mod slice_card;
 mod spinner;
 mod token_screen;
+mod unlinked_pr_card;
 
 pub use account_menu::AccountMenu;
 pub use board_column::BoardColumn;
 pub use error_banner::ErrorBanner;
 pub use home_screen::HomeScreen;
 pub use other_issue_card::OtherIssueCard;
+pub use pr_headline::PrHeadline;
 pub use prd_lane::PrdLane;
 pub use slice_card::SliceCard;
 pub use spinner::{LoadingScreen, Spinner};
 pub use token_screen::TokenScreen;
+pub use unlinked_pr_card::UnlinkedPrCard;
 
-use domain::{LinkedPrRef, PrStatus, SliceState};
+use domain::{BlockedReason, LinkedPrRef, PrStatus, SliceState};
+
+/// Human-readable label for a Blocked reason — the card's chip.
+pub fn blocked_reason_label(reason: BlockedReason) -> &'static str {
+    match reason {
+        BlockedReason::Dependency => "Dependency",
+        BlockedReason::ExternalBlocker => "External blocker",
+        BlockedReason::NeedsTriage => "Needs triage",
+        BlockedReason::Deferred => "Deferred",
+        BlockedReason::LabelledBlocked => "Labelled blocked",
+    }
+}
+
+/// What the reader can do about a Blocked reason, for the chip's tooltip.
+fn blocked_reason_hint(reason: BlockedReason) -> &'static str {
+    match reason {
+        BlockedReason::Dependency => {
+            "Waiting on an open issue — frees itself when that issue closes"
+        }
+        BlockedReason::ExternalBlocker => {
+            "Waiting on something that is not a GitHub issue — see the issue's ‘Blocked by’ section"
+        }
+        BlockedReason::NeedsTriage => "Labelled needs-triage — a maintainer must decide",
+        BlockedReason::Deferred => "Labelled deferred — deliberately put off",
+        BlockedReason::LabelledBlocked => "Labelled blocked, with no other evidence — may be stale",
+    }
+}
+
+/// Tooltip for a Blocked card's chip: what the leading reason means, plus every
+/// weaker reason that also applies, so showing one chip loses nothing.
+pub fn blocked_reasons_tooltip(reasons: &[BlockedReason]) -> String {
+    let Some((primary, rest)) = reasons.split_first() else {
+        return String::new();
+    };
+    let mut tooltip = blocked_reason_hint(*primary).to_string();
+    if !rest.is_empty() {
+        let also: Vec<&str> = rest.iter().map(|r| blocked_reason_label(*r)).collect();
+        tooltip.push_str("\nAlso: ");
+        tooltip.push_str(&also.join(", "));
+    }
+    tooltip
+}
+
+/// daisyUI badge classes for a Blocked reason chip. The self-updating
+/// `Dependency` reads as strongly as the state badge; the sticky, human-authored
+/// reasons step down through two quieter tiers, so the ones that can go stale
+/// unnoticed (`deferred`, `blocked`) are the quietest thing on the card.
+///
+/// The tiers are coarser than the five ranks on purpose — five near-identical
+/// weights would not read as an order. Visual strength never *increases* with
+/// rank, and the Blocked column's own ordering carries the exact rank.
+pub fn blocked_reason_badge_class(reason: BlockedReason) -> &'static str {
+    match reason {
+        BlockedReason::Dependency => "badge-error",
+        BlockedReason::ExternalBlocker => "badge-warning",
+        BlockedReason::NeedsTriage => "badge-warning",
+        BlockedReason::Deferred => "badge-ghost",
+        BlockedReason::LabelledBlocked => "badge-ghost",
+    }
+}
 
 /// Human-readable column/badge label for a state.
 pub fn state_label(state: SliceState) -> &'static str {

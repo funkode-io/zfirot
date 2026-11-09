@@ -54,6 +54,138 @@ pub fn parse_prose(body: &str) -> ProseLinks {
     links
 }
 
+/// The phrases that tie a pull request to an issue without closing it, longest
+/// first so `related to` wins over `related` at the same position.
+const RELATION_PHRASES: [&str; 8] = [
+    "relating to",
+    "related to",
+    "relates to",
+    "references",
+    "part of",
+    "related",
+    "refs",
+    "ref",
+];
+
+/// Parse the issues a pull request says it relates to without closing them:
+/// `Related to #12`, `relates to issue 12`, `Part of #12`, `Refs: #12, #13`.
+///
+/// This reads prose only. GitHub records no closing reference for these, so
+/// callers read a PR's closing references first and use this as the fallback
+/// when there are none.
+///
+/// A relation and its references must share a line, so a PR title ending in
+/// `refs` or `not` says nothing about a body joined after it. Only an explicit
+/// relation counts: a bare `#12` mention, `unrelated to #12`
+/// and `not related to #12` do not. Only same-repo `#N` forms count, since
+/// `owner/repo#12` or a URL may name another repository's issue. Numbers are
+/// de-duplicated, in order.
+pub fn parse_related_issues(text: &str) -> Vec<u64> {
+    // ASCII lowercasing keeps every byte offset valid for slicing.
+    let lowered = text.to_ascii_lowercase();
+    let mut numbers = Vec::new();
+
+    for line in lowered.lines() {
+        for (start, _) in line.char_indices() {
+            let rest = &line[start..];
+            let Some(phrase) = RELATION_PHRASES.iter().find(|p| rest.starts_with(**p)) else {
+                continue;
+            };
+            let before = &line[..start];
+            // A relation opens its whitespace-separated word, so one inside a
+            // path, a URL or a longer word (`other/refs#12`, `?q=refs#12`,
+            // `unrelated`) never counts.
+            let opens_a_word = before
+                .rsplit(char::is_whitespace)
+                .next()
+                .is_some_and(|word| word.chars().all(is_wrapper));
+            if !opens_a_word || is_negated(before) {
+                continue;
+            }
+            for number in references_after_relation(&rest[phrase.len()..]) {
+                if !numbers.contains(&number) {
+                    numbers.push(number);
+                }
+            }
+        }
+    }
+
+    numbers
+}
+
+/// Markdown and quoting that may wrap a word without changing it.
+fn is_wrapper(c: char) -> bool {
+    "([{*_\"'`~".contains(c)
+}
+
+/// Whether the text before a relation phrase ends in the word `not`, looking
+/// through the Markdown and quoting around it: `(not`, `*not*`, `"not`. A `not.`
+/// ends its own sentence, so it negates nothing after it.
+fn is_negated(before: &str) -> bool {
+    before
+        .trim_end_matches(|c: char| c.is_whitespace() || is_wrapper(c))
+        .split_whitespace()
+        .next_back()
+        .map(|word| word.trim_start_matches(is_wrapper))
+        == Some("not")
+}
+
+/// The issue numbers directly after a relation phrase: an optional `issue` word
+/// (which also makes the first `#` optional), then a list of references joined
+/// by `,`, `&` or `and`. Anything else ends the list.
+fn references_after_relation(text: &str) -> Vec<u64> {
+    // Not `_`: `related_issue_12` is an identifier, not a relation.
+    let is_gap = |c: char| c.is_whitespace() || c == ':' || c == '*';
+    let mut rest = text.trim_start_matches(is_gap);
+    let mut hash_required = true;
+    for word in ["issues", "issue"] {
+        // `issue 12` or `issue#12`, but `issues12` is just a word.
+        if let Some(after_word) = rest
+            .strip_prefix(word)
+            .filter(|after| after.starts_with(is_gap) || after.starts_with('#'))
+        {
+            rest = after_word.trim_start_matches(is_gap);
+            hash_required = false;
+            break;
+        }
+    }
+
+    let mut numbers = Vec::new();
+    loop {
+        let reference = match rest.strip_prefix('#') {
+            Some(after_hash) => after_hash,
+            None if !hash_required => rest,
+            None => break,
+        };
+        let Some(number) = leading_number(reference) else {
+            break;
+        };
+        // `#1a2b` is a colour or a hash, not an issue reference.
+        let after_number = reference.trim_start_matches(|c: char| c.is_ascii_digit());
+        if after_number.starts_with(|c: char| c.is_alphanumeric()) {
+            break;
+        }
+        numbers.push(number);
+
+        let separator = after_number.trim_start();
+        let Some(next) = ["and ", ",", "&"]
+            .iter()
+            .find_map(|joiner| separator.strip_prefix(joiner))
+        else {
+            break;
+        };
+        // A list's last item may be joined by both: `#1, #2, and #3`.
+        let next = next.trim_start();
+        rest = next
+            .strip_prefix("and ")
+            .or_else(|| next.strip_prefix('&'))
+            .unwrap_or(next)
+            .trim_start();
+        hash_required = true;
+    }
+    numbers
+}
+
 /// Which relationship section the parser is currently inside.
 enum Section {
     None,
@@ -200,6 +332,102 @@ mod tests {
                 "blocked_by: {}",
                 case.name
             );
+        }
+    }
+
+    #[test]
+    fn parses_issues_a_pr_relates_to_without_closing_them() {
+        let cases: [(&str, &str, Vec<u64>); 34] = [
+            ("the reported wording", "Related to #12", vec![12]),
+            ("any case", "RELATES TO #12.", vec![12]),
+            ("the word issue", "related to issue #12", vec![12]),
+            ("the word issue, no hash", "Related to issue 12", vec![12]),
+            ("a colon", "Refs: #12", vec![12]),
+            ("part of", "Part of #12", vec![12]),
+            ("a list", "Related to #1, #2 and #3 & #4", vec![1, 2, 3, 4]),
+            (
+                "repeats once, in order",
+                "Refs #2. Part of #1. Ref #2",
+                vec![2, 1],
+            ),
+            (
+                "a bare mention is no relation",
+                "Follow-up to #12, see #13",
+                vec![],
+            ),
+            (
+                "a closing keyword is GitHub's to read",
+                "Closes #12",
+                vec![],
+            ),
+            ("inside another word", "Unrelated to #12, prefs #13", vec![]),
+            ("negated", "This is not related to #12", vec![]),
+            ("another repository", "Related to other/repo#12", vec![]),
+            ("an unfilled template", "Related to #", vec![]),
+            ("not an issue number", "refs #1a2b", vec![]),
+            (
+                "a list with a final comma",
+                "Related to #1, #2, and #3",
+                vec![1, 2, 3],
+            ),
+            (
+                "a reference on the next line",
+                "update refs\n#12 reproduces it",
+                vec![],
+            ),
+            (
+                "a not on the previous line",
+                "Support SQL NOT\nRelated to #12",
+                vec![12],
+            ),
+            ("a repository path", "Related to other/refs#12", vec![]),
+            ("a URL", "https://example.com/refs#12", vec![]),
+            (
+                "the word issue run into a number",
+                "Related to issues12",
+                vec![],
+            ),
+            (
+                "the word issue before a hash",
+                "Related to issue#12",
+                vec![12],
+            ),
+            ("an identifier", "add related_issue_12 fixture", vec![]),
+            ("a short identifier", "add ref_issue_12 fixture", vec![]),
+            (
+                "the word issue in an identifier",
+                "related to issue_12",
+                vec![],
+            ),
+            (
+                "a URL query value",
+                "https://example.com/?q=refs#12",
+                vec![],
+            ),
+            ("bold around the phrase", "**Related to:** #12", vec![12]),
+            ("a phrase in parentheses", "(part of #12)", vec![12]),
+            ("a hyphenated word", "cross-refs #12", vec![]),
+            ("negated in parentheses", "(not related to #12)", vec![]),
+            ("negated in quotes", "\"not related to #12\"", vec![]),
+            (
+                "negated with emphasis",
+                "This is *not* related to #12",
+                vec![],
+            ),
+            (
+                "emphasis after the negation",
+                "not *related to #12*",
+                vec![],
+            ),
+            (
+                "a not ending its sentence",
+                "It is not. Related to #12",
+                vec![12],
+            ),
+        ];
+
+        for (name, text, expected) in cases {
+            assert_eq!(parse_related_issues(text), expected, "{name}");
         }
     }
 }

@@ -13,14 +13,14 @@ use application::{
 use dioxus::prelude::*;
 use domain::{
     group_into_lanes, AppError, AppErrorKind, BoardSummary, BoardViewMode, CredentialFailure,
-    GitHubToken, HotInterval, IssueClassification, PollInterval, Project, ReconcileInterval,
-    RepoRef, Slice, ThemePreference, Viewer,
+    GitHubToken, HotInterval, IssueClassification, LinkedPrRef, PollInterval, Project,
+    ReconcileInterval, RepoRef, Slice, ThemePreference, Viewer,
 };
 use std::{future::Future, sync::Arc};
 
 use crate::components::{
     AccountMenu, ErrorBanner, HomeScreen, LoadingScreen, OtherIssueCard, PrdLane, Spinner,
-    TokenScreen,
+    TokenScreen, UnlinkedPrCard,
 };
 use crate::logging::surface_error;
 use crate::state::{
@@ -1010,6 +1010,9 @@ pub fn App() -> Element {
                             graph_view: graph_view(),
                             on_assign,
                         }
+                        if !board.unlinked_prs.is_empty() {
+                            UnlinkedPrs { prs: board.unlinked_prs.clone() }
+                        }
                         if !board.other.is_empty() {
                             OtherIssues { issues: board.other.clone(), on_confirm }
                         }
@@ -1740,6 +1743,32 @@ fn Board(slices: Vec<Slice>, graph_view: bool, on_assign: EventHandler<u64>) -> 
                     on_assign,
                     highlighted: highlighted(),
                     on_highlight,
+                }
+            }
+        }
+    }
+}
+
+/// The **Unlinked PRs** — open PRs that are on no Slice card, below the Kanban
+/// board. Starts expanded, unlike "other open issues": an open PR is live work
+/// waiting on someone, and this section is the only place it shows.
+#[component]
+fn UnlinkedPrs(prs: Vec<LinkedPrRef>) -> Element {
+    let count = prs.len();
+    rsx! {
+        section { class: "mt-6",
+            div { class: "collapse collapse-arrow bg-base-200 border border-base-300",
+                input { r#type: "checkbox", checked: true, "aria-label": "Toggle unlinked pull requests" }
+                div { class: "collapse-title text-lg font-semibold flex items-center gap-2",
+                    "Unlinked pull requests"
+                    span { class: "badge badge-neutral", "{count}" }
+                }
+                div { class: "collapse-content",
+                    div { class: "flex flex-col gap-2",
+                        for pr in prs {
+                            UnlinkedPrCard { key: "{pr.number}", pr: pr.clone() }
+                        }
+                    }
                 }
             }
         }
