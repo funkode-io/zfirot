@@ -40,12 +40,14 @@ an agent to pick up.
 _Avoid_: open, available, todo
 
 **WIP**:
-A Slice with an open Pull Request linked to it (via the PR's closing reference). Its finer substate is its Best PR's PR status, decorated with any of that PR's Decorations. An open PR is live evidence of work and outranks any Blocked reason — except an unstacked PR on a **Dependency**-blocked Slice, where GitHub's own branch topology says the work started out of order.
+A Slice with an open Pull Request linked to it (see **Linked PR**). Its finer substate is its Best PR's PR status, decorated with any of that PR's Decorations. An open PR is live evidence of work and outranks any Blocked reason — except an unstacked PR on a **Dependency**-blocked Slice, where GitHub's own branch topology says the work started out of order.
 _Avoid_: in progress, active, doing
 
 **Linked PR**:
-An open Pull Request that closes a Slice's issue (GitHub's closing reference).
-A Slice's open linked PRs share a dedicated row on its card, one `pr #n @u`
+An open Pull Request that closes a Slice's issue (GitHub's closing reference)
+or, when it has no closing reference, says in its title or body that it relates
+to that issue ("related to #n", "part of #n", "refs #n"). A bare `#n` mention
+does not link. A Slice's open linked PRs share a dedicated row on its card, one `pr #n @u`
 badge each, where `n` is the PR number and `u` is the PR's **author** (for
 delegated work, the Agent's bot account) — on any card that has one, regardless
 of column. Closed PRs are not shown, so replacing one PR with another leaves
@@ -57,8 +59,9 @@ _Avoid_: closing PR, the PR (a Slice may have more than one open)
 
 **Unlinked PR**:
 An open Pull Request in the board's repo that sits on no Slice card, because it
-closes no issue or closes only issues that are not Slices (a PRD, an **Unclassified
-issue**, or an issue the board does not hold). Listed in its own "Unlinked pull
+links no issue or links only issues that are not open Slices (a PRD, an **Unclassified
+issue**, an issue already closed, for instance by a sibling PR's merge, or an issue
+the board does not hold). Listed in its own "Unlinked pull
 requests" section below the Lanes with its PR status and Decorations, so no open
 PR is invisible. It never affects a Slice's state.
 _Avoid_: orphan PR, loose PR

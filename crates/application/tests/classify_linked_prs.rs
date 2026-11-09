@@ -254,3 +254,45 @@ fn lists_every_open_pr_on_no_slice_card_as_unlinked() {
         assert_eq!(unlinked, case.expected, "{}", case.name);
     }
 }
+
+#[test]
+fn two_open_prs_closing_one_open_slice_both_show_on_its_card() {
+    let issues = vec![slice_issue(1)];
+    let prs = vec![
+        swept_pr(90, PrStatus::AwaitingReview, vec![1]),
+        swept_pr(91, PrStatus::Draft, vec![1]),
+    ];
+
+    let board = classify(&issues, &prs);
+
+    assert_eq!(badges(&board, 1), vec![90, 91]);
+    assert!(
+        board.unlinked_prs.is_empty(),
+        "a PR on a card is not also unlinked"
+    );
+}
+
+#[test]
+fn a_second_pr_stays_visible_after_the_first_merges_and_closes_their_issue() {
+    // Both PRs close #1. Merging #90 closes the issue and drops #90 from the
+    // sweep, leaving #91 open with a closing reference to a closed issue. With
+    // no card left to sit on, it must surface as an Unlinked PR.
+    let swept = vec![swept_pr(91, PrStatus::AwaitingReview, vec![1])];
+    let closed_issue = RawIssue {
+        closed: true,
+        ..slice_issue(1)
+    };
+
+    for (name, issues) in [
+        ("the closed issue is absent from the board", vec![]),
+        (
+            "the closed issue is still held as closed",
+            vec![closed_issue],
+        ),
+    ] {
+        let board = classify(&issues, &swept);
+
+        let unlinked: Vec<u64> = board.unlinked_prs.iter().map(|pr| pr.number).collect();
+        assert_eq!(unlinked, vec![91], "{name}");
+    }
+}

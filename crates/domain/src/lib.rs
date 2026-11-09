@@ -32,7 +32,7 @@ pub use lane::{derive_lane_graph, group_into_lanes, LaneGraph, LaneGraphEdge, Pr
 pub use pr::{PrStatus, ReviewDecision};
 pub use prd::{Prd, PrdRef};
 pub use project::Project;
-pub use prose::{parse_prose, ProseLinks};
+pub use prose::{parse_prose, parse_related_issues, ProseLinks};
 pub use repo::RepoRef;
 pub use slice::{
     order_blocked_column, resolve_unblocks, BlockedReason, BoardSummary, DependencyRef,

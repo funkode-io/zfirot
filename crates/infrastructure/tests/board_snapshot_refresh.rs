@@ -234,3 +234,50 @@ async fn refresh_is_idempotent_when_since_overlap_refetches_same_issue() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_pr_left_open_when_its_issue_closes_moves_from_the_card_to_unlinked() {
+    // Two PRs closed #1: one merged (gone from the sweep) and closed the issue,
+    // and the other is still open with a closing reference to a closed issue.
+    let open_slice = sample_raw_issues()
+        .into_iter()
+        .find(|issue| !issue.closed && issue.labels.iter().any(|label| label == "slice"))
+        .expect("the sample board should hold an open Slice");
+    let number = open_slice.number;
+    let mut still_open = sample_open_prs().remove(0);
+    still_open.closes = vec![number];
+    let still_open_number = still_open.pr.number;
+    let closed_slice = RawIssue {
+        closed: true,
+        ..open_slice.clone()
+    };
+    let service = BoardService::new(SequencePort {
+        issues: Mutex::new(VecDeque::from([vec![open_slice]])),
+        deltas: Mutex::new(VecDeque::from([vec![closed_slice]])),
+        open_prs: vec![still_open],
+    });
+    let repo = RepoRef::new("funkode-io", "zfirot");
+
+    let loaded = service.load(&repo).await.expect("load should succeed");
+    assert_eq!(
+        loaded.board.slices[0].linked_prs[0].number,
+        still_open_number
+    );
+
+    let refresh = service
+        .refresh(&repo, &loaded.snapshot)
+        .await
+        .expect("refresh should succeed");
+
+    let BoardRefresh::Changed(refreshed) = refresh else {
+        panic!("closing the issue changes the board");
+    };
+    assert!(refreshed.board.slices.is_empty());
+    let unlinked: Vec<u64> = refreshed
+        .board
+        .unlinked_prs
+        .iter()
+        .map(|pr| pr.number)
+        .collect();
+    assert_eq!(unlinked, vec![still_open_number]);
+}
