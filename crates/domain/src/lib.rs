@@ -21,7 +21,7 @@ mod view_mode;
 mod viewer;
 
 pub use classification::{
-    classify_issue, classify_on_board, has_unreferenced_blocked_by, parent_of,
+    classify_issue, classify_on_board, has_unreferenced_blocked_by, lane_parent_of, parent_of,
     parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
 };
 pub use credential_failure::CredentialFailure;

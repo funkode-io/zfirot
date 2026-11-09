@@ -132,19 +132,36 @@ pub fn parent_of(raw: &RawIssue) -> Option<u64> {
         .or_else(|| parse_parent_from_body(raw.body.as_deref()?))
 }
 
+/// The issue number heading the Lane a Slice sits on, given the `open_prds` of
+/// [`classify_on_board`].
+///
+/// A native link is GitHub's own statement of the relationship, so it stands
+/// whatever the parent is. A prose `## Parent` counts only while it names an open
+/// PRD or Suggested PRD: otherwise a Suggested PRD edited out of the template
+/// would keep its Lane through its labelled Slices, headed by what is now an
+/// ordinary issue.
+pub fn lane_parent_of(raw: &RawIssue, open_prds: &HashSet<u64>) -> Option<u64> {
+    raw.native_parent.or_else(|| {
+        parse_parent_from_body(raw.body.as_deref()?).filter(|parent| open_prds.contains(parent))
+    })
+}
+
 /// Classify an issue with the board around it: [`classify_issue`], then promotion
 /// by Parent (ADR 0007). `open_issues` holds every open issue number on the board
-/// and `open_prds` the ones among them that are PRDs.
+/// and `open_prds` the ones among them that the first pass read as a PRD or a
+/// Suggested PRD, so a repo that labels nothing still gets its Slices.
 ///
-/// An issue the first pass left unconfirmed becomes a Slice when its [`parent_of`]
-/// is:
+/// An issue the first pass did not read as a PRD or a Slice becomes a Slice when
+/// its [`parent_of`] is:
 ///
-/// - an open PRD, which puts it on that PRD's Lane; or
+/// - an open PRD or Suggested PRD, which puts it on that PRD's Lane; or
 /// - not an open issue on the board (closed, or never fetched), which puts it in
 ///   the "No PRD" Lane rather than losing planned work.
 ///
 /// A Parent that is an open issue of any other kind promotes nothing, so a bug's
-/// sub-task stays off the board. Tier-1 classifications are never changed.
+/// sub-task stays off the board. Tier-1 classifications are never changed, and nor
+/// is a Suggested PRD: its headings say it is a PRD, so it heads its own Lane rather
+/// than being a card on another.
 pub fn classify_on_board(
     raw: &RawIssue,
     open_issues: &HashSet<u64>,
@@ -153,7 +170,7 @@ pub fn classify_on_board(
     let first_pass = classify_issue(raw);
     if matches!(
         first_pass,
-        IssueClassification::Prd | IssueClassification::Slice
+        IssueClassification::Prd | IssueClassification::Slice | IssueClassification::SuggestedPrd
     ) {
         return first_pass;
     }
