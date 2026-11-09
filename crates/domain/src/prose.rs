@@ -134,7 +134,8 @@ fn is_negated(before: &str) -> bool {
 /// (which also makes the first `#` optional), then a list of references joined
 /// by `,`, `&` or `and`. Anything else ends the list.
 fn references_after_relation(text: &str) -> Vec<u64> {
-    let is_gap = |c: char| c.is_whitespace() || c == ':' || c == '*' || c == '_';
+    // Not `_`: `related_issue_12` is an identifier, not a relation.
+    let is_gap = |c: char| c.is_whitespace() || c == ':' || c == '*';
     let mut rest = text.trim_start_matches(is_gap);
     let mut hash_required = true;
     for word in ["issues", "issue"] {
@@ -332,7 +333,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_relates_to_without_closing_them() {
-        let cases: [(&str, &str, Vec<u64>); 29] = [
+        let cases: [(&str, &str, Vec<u64>); 32] = [
             ("the reported wording", "Related to #12", vec![12]),
             ("any case", "RELATES TO #12.", vec![12]),
             ("the word issue", "related to issue #12", vec![12]),
@@ -377,6 +378,13 @@ mod tests {
             ),
             ("a repository path", "Related to other/refs#12", vec![]),
             ("a URL", "https://example.com/refs#12", vec![]),
+            ("an identifier", "add related_issue_12 fixture", vec![]),
+            ("a short identifier", "add ref_issue_12 fixture", vec![]),
+            (
+                "the word issue in an identifier",
+                "related to issue_12",
+                vec![],
+            ),
             (
                 "a URL query value",
                 "https://example.com/?q=refs#12",
