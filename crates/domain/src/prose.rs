@@ -7,6 +7,8 @@
 //! prose in the body, so the board parses them here and resolves the referenced
 //! numbers against the issues it already fetched.
 
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
 /// Issue references parsed from an issue body's relationship sections.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProseLinks {
@@ -107,55 +109,28 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
     references_after_phrases(text, &RELATION_PHRASES)
 }
 
-/// `body` without its HTML comments, fenced code blocks and inline code.
+/// The text a reader of `body` sees as prose: Markdown rendered by a CommonMark
+/// parser, without HTML or code of any form. Each block ends its own line, since
+/// a phrase and its references must share one.
 fn rendered_prose(body: &str) -> String {
-    let mut uncommented = String::new();
-    let mut rest = body;
-    while let Some(open) = rest.find("<!--") {
-        uncommented.push_str(&rest[..open]);
-        // An unclosed comment runs to the end of the body, as it renders.
-        rest = rest[open..]
-            .split_once("-->")
-            .map_or("", |(_, after_comment)| after_comment);
-    }
-    uncommented.push_str(rest);
-
     let mut prose = String::new();
-    let mut fence = None;
-    for line in uncommented.lines() {
-        let trimmed = line.trim_start();
-        let marker = ["```", "~~~"]
-            .into_iter()
-            .find(|marker| trimmed.starts_with(*marker));
-        match (fence, marker) {
-            (None, Some(opening)) => fence = Some(opening),
-            (Some(opening), Some(closing)) if opening == closing => fence = None,
-            (None, None) => {
-                prose.push_str(&without_inline_code(line));
-                prose.push('\n');
-            }
+    let mut code_blocks = 0_usize;
+    for event in Parser::new(body) {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => code_blocks += 1,
+            Event::End(TagEnd::CodeBlock) => code_blocks = code_blocks.saturating_sub(1),
+            Event::Text(text) if code_blocks == 0 => prose.push_str(&text),
+            // Inline tags stay on their line: `**Closes:** #12`.
+            Event::End(
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Link
+                | TagEnd::Image,
+            ) => {}
+            Event::SoftBreak | Event::HardBreak | Event::End(_) => prose.push('\n'),
             _ => {}
         }
-    }
-    prose
-}
-
-/// `line` with every backtick-delimited span blanked. A run of backticks is one
-/// delimiter, so ``` ``x`` ``` is code too.
-fn without_inline_code(line: &str) -> String {
-    let mut prose = String::new();
-    let mut in_code = false;
-    let mut after_backtick = false;
-    for c in line.chars() {
-        if c != '`' {
-            if !in_code {
-                prose.push(c);
-            }
-        } else if !after_backtick {
-            in_code = !in_code;
-            prose.push(' ');
-        }
-        after_backtick = c == '`';
     }
     prose
 }
@@ -419,7 +394,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_body_says_it_closes() {
-        let cases: [(&str, &str, Vec<u64>); 24] = [
+        let cases: [(&str, &str, Vec<u64>); 32] = [
             ("the reported wording", "- Closes #2217", vec![2217]),
             ("a colon", "- Closes: #2217", vec![2217]),
             ("any case", "FIXES #12.", vec![12]),
@@ -445,6 +420,38 @@ mod tests {
             ("a relation is no closing keyword", "Part of #12", vec![]),
             ("a bare mention", "Follow-up to #12", vec![]),
             ("inline code", "Use `Closes #12` to link", vec![]),
+            (
+                "a backtick inside inline code",
+                "``a ` Closes #12`` b",
+                vec![],
+            ),
+            ("inline code over lines", "`a\nCloses #12\nb`", vec![]),
+            ("an unmatched backtick", "a ` b\n\nCloses #4", vec![4]),
+            (
+                "an unmatched backtick on the line",
+                "a ` Closes #4",
+                vec![4],
+            ),
+            (
+                "a comment in inline code",
+                "`<!--` then\n\nCloses #4",
+                vec![4],
+            ),
+            (
+                "a comment in a fence",
+                "```\n<!--\n```\n\nCloses #4",
+                vec![4],
+            ),
+            (
+                "a longer fence",
+                "````\n```\nCloses #12\n````\nCloses #4",
+                vec![4],
+            ),
+            (
+                "an indented block",
+                "Text\n\n    Closes #12\n\nCloses #4",
+                vec![4],
+            ),
             ("a comment", "<!-- Closes #123 -->\nCloses #4", vec![4]),
             ("a comment over lines", "<!--\nCloses #123\n-->", vec![]),
             ("a fenced block", "```\nCloses #12\n```\nCloses #4", vec![4]),
