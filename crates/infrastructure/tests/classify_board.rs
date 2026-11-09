@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use application::{BoardService, ClassifiedBoard};
+use application::{BoardRefresh, BoardService, ClassifiedBoard};
 use async_trait::async_trait;
 use domain::{
     group_into_lanes, AppAction, AppResult, IssueClassification, Project, RawIssue, RawLinkedPr,
@@ -1030,6 +1030,38 @@ impl application::GitHubPort for LabellingPort {
 
 fn repo() -> RepoRef {
     RepoRef::new("funkode-io", "zfirot")
+}
+
+/// The refresh the board runs right after a decision picks the label up from the
+/// retained snapshot, so the decided Lane is repainted rather than waiting on a poll.
+#[tokio::test]
+async fn refreshing_from_the_retained_snapshot_shows_a_veto() {
+    let port = LabellingPort::new(suggested_prd_issues(PRD_TEMPLATE));
+    let service = BoardService::new(port.clone());
+    let loaded = service
+        .load(&repo())
+        .await
+        .expect("the labelling port should load the board");
+
+    service
+        .veto_suggested_prd(&repo(), SUGGESTED_PRD)
+        .await
+        .expect("the port should accept the labelling");
+
+    match service
+        .refresh(&repo(), &loaded.snapshot)
+        .await
+        .expect("the labelling port should refresh the board")
+    {
+        BoardRefresh::Changed(refreshed) => assert!(
+            !lane_shape(&refreshed.board)
+                .iter()
+                .any(|(_, marked, _)| *marked),
+            "no Lane is left marked unconfirmed: {:?}",
+            lane_shape(&refreshed.board)
+        ),
+        BoardRefresh::Unchanged(_) => panic!("a new label should change the board"),
+    }
 }
 
 /// Confirm turns the guess into a fact: on the next refresh the Lane is a confident

@@ -797,7 +797,14 @@ pub fn App() -> Element {
                     match confirm_classification(&repo, number, &classification).await {
                         Ok(()) => {
                             confirm_error.set(None);
-                            reload += 1;
+                            repaint_after_decision(
+                                repo,
+                                board_snapshot,
+                                prefetched_board,
+                                reload,
+                                refresh_error,
+                            )
+                            .await;
                         }
                         Err(error) => confirm_error
                             .set(feature_action_error(error, token_error, nav, reload).await),
@@ -818,7 +825,14 @@ pub fn App() -> Element {
                 match veto_suggested_prd(&repo, number).await {
                     Ok(()) => {
                         confirm_error.set(None);
-                        reload += 1;
+                        repaint_after_decision(
+                            repo,
+                            board_snapshot,
+                            prefetched_board,
+                            reload,
+                            refresh_error,
+                        )
+                        .await;
                     }
                     Err(error) => confirm_error
                         .set(feature_action_error(error, token_error, nav, reload).await),
@@ -1363,6 +1377,33 @@ async fn delta_refresh(
             refresh_error.set(Some(surface_error("board_delta_refresh", &error)));
             None
         }
+    }
+}
+
+/// Show a Confirm or Veto on the board right after GitHub accepts it. A bare
+/// `reload` would only reopen the warm cache, which predates the label, and leave
+/// the decided Lane on screen until the next poll, so this fetches the change the
+/// way the manual Refresh does. A failed fetch surfaces through `refresh_error`.
+async fn repaint_after_decision(
+    repo: RepoRef,
+    board_snapshot: Signal<Option<BoardSnapshot>>,
+    prefetched_board: Signal<Option<View>>,
+    mut reload: Signal<u32>,
+    refresh_error: Signal<Option<String>>,
+) {
+    match board_snapshot() {
+        Some(snapshot) => {
+            delta_refresh(
+                repo,
+                snapshot,
+                board_snapshot,
+                prefetched_board,
+                reload,
+                refresh_error,
+            )
+            .await;
+        }
+        None => reload += 1,
     }
 }
 
