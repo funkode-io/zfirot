@@ -89,9 +89,10 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
             continue;
         };
         let before = &lowered[..start];
-        let starts_a_word = !before.ends_with(|c: char| c.is_alphanumeric());
-        let negated = before.split_whitespace().next_back() == Some("not");
-        if !starts_a_word || negated {
+        // `other/refs#12` and `example.com/refs#12` are paths, not relations.
+        let starts_a_word =
+            !before.ends_with(|c: char| c.is_alphanumeric() || "/-_.#@".contains(c));
+        if !starts_a_word || is_negated(before) {
             continue;
         }
         for number in references_after_relation(&rest[phrase.len()..]) {
@@ -102,6 +103,19 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
     }
 
     numbers
+}
+
+/// Whether the text before a relation phrase ends in the word `not`, looking
+/// through the Markdown and quoting around it: `(not`, `*not*`, `"not`. A `not.`
+/// ends its own sentence, so it negates nothing after it.
+fn is_negated(before: &str) -> bool {
+    let is_wrapper = |c: char| "([{*_\"'`~".contains(c);
+    before
+        .trim_end_matches(|c: char| c.is_whitespace() || is_wrapper(c))
+        .split_whitespace()
+        .next_back()
+        .map(|word| word.trim_start_matches(is_wrapper))
+        == Some("not")
 }
 
 /// The issue numbers directly after a relation phrase: an optional `issue` word
@@ -299,7 +313,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_relates_to_without_closing_them() {
-        let cases: [(&str, &str, Vec<u64>); 15] = [
+        let cases: [(&str, &str, Vec<u64>); 23] = [
             ("the reported wording", "Related to #12", vec![12]),
             ("any case", "RELATES TO #12.", vec![12]),
             ("the word issue", "related to issue #12", vec![12]),
@@ -327,6 +341,26 @@ mod tests {
             ("another repository", "Related to other/repo#12", vec![]),
             ("an unfilled template", "Related to #", vec![]),
             ("not an issue number", "refs #1a2b", vec![]),
+            ("a repository path", "Related to other/refs#12", vec![]),
+            ("a URL", "https://example.com/refs#12", vec![]),
+            ("a hyphenated word", "cross-refs #12", vec![]),
+            ("negated in parentheses", "(not related to #12)", vec![]),
+            ("negated in quotes", "\"not related to #12\"", vec![]),
+            (
+                "negated with emphasis",
+                "This is *not* related to #12",
+                vec![],
+            ),
+            (
+                "emphasis after the negation",
+                "not *related to #12*",
+                vec![],
+            ),
+            (
+                "a not ending its sentence",
+                "It is not. Related to #12",
+                vec![12],
+            ),
         ];
 
         for (name, text, expected) in cases {
