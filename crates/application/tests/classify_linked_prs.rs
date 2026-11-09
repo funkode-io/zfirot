@@ -402,3 +402,16 @@ fn a_parent_cycle_with_no_plan_stays_off_the_board() {
 
     assert!(board.slices.is_empty());
 }
+
+#[test]
+fn a_prose_sub_issue_of_a_slice_is_under_its_parent_too() {
+    let sub_issue = RawIssue {
+        labels: vec![],
+        body: Some("## Parent\n\n#2217\n".to_string()),
+        ..slice_issue(2237)
+    };
+
+    let board = classify(&[slice_issue(2217), sub_issue], &[]);
+
+    assert_eq!(lane_of(&board, 2237), Some(2217));
+}

@@ -348,8 +348,8 @@ fn changed(refresh: BoardRefresh, why: &str) -> LoadedBoard {
 }
 
 /// Open `repo` cold (seeding the cache) and return the seeded snapshot.
-async fn seeded(
-    service: &CachedBoardService<ScriptedGitHub, Arc<CountingBoardCache>>,
+async fn seeded<G: GitHubPort>(
+    service: &CachedBoardService<G, Arc<CountingBoardCache>>,
 ) -> BoardSnapshot {
     match service.open(&repo()).await.expect("cold open should seed") {
         BoardOpen::Cold(loaded) => loaded.snapshot,
@@ -1270,6 +1270,319 @@ async fn a_failed_cascade_writes_nothing_and_the_next_sweep_retries_it() {
         "the retried cascade must repaint the board",
     );
     assert_eq!(slice(&retried.board, 37).state, SliceState::Ready);
+}
+
+/// GitHub closes a merged PR's issues a moment after the merge (1-3s, measured),
+/// but the PR leaves the sweep at once. A sweep landing in that gap reads the
+/// issue still open, and the sweep after it looks unchanged, so without a second
+/// look the Slice stays on the board and its dependents stay Blocked (#172).
+#[tokio::test]
+async fn a_merge_swept_before_github_closes_the_issue_still_readies_its_dependents() {
+    let github = Arc::new(ScriptedGitHub::new(
+        vec![slice_issue(50), slice_blocked_by(51, 50)],
+        vec![vec![open_pr(500, 50)], vec![]],
+    ));
+    let service = CachedBoardService::new(github.clone(), Arc::new(CountingBoardCache::default()));
+    let snapshot = seeded(&service).await;
+
+    let in_the_gap = changed(
+        service
+            .hot_refresh_cached(&repo(), &snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "the vanished PR's badge must leave the board",
+    );
+    assert_eq!(slice(&in_the_gap.board, 50).state, SliceState::Ready);
+    assert_eq!(slice(&in_the_gap.board, 51).state, SliceState::Blocked);
+
+    github.update_issue(closed(slice_issue(50)));
+    let next_tick = changed(
+        service
+            .hot_refresh_cached(&repo(), &in_the_gap.snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "the next tick must notice the issue closing",
+    );
+
+    assert!(
+        !next_tick.board.slices.iter().any(|s| s.number == 50),
+        "the merged PR's Slice is Done, so it leaves the board",
+    );
+    assert_eq!(slice(&next_tick.board, 51).state, SliceState::Ready);
+}
+
+/// A PR closed without merging looks the same at first, but its issue stays open.
+/// That earns one second look, with nothing to repaint, and then the board is back
+/// to hydrating nothing on an unchanged sweep.
+#[tokio::test]
+async fn an_issue_a_vanished_pr_leaves_open_is_looked_at_only_once_more() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let github = Arc::new(ScriptedGitHub::new(
+        vec![slice_issue(52)],
+        vec![vec![open_pr(520, 52)], vec![]],
+    ));
+    let service = CachedBoardService::new(github.clone(), cache.clone());
+    let snapshot = seeded(&service).await;
+
+    let released = changed(
+        service
+            .hot_refresh_cached(&repo(), &snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "the vanished PR's badge must leave the board",
+    );
+
+    let second_look = service
+        .hot_refresh_cached(&repo(), &released.snapshot)
+        .await
+        .expect("hot refresh should succeed");
+    assert!(
+        matches!(second_look, BoardRefresh::Unchanged(_)),
+        "an issue that stayed open changes nothing on the board",
+    );
+
+    github.set_hydrate_failing(true);
+    let writes_before = cache.writes();
+    let settled = service
+        .hot_refresh_cached(&repo(), &released.snapshot)
+        .await
+        .expect("nothing is left to look at, so nothing can fail");
+    assert!(matches!(settled, BoardRefresh::Unchanged(_)));
+    assert_eq!(
+        cache.writes(),
+        writes_before,
+        "a settled tick writes nothing"
+    );
+}
+
+/// The second look obeys the Cascade's own rule: a failed hydrate loses nothing,
+/// and the next tick tries it again.
+#[tokio::test]
+async fn a_failed_second_look_is_retried_on_the_next_tick() {
+    let github = Arc::new(ScriptedGitHub::new(
+        vec![slice_issue(53), slice_blocked_by(54, 53)],
+        vec![vec![open_pr(530, 53)], vec![]],
+    ));
+    let service = CachedBoardService::new(github.clone(), Arc::new(CountingBoardCache::default()));
+    let snapshot = seeded(&service).await;
+    let in_the_gap = changed(
+        service
+            .hot_refresh_cached(&repo(), &snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "the vanished PR's badge must leave the board",
+    );
+
+    github.update_issue(closed(slice_issue(53)));
+    github.set_hydrate_failing(true);
+    service
+        .hot_refresh_cached(&repo(), &in_the_gap.snapshot)
+        .await
+        .expect_err("a failed second look must surface as an error");
+
+    github.set_hydrate_failing(false);
+    let retried = changed(
+        service
+            .hot_refresh_cached(&repo(), &in_the_gap.snapshot)
+            .await
+            .expect("the retry should succeed"),
+        "the retried look must repaint the board",
+    );
+    assert_eq!(slice(&retried.board, 54).state, SliceState::Ready);
+}
+
+/// A structural write between the two ticks owns the issues, not the second look:
+/// it must not lose the fact that one is still due.
+#[tokio::test]
+async fn an_issue_side_write_between_ticks_keeps_the_second_look_due() {
+    let github = Arc::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(55), slice_blocked_by(56, 55), slice_issue(57)],
+            vec![vec![open_pr(550, 55)], vec![]],
+        )
+        .with_deltas(vec![vec![RawIssue {
+            title: "Retitled by a maintainer".to_string(),
+            ..slice_issue(57)
+        }]]),
+    );
+    let service = CachedBoardService::new(github.clone(), Arc::new(CountingBoardCache::default()));
+    let snapshot = seeded(&service).await;
+    let in_the_gap = changed(
+        service
+            .hot_refresh_cached(&repo(), &snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "the vanished PR's badge must leave the board",
+    );
+    let structural = changed(
+        service
+            .refresh_cached(&repo(), &in_the_gap.snapshot)
+            .await
+            .expect("delta refresh should succeed"),
+        "the retitle must repaint the board",
+    );
+
+    github.update_issue(closed(slice_issue(55)));
+    let next_tick = changed(
+        service
+            .hot_refresh_cached(&repo(), &structural.snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "the next tick must still notice the issue closing",
+    );
+
+    assert_eq!(slice(&next_tick.board, 56).state, SliceState::Ready);
+    assert_eq!(
+        slice(&next_tick.board, 57).title,
+        "Retitled by a maintainer"
+    );
+}
+
+/// An issue-side write landing during the Cascade's hydrate discards that read, but
+/// says nothing about whether the close has happened: the issue still reads open on
+/// the board, so its second look is still due.
+#[tokio::test]
+async fn a_cascade_read_discarded_by_an_issue_side_write_keeps_the_second_look_due() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(60), slice_blocked_by(61, 60)],
+            vec![vec![open_pr(600, 60)]],
+        )
+        .with_deltas(vec![vec![RawIssue {
+            title: "Retitled by a maintainer".to_string(),
+            ..slice_issue(60)
+        }]]),
+        cache.clone(),
+    );
+    let opened = seeded(&seeding).await;
+    let structural = changed(
+        seeding
+            .refresh_cached(&repo(), &opened)
+            .await
+            .expect("structural refresh should succeed"),
+        "the retitle changes the board",
+    )
+    .snapshot;
+    cache
+        .cache_board(&repo(), &opened)
+        .await
+        .expect("the fake cache's write should succeed");
+
+    let github = Arc::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_issue(slice_issue(60))
+            .with_write_during_fetch(cache.clone(), structural),
+    );
+    let service = CachedBoardService::new(github.clone(), cache.clone());
+    let in_the_gap = changed(
+        service
+            .hot_refresh_cached(&repo(), &opened)
+            .await
+            .expect("hot refresh should succeed"),
+        "the vanished PR's badge must leave the board",
+    );
+    assert_eq!(slice(&in_the_gap.board, 61).state, SliceState::Blocked);
+
+    github.update_issue(closed(slice_issue(60)));
+    let next_tick = changed(
+        service
+            .hot_refresh_cached(&repo(), &in_the_gap.snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "the next tick must still notice the issue closing",
+    );
+    assert_eq!(slice(&next_tick.board, 61).state, SliceState::Ready);
+}
+
+/// The same for the second look itself: a read that was thrown away has not looked,
+/// so it must not use up the look.
+#[tokio::test]
+async fn a_second_look_discarded_by_an_issue_side_write_stays_due() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(62), slice_blocked_by(63, 62)],
+            vec![vec![open_pr(620, 62)], vec![]],
+        )
+        .with_deltas(vec![vec![RawIssue {
+            title: "Retitled by a maintainer".to_string(),
+            ..slice_issue(62)
+        }]]),
+        cache.clone(),
+    );
+    let opened = seeded(&seeding).await;
+    let in_the_gap = changed(
+        seeding
+            .hot_refresh_cached(&repo(), &opened)
+            .await
+            .expect("hot refresh should succeed"),
+        "the vanished PR's badge must leave the board",
+    )
+    .snapshot;
+    let structural = changed(
+        seeding
+            .refresh_cached(&repo(), &in_the_gap)
+            .await
+            .expect("structural refresh should succeed"),
+        "the retitle changes the board",
+    )
+    .snapshot;
+    cache
+        .cache_board(&repo(), &in_the_gap)
+        .await
+        .expect("the fake cache's write should succeed");
+
+    let github = Arc::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_issue(slice_issue(62))
+            .with_write_during_fetch(cache.clone(), structural),
+    );
+    let service = CachedBoardService::new(github.clone(), cache.clone());
+    let discarded = service
+        .hot_refresh_cached(&repo(), &in_the_gap)
+        .await
+        .expect("hot refresh should succeed");
+    let after_discard = match discarded {
+        BoardRefresh::Changed(loaded) => loaded.snapshot,
+        BoardRefresh::Unchanged(snapshot) => snapshot,
+    };
+
+    github.update_issue(closed(slice_issue(62)));
+    let next_tick = changed(
+        service
+            .hot_refresh_cached(&repo(), &after_discard)
+            .await
+            .expect("hot refresh should succeed"),
+        "the next tick must still notice the issue closing",
+    );
+    assert_eq!(slice(&next_tick.board, 63).state, SliceState::Ready);
+}
+
+/// A PR that loses its closing reference is still open and is not merging, so its
+/// old issue has no close on the way: the Cascade's one read is enough for it.
+#[tokio::test]
+async fn a_retargeted_pr_earns_no_second_look() {
+    let github = Arc::new(ScriptedGitHub::new(
+        vec![slice_issue(58), slice_issue(59)],
+        vec![vec![open_pr(580, 58)], vec![open_pr(580, 59)]],
+    ));
+    let service = CachedBoardService::new(github.clone(), Arc::new(CountingBoardCache::default()));
+    let snapshot = seeded(&service).await;
+    let retargeted = changed(
+        service
+            .hot_refresh_cached(&repo(), &snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "a retargeted PR must repaint the board",
+    );
+
+    github.set_hydrate_failing(true);
+    let next_tick = service
+        .hot_refresh_cached(&repo(), &retargeted.snapshot)
+        .await
+        .expect("nothing is due, so nothing can fail");
+    assert!(matches!(next_tick, BoardRefresh::Unchanged(_)));
 }
 
 /// The board as it opens with PR #380 on #38 and #39 blocked behind it, plus the
