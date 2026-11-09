@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn parses_issues_a_pr_relates_to_without_closing_them() {
-        let cases: [(&str, &str, Vec<u64>); 38] = [
+        let cases: [(&str, &str, Vec<u64>); 34] = [
             ("the reported wording", "Related to #12", vec![12]),
             ("any case", "RELATES TO #12.", vec![12]),
             ("the word issue", "related to issue #12", vec![12]),
