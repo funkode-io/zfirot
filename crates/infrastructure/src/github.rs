@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use application::GitHubPort;
 use async_trait::async_trait;
 use domain::{
-    parse_related_issues, AppAction, AppError, AppResult, IssueStamp, LinkedPrRef, PrStatus,
-    Project, RawIssue, RawLinkedPr, RepoRef, ReviewDecision, Viewer,
+    parse_closing_issues, parse_related_issues, AppAction, AppError, AppResult, IssueStamp,
+    LinkedPrRef, PrStatus, Project, RawIssue, RawLinkedPr, RepoRef, ReviewDecision, Viewer,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
@@ -60,8 +60,9 @@ query IssueIndex($owner: String!, $name: String!, $cursor: String) {
 
 /// The open-PR **Sweep**: every currently-open Pull Request of the repo with the
 /// facts a Linked PR renders (spine, Decorations) and the issue numbers it
-/// closes, plus the title and body a PR with no closing reference relates to an
-/// issue through.
+/// closes, plus the title and body a PR with no closing reference names its
+/// issues in. Rereading the body on every sweep is what shows a keyword added
+/// after the PR opened.
 ///
 /// `states: [OPEN]` is what makes "a Linked PR is an *open* PR" true by
 /// construction: a merged or closed PR is simply not in the answer, so nothing
@@ -1366,9 +1367,11 @@ fn review_decision(raw: Option<&str>) -> Option<ReviewDecision> {
 
 /// Project one swept pull request node into a [`RawLinkedPr`]: the facts a
 /// `pr #n @u` badge renders (spine + Decorations) plus the issue numbers it
-/// closes. A PR with no closing reference is joined through the issues its
-/// title or body says it relates to instead (the same native-first, prose
-/// fallback as blockers), so "related to #N" still reaches that Slice's card.
+/// closes. A PR with no closing reference is joined through its prose instead
+/// (the same native-first, prose fallback as blockers): the closing keywords in
+/// its body, since GitHub reports none for a **Stacked PR**, else the issues its
+/// title or body says it relates to, so "related to #N" still reaches that
+/// Slice's card.
 ///
 /// No open/closed filtering happens here, and none is needed: the sweep asks
 /// for `states: [OPEN]`, so a merged or closed PR never reaches this function.
@@ -1381,12 +1384,12 @@ fn map_linked_pr(node: OpenPrNode) -> RawLinkedPr {
         .into_iter()
         .map(|issue| issue.number)
         .collect();
+    let body = node.body.as_deref().unwrap_or_default();
     if closes.is_empty() {
-        closes = parse_related_issues(&format!(
-            "{}\n{}",
-            node.title,
-            node.body.as_deref().unwrap_or_default()
-        ));
+        closes = parse_closing_issues(body);
+    }
+    if closes.is_empty() {
+        closes = parse_related_issues(&format!("{}\n{body}", node.title));
     }
 
     RawLinkedPr {

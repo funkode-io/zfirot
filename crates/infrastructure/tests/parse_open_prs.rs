@@ -239,3 +239,67 @@ fn a_prs_title_and_body_relate_to_issues_independently() {
         assert_eq!(prs[0].closes, expected, "{name}");
     }
 }
+
+/// `majidalfuttaim/dxp-data-loom`, 2026-11-09: GitHub fills closing references
+/// only for a PR targeting the default branch, so the PR stacked on another one
+/// reports none, and only its body says which issue it closes.
+#[test]
+fn a_stacked_pr_with_no_closing_reference_links_through_its_closing_keyword() {
+    let (prs, _) = parse_open_prs_response(&page_with_pr(2236, "- Closes #2217", &[]))
+        .expect("a clean response should parse");
+
+    let board = classify(&[slice_issue(2217)], &prs);
+
+    let on_card: Vec<u64> = board.slices[0]
+        .linked_prs
+        .iter()
+        .map(|pr| pr.number)
+        .collect();
+    assert_eq!(on_card, vec![2236]);
+    assert!(board.unlinked_prs.is_empty());
+}
+
+#[test]
+fn a_closing_keyword_with_a_colon_links_the_pr() {
+    let (prs, _) = parse_open_prs_response(&page_with_pr(2236, "- Closes: #2217", &[]))
+        .expect("a clean response should parse");
+
+    assert_eq!(prs[0].closes, vec![2217]);
+}
+
+#[test]
+fn a_closing_keyword_outranks_a_related_mention_when_github_reports_neither() {
+    let (prs, _) = parse_open_prs_response(&page_with_pr(90, "Part of #2\n\nCloses #1", &[]))
+        .expect("a clean response should parse");
+
+    assert_eq!(
+        prs[0].closes,
+        vec![1],
+        "a mention must not claim a second Slice from a PR that names its own"
+    );
+}
+
+#[test]
+fn a_closing_keyword_in_the_title_links_nothing() {
+    let page = page_with_pr(90, "", &[]).replace("PR 90", "Fix #12 crash");
+
+    let (prs, _) = parse_open_prs_response(&page).expect("a clean response should parse");
+
+    assert!(
+        prs[0].closes.is_empty(),
+        "GitHub reads closing keywords from the body alone"
+    );
+}
+
+/// Every sweep rereads the body, so the 15-second PR refresh sees an edit: the
+/// issue's own `updatedAt` never would.
+#[test]
+fn the_next_sweep_after_a_body_edit_moves_the_link() {
+    let (opened, _) = parse_open_prs_response(&page_with_pr(2235, "Part of #2217", &[]))
+        .expect("a clean response should parse");
+    let (edited, _) = parse_open_prs_response(&page_with_pr(2235, "Closes #2237", &[]))
+        .expect("a clean response should parse");
+
+    assert_eq!(opened[0].closes, vec![2217]);
+    assert_eq!(edited[0].closes, vec![2237]);
+}

@@ -1,10 +1,13 @@
 //! Pure parsing of the `## Parent` / `## Blocked by` prose sections that the
-//! planning skills emit in an issue body.
+//! planning skills emit in an issue body, and of the issues a pull request's
+//! prose names.
 //!
 //! This is the fallback used when GitHub's native sub-issue (`parent`) and
 //! dependency (`blockedBy`) links are absent: the relationships still exist as
 //! prose in the body, so the board parses them here and resolves the referenced
 //! numbers against the issues it already fetched.
+
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 /// Issue references parsed from an issue body's relationship sections.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +70,28 @@ const RELATION_PHRASES: [&str; 8] = [
     "ref",
 ];
 
+/// GitHub's closing keywords, longest first so `closes` wins over `close` at the
+/// same position.
+const CLOSING_KEYWORDS: [&str; 9] = [
+    "resolves", "resolved", "resolve", "closes", "closed", "close", "fixes", "fixed", "fix",
+];
+
+/// Parse the issues a pull request's body says it closes: `Closes #12`,
+/// `- Fixes: #12`, `resolved #12, #13`.
+///
+/// GitHub fills in closing references only for a PR targeting the default branch,
+/// so a **Stacked PR** reports none until the PR beneath it merges, and the body
+/// is the only place its intent is written. Callers read a PR's closing
+/// references first and use this as the fallback when there are none.
+///
+/// The matching rules are [`parse_related_issues`]'s, tolerating a colon, and only
+/// same-repo `#N` forms count. Like GitHub, this skips what a reader of the PR
+/// never sees as prose: an HTML comment (a PR template's `<!-- Closes #123 -->`)
+/// or code.
+pub fn parse_closing_issues(body: &str) -> Vec<u64> {
+    references_after_phrases(&rendered_prose(body), &CLOSING_KEYWORDS)
+}
+
 /// Parse the issues a pull request says it relates to without closing them:
 /// `Related to #12`, `relates to issue 12`, `Part of #12`, `Refs: #12, #13`.
 ///
@@ -81,6 +106,38 @@ const RELATION_PHRASES: [&str; 8] = [
 /// `owner/repo#12` or a URL may name another repository's issue. Numbers are
 /// de-duplicated, in order.
 pub fn parse_related_issues(text: &str) -> Vec<u64> {
+    references_after_phrases(text, &RELATION_PHRASES)
+}
+
+/// The text a reader of `body` sees as prose: Markdown rendered by a CommonMark
+/// parser, without HTML, code or link text, since `[#12](url)` may name another
+/// repository's issue. Each block and each hidden span ends its own line, since a
+/// phrase and its references must share one, so text either side of a span never
+/// joins into a keyword or a reference.
+fn rendered_prose(body: &str) -> String {
+    let mut prose = String::new();
+    let mut hidden = 0_usize;
+    for event in Parser::new(body) {
+        match event {
+            Event::Start(Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. }) => hidden += 1,
+            Event::End(TagEnd::CodeBlock | TagEnd::Link | TagEnd::Image) => {
+                hidden = hidden.saturating_sub(1);
+                prose.push('\n');
+            }
+            Event::Text(text) if hidden == 0 => prose.push_str(&text),
+            Event::Code(_) | Event::InlineHtml(_) => prose.push('\n'),
+            // Inline tags stay on their line: `**Closes:** #12`.
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {}
+            Event::SoftBreak | Event::HardBreak | Event::End(_) => prose.push('\n'),
+            _ => {}
+        }
+    }
+    prose
+}
+
+/// Every issue number a phrase of `phrases` (longest first) introduces in `text`,
+/// de-duplicated in order. See [`parse_related_issues`] for what counts.
+fn references_after_phrases(text: &str, phrases: &[&str]) -> Vec<u64> {
     // ASCII lowercasing keeps every byte offset valid for slicing.
     let lowered = text.to_ascii_lowercase();
     let mut numbers = Vec::new();
@@ -88,7 +145,7 @@ pub fn parse_related_issues(text: &str) -> Vec<u64> {
     for line in lowered.lines() {
         for (start, _) in line.char_indices() {
             let rest = &line[start..];
-            let Some(phrase) = RELATION_PHRASES.iter().find(|p| rest.starts_with(**p)) else {
+            let Some(phrase) = phrases.iter().find(|p| rest.starts_with(**p)) else {
                 continue;
             };
             let before = &line[..start];
@@ -336,6 +393,108 @@ mod tests {
     }
 
     #[test]
+    fn parses_issues_a_pr_body_says_it_closes() {
+        let cases: [(&str, &str, Vec<u64>); 40] = [
+            ("the reported wording", "- Closes #2217", vec![2217]),
+            ("a colon", "- Closes: #2217", vec![2217]),
+            ("any case", "FIXES #12.", vec![12]),
+            ("close", "close #12", vec![12]),
+            ("closed", "closed #12", vec![12]),
+            ("fix", "fix #12", vec![12]),
+            ("fixed", "fixed #12", vec![12]),
+            ("resolve", "resolve #12", vec![12]),
+            ("resolves", "resolves #12", vec![12]),
+            ("resolved", "resolved #12", vec![12]),
+            ("bold", "**Closes:** #12", vec![12]),
+            ("a list", "Closes #1, #2 and #3", vec![1, 2, 3]),
+            (
+                "several lines",
+                "Closes #2\n\nFixes #1\nFixes #2",
+                vec![2, 1],
+            ),
+            ("a word beginning with one", "fixture #12", vec![]),
+            ("a word ending in one", "prefix #12", vec![]),
+            ("a hyphenated word", "hot-fix #12", vec![]),
+            ("negated", "This does not close #12", vec![]),
+            ("another repository", "Closes other/repo#12", vec![]),
+            ("a relation is no closing keyword", "Part of #12", vec![]),
+            ("a bare mention", "Follow-up to #12", vec![]),
+            ("inline code", "Use `Closes #12` to link", vec![]),
+            ("a keyword split by inline code", "Fi`x`xes #12", vec![]),
+            ("inline code before a reference", "Closes `x` #12", vec![]),
+            (
+                "a keyword split by a link",
+                "Fi[x](https://example.com)xes #12",
+                vec![],
+            ),
+            (
+                "a reference split by a link",
+                "Closes [other/repo](https://github.com/other/repo)#12",
+                vec![],
+            ),
+            (
+                "a reference split by an image",
+                "Closes ![x](a.png)#12",
+                vec![],
+            ),
+            (
+                "a link to another repository",
+                "Closes [#12](https://github.com/other/repo/issues/12)",
+                vec![],
+            ),
+            (
+                "a backtick inside inline code",
+                "``a ` Closes #12`` b",
+                vec![],
+            ),
+            ("inline code over lines", "`a\nCloses #12\nb`", vec![]),
+            ("an unmatched backtick", "a ` b\n\nCloses #4", vec![4]),
+            (
+                "an unmatched backtick on the line",
+                "a ` Closes #4",
+                vec![4],
+            ),
+            (
+                "a comment in inline code",
+                "`<!--` then\n\nCloses #4",
+                vec![4],
+            ),
+            (
+                "a comment in a fence",
+                "```\n<!--\n```\n\nCloses #4",
+                vec![4],
+            ),
+            (
+                "a longer fence",
+                "````\n```\nCloses #12\n````\nCloses #4",
+                vec![4],
+            ),
+            (
+                "an indented block",
+                "Text\n\n    Closes #12\n\nCloses #4",
+                vec![4],
+            ),
+            ("a comment", "<!-- Closes #123 -->\nCloses #4", vec![4]),
+            (
+                "a keyword split by a comment",
+                "Fi<!-- x -->xes #12",
+                vec![],
+            ),
+            (
+                "a reference split by a comment",
+                "Closes <!-- x -->#12",
+                vec![],
+            ),
+            ("a comment over lines", "<!--\nCloses #123\n-->", vec![]),
+            ("a fenced block", "```\nCloses #12\n```\nCloses #4", vec![4]),
+        ];
+
+        for (name, body, expected) in cases {
+            assert_eq!(parse_closing_issues(body), expected, "{name}");
+        }
+    }
+
+    #[test]
     fn parses_issues_a_pr_relates_to_without_closing_them() {
         let cases: [(&str, &str, Vec<u64>); 34] = [
             ("the reported wording", "Related to #12", vec![12]),
@@ -355,11 +514,7 @@ mod tests {
                 "Follow-up to #12, see #13",
                 vec![],
             ),
-            (
-                "a closing keyword is GitHub's to read",
-                "Closes #12",
-                vec![],
-            ),
+            ("a closing keyword is no relation", "Closes #12", vec![]),
             ("inside another word", "Unrelated to #12, prefs #13", vec![]),
             ("negated", "This is not related to #12", vec![]),
             ("another repository", "Related to other/repo#12", vec![]),
