@@ -28,7 +28,7 @@ use crate::state::{
     confirm_classification, hot_refresh_board, last_opened, open_and_track_project, open_board,
     open_project, reconcile_board, refresh_board, refresh_projects, refresh_recent_projects,
     remember_theme_preference, remember_view_mode, secure_store, sign_out, theme_preference,
-    tracked_repos, untrack_repo, view_mode, viewer as fetch_viewer,
+    tracked_repos, untrack_repo, veto_suggested_prd, view_mode, viewer as fetch_viewer,
 };
 
 /// Compiled Tailwind + daisyUI + Iconify stylesheet, bundled as an asset.
@@ -807,6 +807,26 @@ pub fn App() -> Element {
         },
     );
 
+    // The negative counterpart of `on_confirm`, sharing its error banner.
+    let on_veto = use_callback(move |number: u64| {
+        let open_repo = match view.read_unchecked().as_ref() {
+            Some(View::Board { repo, .. }) => Some(repo.clone()),
+            _ => None,
+        };
+        if let Some(repo) = open_repo {
+            spawn(async move {
+                match veto_suggested_prd(&repo, number).await {
+                    Ok(()) => {
+                        confirm_error.set(None);
+                        reload += 1;
+                    }
+                    Err(error) => confirm_error
+                        .set(feature_action_error(error, token_error, nav, reload).await),
+                }
+            });
+        }
+    });
+
     // Sign out: remove the token and account-scoped local state, then
     // re-resolve the view — `resolve_view` finds no token and routes to the
     // paste-token screen. Session-only signals (the fetched Viewer, the
@@ -1017,6 +1037,8 @@ pub fn App() -> Element {
                             slices: board.slices.clone(),
                             graph_view: graph_view(),
                             on_assign,
+                            on_confirm,
+                            on_veto,
                         }
                         if !board.unlinked_prs.is_empty() {
                             UnlinkedPrs { prs: board.unlinked_prs.clone() }
@@ -1739,7 +1761,13 @@ fn ZfirotLogo() -> Element {
 }
 
 #[component]
-fn Board(slices: Vec<Slice>, graph_view: bool, on_assign: EventHandler<u64>) -> Element {
+fn Board(
+    slices: Vec<Slice>,
+    graph_view: bool,
+    on_assign: EventHandler<u64>,
+    on_confirm: EventHandler<(u64, IssueClassification)>,
+    on_veto: EventHandler<u64>,
+) -> Element {
     let lanes = group_into_lanes(slices);
     // The board-wide "highlighted issue", shared across lanes so a dependency
     // badge can highlight its referenced card in any column. `None` when nothing
@@ -1761,6 +1789,8 @@ fn Board(slices: Vec<Slice>, graph_view: bool, on_assign: EventHandler<u64>) -> 
                     slices: lane.slices,
                     graph_view,
                     on_assign,
+                    on_confirm,
+                    on_veto,
                     highlighted: highlighted(),
                     on_highlight,
                 }

@@ -16,8 +16,8 @@ applyTo: "crates/presentation/**/*.rs"
   "No PRD" lane. The grouping is a pure domain function
   (`domain::group_into_lanes`); the per-card "PRD: …" tag is dropped because the
   lane header now carries the PRD. Lanes headed by a confident PRD come first,
-  then those headed by a Suggested PRD (marked unconfirmed), each in first-seen
-  order; Done Slices and empty lanes are omitted.
+  then those headed by a Suggested PRD (marked unconfirmed, offering Confirm PRD
+  and Veto), each in first-seen order; Done Slices and empty lanes are omitted.
 - Styling: daisyUI (Tailwind). Icons: Iconify (Tailwind integration), using the
   **Lucide** set via the `@iconify/tailwind4` plugin — reference icons as utility
   classes, e.g. `icon-[lucide--layout-dashboard]`.

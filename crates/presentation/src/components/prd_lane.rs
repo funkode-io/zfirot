@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use domain::{
-    derive_lane_graph, order_blocked_column, LaneGraphEdge, PrdLane as DomainPrdLane, PrdRef,
-    Slice, SliceState,
+    derive_lane_graph, order_blocked_column, IssueClassification, LaneGraphEdge,
+    PrdLane as DomainPrdLane, PrdRef, Slice, SliceState,
 };
 
 use super::{state_badge_class, state_label, BoardColumn, SliceCard};
@@ -17,6 +17,10 @@ use super::{state_badge_class, state_label, BoardColumn, SliceCard};
 /// per-state count badges (shown only while collapsed, via `group-has-[:checked]:hidden`);
 /// the state name is shown on hover via each badge's `title`.
 ///
+/// A Suggested PRD's header also offers **Confirm** and **Veto**, emitted through
+/// `on_confirm` and `on_veto` with no dialog: each costs one label on GitHub, and
+/// removing that label undoes it.
+///
 /// `highlighted` / `on_highlight` carry the board-wide "highlighted issue" so a
 /// dependency badge can highlight its referenced card even in another lane.
 #[component]
@@ -25,6 +29,8 @@ pub fn PrdLane(
     slices: Vec<Slice>,
     graph_view: bool,
     on_assign: EventHandler<u64>,
+    on_confirm: EventHandler<(u64, IssueClassification)>,
+    on_veto: EventHandler<u64>,
     highlighted: Option<u64>,
     on_highlight: EventHandler<Option<u64>>,
 ) -> Element {
@@ -89,6 +95,28 @@ pub fn PrdLane(
                                 class: "badge badge-sm badge-warning badge-outline shrink-0",
                                 title: "Reads like a PRD by its headings, but has no \"prd\" label",
                                 "Unconfirmed"
+                            }
+                            // `relative z-10` and `stop_propagation` as on the link
+                            // above, so a click decides without toggling the lane.
+                            button {
+                                class: "btn btn-xs btn-primary shrink-0 relative z-10",
+                                title: "Add the \"prd\" label",
+                                "aria-label": "Confirm #{prd.number} as a PRD",
+                                onclick: move |e: Event<MouseData>| {
+                                    e.stop_propagation();
+                                    on_confirm.call((prd.number, IssueClassification::SuggestedPrd));
+                                },
+                                "Confirm PRD"
+                            }
+                            button {
+                                class: "btn btn-xs btn-ghost shrink-0 relative z-10",
+                                title: "Add the \"not-a-prd\" label. Remove it on GitHub to undo.",
+                                "aria-label": "Veto #{prd.number} as a PRD",
+                                onclick: move |e: Event<MouseData>| {
+                                    e.stop_propagation();
+                                    on_veto.call(prd.number);
+                                },
+                                "Veto"
                             }
                         }
                         span { class: "badge badge-sm badge-neutral shrink-0", "{slices_pill_label(total_slices)}" }
@@ -292,5 +320,128 @@ fn GraphLane(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+
+    use dioxus::core::{ElementId, Event as CoreEvent, Mutation, Mutations, VirtualDom};
+    use dioxus::html::{
+        set_event_converter, PlatformEventData, SerializedHtmlEventConverter, SerializedMouseData,
+    };
+
+    use super::*;
+
+    const LANE_PRD: u64 = 12;
+
+    #[derive(Debug, PartialEq)]
+    enum Decision {
+        Confirmed(u64, IssueClassification),
+        Vetoed(u64),
+    }
+
+    #[derive(Clone)]
+    struct Decisions(Arc<Mutex<Vec<Decision>>>);
+
+    impl PartialEq for Decisions {
+        fn eq(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.0, &other.0)
+        }
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct HarnessProps {
+        prd: Option<PrdRef>,
+        decisions: Decisions,
+    }
+
+    /// A Lane with no Slices, so every click listener in it belongs to its header.
+    #[allow(non_snake_case)]
+    fn Harness(props: HarnessProps) -> Element {
+        let on_confirm = props.decisions.clone();
+        let on_veto = props.decisions;
+        rsx! {
+            PrdLane {
+                prd: props.prd,
+                slices: Vec::new(),
+                graph_view: false,
+                on_assign: |_| {},
+                on_confirm: move |(number, classification)| {
+                    on_confirm.0.lock().unwrap().push(Decision::Confirmed(number, classification));
+                },
+                on_veto: move |number| {
+                    on_veto.0.lock().unwrap().push(Decision::Vetoed(number));
+                },
+                highlighted: None,
+                on_highlight: |_| {},
+            }
+        }
+    }
+
+    /// Render a Lane with fake props and click everything clickable in it, once
+    /// each, returning the decisions it emitted.
+    fn decisions_from_clicking_everything(prd: Option<PrdRef>) -> Vec<Decision> {
+        set_event_converter(Box::new(SerializedHtmlEventConverter));
+        let decisions = Decisions(Arc::new(Mutex::new(Vec::new())));
+        let mut dom = VirtualDom::new_with_props(
+            Harness,
+            HarnessProps {
+                prd,
+                decisions: decisions.clone(),
+            },
+        );
+        let mut mutations = Mutations::default();
+        dom.rebuild(&mut mutations);
+
+        let clickable: Vec<ElementId> = mutations
+            .edits
+            .iter()
+            .filter_map(|edit| match edit {
+                Mutation::NewEventListener { name, id } if name == "click" => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in clickable {
+            let data = PlatformEventData::new(Box::new(SerializedMouseData::default()));
+            let event = CoreEvent::new(Rc::new(data) as Rc<dyn Any>, true);
+            dom.runtime().handle_event("click", event, id);
+        }
+
+        let emitted = std::mem::take(&mut *decisions.0.lock().unwrap());
+        emitted
+    }
+
+    fn prd(suggested: bool) -> PrdRef {
+        PrdRef {
+            number: LANE_PRD,
+            title: "A plan".to_string(),
+            url: "https://github.com/funkode-io/zfirot/issues/12".to_string(),
+            suggested,
+        }
+    }
+
+    #[test]
+    fn a_suggested_lane_header_offers_confirm_and_veto() {
+        assert_eq!(
+            decisions_from_clicking_everything(Some(prd(true))),
+            vec![
+                Decision::Confirmed(LANE_PRD, IssueClassification::SuggestedPrd),
+                Decision::Vetoed(LANE_PRD),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_confident_lane_header_offers_neither() {
+        assert_eq!(decisions_from_clicking_everything(Some(prd(false))), vec![]);
+    }
+
+    #[test]
+    fn a_no_prd_lane_header_offers_neither() {
+        assert_eq!(decisions_from_clicking_everything(None), vec![]);
     }
 }

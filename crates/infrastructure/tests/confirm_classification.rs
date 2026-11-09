@@ -2,7 +2,8 @@
 //! ports that record the labelling (success) and reject it (failure), so both
 //! the happy path and the "surface a clear error, leave the issue unchanged"
 //! path are exercised without GitHub access. A classification with nothing to
-//! confirm is rejected before the port is ever called.
+//! confirm is rejected before the port is ever called. A Veto runs the same way,
+//! adding the `not-a-prd` label.
 
 use std::sync::{Arc, Mutex};
 
@@ -167,4 +168,44 @@ async fn confirm_surfaces_a_clear_error_with_context() {
         diagnostic.contains("label=slice"),
         "error should carry the label context: {diagnostic}"
     );
+}
+
+#[tokio::test]
+async fn vetoing_a_suggested_prd_adds_the_not_a_prd_label() {
+    let port = Arc::new(RecordingPort::default());
+    let service = BoardService::new(port.clone());
+    let repo = RepoRef::new("funkode-io", "zfirot");
+
+    service
+        .veto_suggested_prd(&repo, 42)
+        .await
+        .expect("the recording port should accept the labelling");
+
+    let labelled = port.labelled.lock().unwrap().clone();
+    assert_eq!(labelled, vec![(42, "not-a-prd".to_string())]);
+}
+
+#[tokio::test]
+async fn veto_surfaces_an_under_scoped_token_with_context() {
+    let service = BoardService::new(FailingPort);
+    let repo = RepoRef::new("funkode-io", "zfirot");
+
+    let error = service
+        .veto_suggested_prd(&repo, 7)
+        .await
+        .expect_err("a rejected labelling should surface an error");
+
+    // `Forbidden` is what the board routes to its under-scoped-token banner.
+    assert_eq!(error.kind(), AppErrorKind::Forbidden);
+    assert_eq!(
+        error.to_string(),
+        "The token lacks permission to label this issue"
+    );
+    let diagnostic = format!("{error:?}");
+    for context in ["repo=funkode-io/zfirot", "issue=7", "label=not-a-prd"] {
+        assert!(
+            diagnostic.contains(context),
+            "error should carry {context}: {diagnostic}"
+        );
+    }
 }

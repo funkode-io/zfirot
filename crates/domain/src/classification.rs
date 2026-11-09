@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+/// The label recording a **Veto**: the app guessed this issue was a PRD, and the
+/// user said it is not. The negative counterpart of Confirm's `prd`.
+pub const NOT_A_PRD_LABEL: &str = "not-a-prd";
+
 /// How an open GitHub issue has been classified by the two-tier strategy.
 ///
 /// - **Tier 1 (confident, automatic):** `prd` label → [`IssueClassification::Prd`];
@@ -94,11 +98,16 @@ pub struct RawIssue {
 /// 1. **Tier 1 – confident:** `prd` label → [`IssueClassification::Prd`];
 ///    `is_native_child_of_prd` or `slice`/`ready-for-agent` label →
 ///    [`IssueClassification::Slice`].
-/// 2. **Tier 2 – heuristic:** score the body against planning-skill template
+///    An explicit `prd` wins over [`NOT_A_PRD_LABEL`], which only suppresses the
+///    suggestion below.
+/// 2. **Veto:** a [`NOT_A_PRD_LABEL`] label → [`IssueClassification::Unclassified`],
+///    so the app stops guessing about the issue. Removing the label brings the
+///    suggestion back.
+/// 3. **Tier 2 – heuristic:** score the body against planning-skill template
 ///    headings: *Problem Statement* + *User Stories* → [`IssueClassification::SuggestedPrd`];
 ///    *What to build* + (*Acceptance criteria* | *Blocked by* | *Parent*) →
 ///    [`IssueClassification::SuggestedSlice`].
-/// 3. **Tier 3:** [`IssueClassification::Unclassified`].
+/// 4. **Tier 3:** [`IssueClassification::Unclassified`].
 pub fn classify_issue(raw: &RawIssue) -> IssueClassification {
     // Tier 1: confident, based on labels or native parent link.
     if raw.labels.iter().any(|l| l == "prd") {
@@ -111,6 +120,11 @@ pub fn classify_issue(raw: &RawIssue) -> IssueClassification {
             .any(|l| l == "slice" || l == "ready-for-agent")
     {
         return IssueClassification::Slice;
+    }
+
+    // A Veto is checked before the heuristic it overrides.
+    if raw.labels.iter().any(|l| l == NOT_A_PRD_LABEL) {
+        return IssueClassification::Unclassified;
     }
 
     // Tier 2: heuristic, scored from template headings in the issue body.

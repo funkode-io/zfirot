@@ -23,6 +23,7 @@ mod viewer;
 pub use classification::{
     classify_issue, classify_on_board, has_unreferenced_blocked_by, lane_parent_of, parent_of,
     parse_blockers_from_body, parse_parent_from_body, IssueClassification, RawIssue,
+    NOT_A_PRD_LABEL,
 };
 pub use credential_failure::CredentialFailure;
 pub use error::{AppAction, AppError, AppErrorKind, AppResult};

@@ -104,6 +104,14 @@ impl AppState {
             .confirm_classification(&self.repo, issue_number, classification)
             .await
     }
+
+    /// Veto a Suggested PRD by adding the `not-a-prd` label on GitHub. The caller
+    /// re-polls the board on success; the board is left unchanged on failure.
+    pub async fn veto_suggested_prd(&self, issue_number: u64) -> AppAction {
+        BoardService::new(self.port.clone())
+            .veto_suggested_prd(&self.repo, issue_number)
+            .await
+    }
 }
 
 /// The recent-projects list cached on the last successful fetch, for an instant
@@ -275,6 +283,17 @@ pub async fn confirm_classification(
     let token = AuthService::new(secure_store()).require_token().await?;
     AppState::from_token(&token, repo.clone())?
         .confirm_classification(issue_number, classification)
+        .await
+}
+
+/// Veto a Suggested PRD by adding the `not-a-prd` label to the issue on GitHub.
+/// Reads the stored token, wires the live adapter scoped to `repo`, and runs the
+/// veto use-case; the board is re-polled by the caller on success and left
+/// unchanged on failure.
+pub async fn veto_suggested_prd(repo: &RepoRef, issue_number: u64) -> AppAction {
+    let token = AuthService::new(secure_store()).require_token().await?;
+    AppState::from_token(&token, repo.clone())?
+        .veto_suggested_prd(issue_number)
         .await
 }
 

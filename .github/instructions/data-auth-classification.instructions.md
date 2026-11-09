@@ -54,6 +54,9 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
   template headings (Problem Statement + User Stories -> PRD; What to build +
   Acceptance criteria / Blocked by / Parent -> Slice), surfaced with a
   "looks like a PRD/Slice — confirm?" badge and a confirm-and-add-label action.
+- Veto: a `not-a-prd` label is checked after tier 1 and before tier 2, so an issue
+  also carrying `prd` stays a PRD and any other is Unclassified. It is added from a
+  suggested Lane's header and undone by removing it on GitHub; nothing is stored locally.
 - Tier 3: no match -> Unclassified, shown inline in "other open issues".
 - Second pass (ADR 0007): an issue left at Suggested Slice or tier 3 becomes a Slice when its
   Parent (native, else prose) is an open PRD or Suggested PRD, or is closed or
@@ -62,4 +65,5 @@ applyTo: "crates/{infrastructure,application}/**/*.rs"
 - A Suggested PRD heads a Lane marked unconfirmed. Its evidence is its headings,
   so editing them away drops the Lane: a prose `## Parent` names a Lane only while
   it resolves to a PRD or Suggested PRD. A labelled Slice with a native link keeps
-  its Lane whatever the parent is.
+  its Lane whatever the parent is. A Veto drops a Lane the same way. A Suggested PRD
+  heading a Lane is settled from its header, so only one with no Lane is in the tray.
