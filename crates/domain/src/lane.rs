@@ -33,13 +33,14 @@ pub struct LaneGraph {
     pub rail: Vec<Slice>,
 }
 
-/// Group Slices into one lane per PRD, in first-seen order, with a trailing
+/// Group Slices into one lane per PRD, confident before suggested, with a trailing
 /// "No PRD" lane for Slices with no parent PRD.
 ///
 /// A pure derivation:
 /// - `Done` Slices are excluded (they are hidden from the active board).
-/// - PRD lanes appear in the order their first Slice is seen; the "No PRD" lane,
-///   when present, always comes last.
+/// - Lanes headed by a confident PRD come first, then those headed by a Suggested
+///   PRD, each group in the order its first Slice is seen; the "No PRD" lane, when
+///   present, always comes last.
 /// - Lanes left empty after excluding `Done` are dropped, so an all-`Done` PRD
 ///   produces no lane.
 pub fn group_into_lanes(slices: impl IntoIterator<Item = Slice>) -> Vec<PrdLane> {
@@ -75,6 +76,8 @@ pub fn group_into_lanes(slices: impl IntoIterator<Item = Slice>) -> Vec<PrdLane>
             slices: slices_by_number.remove(&number).unwrap_or_default(),
         })
         .collect();
+    // A stable sort, so each group keeps its first-seen order.
+    lanes.sort_by_key(|lane| lane.prd.as_ref().is_some_and(|prd| prd.suggested));
 
     if !no_prd.is_empty() {
         lanes.push(PrdLane {
@@ -204,6 +207,7 @@ mod tests {
             number,
             title: format!("PRD {number}"),
             url: format!("https://github.com/funkode-io/zfirot/issues/{number}"),
+            suggested: false,
         }
     }
 
@@ -289,6 +293,31 @@ mod tests {
                 (None, vec![11]),
             ]
         );
+    }
+
+    /// Confident Lanes come before suggested ones whatever order their first
+    /// Slices were seen in; each group keeps first-seen order, and "No PRD" stays
+    /// last.
+    #[test]
+    fn suggested_lanes_follow_confident_ones() {
+        let suggested = |number| PrdRef {
+            suggested: true,
+            ..prd(number)
+        };
+        let input = vec![
+            slice(11, None, SliceState::Ready),
+            slice(5, Some(suggested(20)), SliceState::Ready),
+            slice(4, Some(prd(10)), SliceState::Ready),
+            slice(6, Some(suggested(2)), SliceState::Ready),
+            slice(3, Some(prd(1)), SliceState::Ready),
+        ];
+
+        let order: Vec<Option<u64>> = group_into_lanes(input)
+            .iter()
+            .map(|lane| lane.prd.as_ref().map(|p| p.number))
+            .collect();
+
+        assert_eq!(order, vec![Some(10), Some(1), Some(20), Some(2), None]);
     }
 
     #[test]

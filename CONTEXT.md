@@ -241,7 +241,8 @@ A **Hydrate** triggered by a **Sweep** result instead of by a clock. Any change
 to the open-PR set immediately hydrates the issues those PRs close: a PR merges,
 its Slice reads closed, and every Slice it was blocking becomes **Ready** in the
 same repaint — no extra fetch, because blocker openness is derived from what the
-board already holds.
+board already holds. GitHub closes those issues a moment after the merge, so one
+still reading open is hydrated once more on the next hot tick.
 _Avoid_: chain, trigger, ripple
 
 **Freshness contract**:

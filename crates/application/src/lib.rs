@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    classify_issue, classify_on_board, has_unreferenced_blocked_by, parent_of,
+    classify_issue, classify_on_board, has_unreferenced_blocked_by, lane_parent_of,
     parse_blockers_from_body, resolve_unblocks, AppAction, AppError, AppResult, BoardViewMode,
     DependencyRef, GitHubToken, IssueClassification, IssueStamp, LinkedPrRef, Prd, PrdRef, Project,
     RawIssue, RawLinkedPr, RawSlice, RepoRef, Slice, ThemePreference, Viewer,
@@ -168,7 +168,8 @@ pub struct OtherIssue {
 ///   ready for the Kanban columns.
 /// - `prds`   — tier-1 confirmed PRDs (display is deferred to a later slice).
 /// - `other`  — suggested and unclassified issues with no promoting Parent, for
-///   the "other open issues" bucket.
+///   the "other open issues" bucket. A Suggested PRD stays here even while it
+///   heads a Lane, since this is where it can be confirmed.
 /// - `unlinked_prs` — **Unlinked PRs**: open PRs on no Slice card, in sweep order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedBoard {
@@ -184,8 +185,9 @@ pub struct ClassifiedBoard {
 /// another version fails to deserialize, so the cache adapter discards it and
 /// the board cold-loads instead of being mis-read (ADR 0008). Version 2 is the
 /// split into two independently-owned collections — issues and Linked PRs.
-/// Version 3 stamps each issue with the `updatedAt` an index **Sweep** compares.
-const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+/// Version 3 adds the issues still awaiting their close. Version 4 stamps each
+/// issue with the `updatedAt` an index **Sweep** compares.
+const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 
 /// Reject a stored snapshot written by another version of the format, so an
 /// older shape is discarded rather than silently half-read.
@@ -218,6 +220,12 @@ pub struct BoardSnapshot {
     raw_issues: Vec<RawIssue>,
     /// Every open Linked PR of the repo, as the last sweep reported it.
     linked_prs: Vec<RawLinkedPr>,
+    /// The issues a **Cascade** read as still open after the PR closing them left
+    /// the sweep, and that the next hot refresh reads once more. A merged PR leaves
+    /// the sweep at once but GitHub closes its issues a moment later (1-3s,
+    /// measured), so a sweep landing in that gap reads too early, and the sweep
+    /// after it looks unchanged. Bookkeeping, not a board fact: it never repaints.
+    awaiting_close: Vec<u64>,
     /// When the issue side last read GitHub, captured at fetch start. Only ever
     /// shown to the user: what needs re-reading is decided by each issue's own
     /// stamp, not by this.
@@ -234,6 +242,7 @@ impl BoardSnapshot {
             version: SNAPSHOT_FORMAT_VERSION,
             raw_issues,
             linked_prs,
+            awaiting_close: Vec::new(),
             fetched_at,
         }
     }
@@ -249,23 +258,32 @@ impl BoardSnapshot {
     /// This snapshot with its **issue** collection replaced — the write of the
     /// structural and safety-net paths, which own the issues and nothing else.
     fn with_issues(&self, raw_issues: Vec<RawIssue>, fetched_at: DateTime<Utc>) -> Self {
-        Self::new(raw_issues, self.linked_prs.clone(), fetched_at)
+        Self {
+            awaiting_close: self.awaiting_close.clone(),
+            ..Self::new(raw_issues, self.linked_prs.clone(), fetched_at)
+        }
     }
 
     /// This snapshot with its **Linked PR** collection replaced — the hot path's
     /// own write. `fetched_at` does not move, since it sweeps no issues.
     fn with_linked_prs(&self, linked_prs: Vec<RawLinkedPr>) -> Self {
-        Self::new(self.raw_issues.clone(), linked_prs, self.fetched_at)
+        Self {
+            awaiting_close: self.awaiting_close.clone(),
+            ..Self::new(self.raw_issues.clone(), linked_prs, self.fetched_at)
+        }
     }
 
     /// This snapshot with a **Cascade**'s answer written over the issues it asked
     /// for. `fetched_at` stays put: those few issues say nothing about the rest.
     fn with_hydrated_issues(&self, requested: &[u64], hydrated: &[RawIssue]) -> Self {
-        Self::new(
-            merge_hydrated_issues(&self.raw_issues, requested, hydrated),
-            self.linked_prs.clone(),
-            self.fetched_at,
-        )
+        Self {
+            awaiting_close: self.awaiting_close.clone(),
+            ..Self::new(
+                merge_hydrated_issues(&self.raw_issues, requested, hydrated),
+                self.linked_prs.clone(),
+                self.fetched_at,
+            )
+        }
     }
 
     /// The board this snapshot paints: the pure join of its two collections.
@@ -406,6 +424,35 @@ fn cascade_issues(previous: &[RawLinkedPr], swept: &[RawLinkedPr]) -> Vec<u64> {
         .map(|(_, issue)| *issue)
         .collect();
     moved.into_iter().collect()
+}
+
+/// The issues to read once more on the next hot refresh: those still open on the
+/// `merged` board that were closed by a PR gone from the sweep, or whose earlier
+/// look was `undone` because the read was discarded. Only a PR that left the sweep
+/// can be a merge; one merely retargeted is still open, so no close is on the way.
+/// Judged on the merged issues, so a read an issue-side write discarded still counts
+/// when that write left the issue open. Sorted, as [`GitHubPort::hydrate_issues`]
+/// expects.
+fn issues_awaiting_close(
+    previous: &[RawLinkedPr],
+    swept: &[RawLinkedPr],
+    undone: impl IntoIterator<Item = u64>,
+    merged: &[RawIssue],
+) -> Vec<u64> {
+    let still_swept: HashSet<u64> = swept.iter().map(|linked| linked.pr.number).collect();
+    let open: HashSet<u64> = merged
+        .iter()
+        .filter(|issue| !issue.closed)
+        .map(|issue| issue.number)
+        .collect();
+    let awaiting: BTreeSet<u64> = previous
+        .iter()
+        .filter(|linked| !still_swept.contains(&linked.pr.number))
+        .flat_map(|linked| linked.closes.iter().copied())
+        .chain(undone)
+        .filter(|issue| open.contains(issue))
+        .collect();
+    awaiting.into_iter().collect()
 }
 
 /// `retained` with a hydrate's answer applied: every issue it returned is merged
@@ -566,16 +613,23 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
                     number: raw.number,
                     title: raw.title.clone(),
                     url: raw.url.clone(),
+                    suggested: classify_issue(raw) == IssueClassification::SuggestedPrd,
                 },
             )
         })
         .collect();
 
     // The first classification pass, so the second can promote an issue whose
-    // Parent is one of these PRDs.
+    // Parent is one of these PRDs or Suggested PRDs.
     let open_prds: HashSet<u64> = raw_issues
         .iter()
-        .filter(|raw| !raw.closed && classify_issue(raw) == IssueClassification::Prd)
+        .filter(|raw| {
+            !raw.closed
+                && matches!(
+                    classify_issue(raw),
+                    IssueClassification::Prd | IssueClassification::SuggestedPrd
+                )
+        })
         .map(|raw| raw.number)
         .collect();
 
@@ -608,7 +662,8 @@ pub fn classify(raw_issues: &[RawIssue], linked_prs: &[RawLinkedPr]) -> Classifi
                     )
                 };
                 // Look the Parent up among the issues in this board.
-                let prd = parent_of(&raw).and_then(|number| issue_by_number.get(&number).cloned());
+                let prd = lane_parent_of(&raw, &open_prds)
+                    .and_then(|number| issue_by_number.get(&number).cloned());
                 slices.push(RawSlice {
                     number: raw.number,
                     title: raw.title,
@@ -1074,7 +1129,8 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// The **hot** refresh: sweep the repo's open Pull Requests, replace the
     /// board's Linked PR collection with the result, and rewrite the cache
     /// **only** when the open-PR set actually changed — an identical sweep
-    /// repaints nothing, hydrates nothing and writes nothing.
+    /// repaints nothing, hydrates nothing and writes nothing, unless an issue is
+    /// still awaiting its close (below).
     ///
     /// This is the 15-second path of the Freshness contract, and the only writer
     /// of PR facts. It sweeps no issues, so it cannot be delayed by a structural
@@ -1088,6 +1144,13 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// The sweep and its hydrate land together or not at all: writing the PRs
     /// alone would make the next sweep look unchanged and lose the cascade, so a
     /// failed hydrate fails the refresh and the next tick finds the same change.
+    ///
+    /// GitHub closes a merged PR's issues a moment after the PR leaves the sweep,
+    /// so an issue a vanished PR leaves reading open is read **once more** on the
+    /// next tick, whatever that sweep says (see `BoardSnapshot::awaiting_close`).
+    /// That second read still honours "an identical sweep repaints nothing": when
+    /// the issue simply stayed open, as after a PR closed without merging, only the
+    /// bookkeeping is written.
     pub async fn hot_refresh_cached(
         &self,
         repo: &RepoRef,
@@ -1101,11 +1164,23 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         // merely carries forward were already painted and cached by the path
         // that fetched them. Checked first because this runs every 15 seconds
         // and the snapshot it would otherwise build copies every issue.
-        if same_open_prs(&linked_prs, &freshest.linked_prs) {
+        let same_prs = same_open_prs(&linked_prs, &freshest.linked_prs);
+        if same_prs && freshest.awaiting_close.is_empty() {
             return Ok(BoardRefresh::Unchanged(freshest));
         }
-        let cascade = cascade_issues(&freshest.linked_prs, &linked_prs);
-        let loaded = if cascade.is_empty() {
+        // An identical set keeps its order, which alone is not news.
+        let linked_prs = if same_prs {
+            freshest.linked_prs.clone()
+        } else {
+            linked_prs
+        };
+        let cascade: Vec<u64> = cascade_issues(&freshest.linked_prs, &linked_prs)
+            .into_iter()
+            .chain(freshest.awaiting_close.iter().copied())
+            .collect::<BTreeSet<u64>>()
+            .into_iter()
+            .collect();
+        let refreshed = if cascade.is_empty() {
             freshest.with_linked_prs(linked_prs)
         } else {
             let hydrated = self.board.hydrate_issues(repo, &cascade).await?;
@@ -1124,16 +1199,26 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
                 .into_iter()
                 .filter(|issue| !written.contains(&issue.number))
                 .collect();
-            current
+            let mut merged = current
                 .with_linked_prs(linked_prs)
-                .with_hydrated_issues(&cascade, &hydrated)
-        }
-        .loaded();
+                .with_hydrated_issues(&cascade, &hydrated);
+            merged.awaiting_close = issues_awaiting_close(
+                &freshest.linked_prs,
+                &merged.linked_prs,
+                freshest
+                    .awaiting_close
+                    .iter()
+                    .copied()
+                    .filter(|number| written.contains(number)),
+                &merged.raw_issues,
+            );
+            merged
+        };
         self.cache
-            .cache_board(repo, &loaded.snapshot)
+            .cache_board(repo, &refreshed)
             .await
             .map_err(|err| err.with_operation("CachedBoardService::hot_refresh_cached"))?;
-        Ok(BoardRefresh::Changed(loaded))
+        Ok(refresh_outcome(refreshed, &freshest))
     }
 
     /// The freshest board facts known for `repo`: the last write any refresh
@@ -1183,7 +1268,10 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         let raw_issues =
             with_issues_written_meanwhile(&refreshed.raw_issues, &written, &freshest.raw_issues);
         Ok(refresh_outcome(
-            BoardSnapshot::new(raw_issues, freshest.linked_prs, refreshed.fetched_at),
+            BoardSnapshot {
+                awaiting_close: freshest.awaiting_close,
+                ..BoardSnapshot::new(raw_issues, freshest.linked_prs, refreshed.fetched_at)
+            },
             start,
         ))
     }

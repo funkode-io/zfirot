@@ -58,7 +58,7 @@ enum View {
         repo: RepoRef,
         board: ClassifiedBoard,
         loaded_at: String,
-        snapshot: BoardSnapshot,
+        snapshot: Box<BoardSnapshot>,
         from_cache: bool,
     },
     /// Show the paste-token screen. `reason` is `Some` when a stored token was
@@ -271,7 +271,7 @@ pub fn App() -> Element {
 
     // Keep the retained board snapshot in a signal while a board is open.
     use_effect(move || match view.read().as_ref() {
-        Some(View::Board { snapshot, .. }) => board_snapshot.set(Some(snapshot.clone())),
+        Some(View::Board { snapshot, .. }) => board_snapshot.set(Some((**snapshot).clone())),
         _ => board_snapshot.set(None),
     });
 
@@ -386,7 +386,7 @@ pub fn App() -> Element {
                 snapshot,
                 from_cache: true,
                 ..
-            }) => Some((repo.clone(), snapshot.clone())),
+            }) => Some((repo.clone(), (**snapshot).clone())),
             _ => None,
         };
         if let Some((repo, snapshot)) = cached_board {
@@ -1097,7 +1097,7 @@ async fn resolve_view(nav: Nav) -> View {
                     repo,
                     board: loaded.board,
                     loaded_at: now_hms(),
-                    snapshot: loaded.snapshot,
+                    snapshot: Box::new(loaded.snapshot),
                     from_cache: false,
                 },
                 Err(error) => credential_failure_view(&auth, error).await,
@@ -1117,14 +1117,14 @@ async fn resolve_view(nav: Nav) -> View {
             // The cache's own fetch time, not now: this paint is as old as the
             // snapshot until the revalidation below lands.
             loaded_at: snapshot_hms(loaded.snapshot.fetched_at),
-            snapshot: loaded.snapshot,
+            snapshot: Box::new(loaded.snapshot),
             from_cache: true,
         },
         Ok(BoardOpen::Cold(loaded)) => View::Board {
             repo,
             board: loaded.board,
             loaded_at: now_hms(),
-            snapshot: loaded.snapshot,
+            snapshot: Box::new(loaded.snapshot),
             from_cache: false,
         },
         Err(error) => credential_failure_view(&auth, error).await,
@@ -1293,7 +1293,7 @@ fn repaint_board(
         repo,
         board: loaded.board,
         loaded_at: now_hms(),
-        snapshot: loaded.snapshot.clone(),
+        snapshot: Box::new(loaded.snapshot.clone()),
         from_cache: false,
     }));
     reload += 1;
@@ -1346,8 +1346,8 @@ async fn structural_refresh(
 }
 
 /// The **hot** half of the board's freshness: an open-PR **Sweep** that repaints
-/// the moment the PR facts change (`prefetched_board` + `reload`) and does
-/// nothing at all when they do not — no repaint and no cache write.
+/// the moment the board's facts change (`prefetched_board` + `reload`) and does
+/// not repaint when they do not.
 /// Shared by the revalidate-on-open effect and the 15-second hot loop, so both
 /// apply the same rule.
 ///

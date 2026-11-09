@@ -391,6 +391,7 @@ mod tests {
             url: "https://github.com/funkode-io/zfirot/issues/1".to_string(),
             closed: false,
             prd: Some(PrdRef {
+                suggested: false,
                 number: 7,
                 title: "A PRD".to_string(),
                 url: "https://github.com/funkode-io/zfirot/issues/7".to_string(),

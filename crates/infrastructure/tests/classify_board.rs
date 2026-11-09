@@ -2,7 +2,10 @@
 
 use application::{BoardService, ClassifiedBoard};
 use async_trait::async_trait;
-use domain::{AppAction, AppResult, IssueClassification, Project, RawIssue, RawLinkedPr, RepoRef};
+use domain::{
+    group_into_lanes, AppAction, AppResult, IssueClassification, Project, RawIssue, RawLinkedPr,
+    RepoRef,
+};
 use infrastructure::FakeGitHubPort;
 
 #[tokio::test]
@@ -503,8 +506,8 @@ impl application::GitHubPort for PromotionFixturePort {
                 &[],
                 false,
             ),
-            // Tier-1 stays as it was: a labelled Slice under a non-PRD parent
-            // keeps that parent, and a labelled PRD with a parent stays a PRD.
+            // Tier-1 classification stays as it was: a labelled Slice stays a Slice
+            // whatever its Parent is, and a labelled PRD with a Parent stays a PRD.
             raw_slice_issue(260, "## Parent\n\n#201\n", &["slice"], false),
             raw_slice_issue(261, "## Parent\n\n#200\n", &["prd"], false),
         ])
@@ -549,7 +552,11 @@ async fn classify_board_promotes_parented_issues_onto_their_lane() {
         (240, None, "closed Parent"),
         (241, None, "Parent outside the board"),
         (242, None, "native Parent outside the board"),
-        (260, Some(201), "tier-1 Slice keeps its non-PRD parent"),
+        (
+            260,
+            None,
+            "tier-1 Slice's prose non-PRD Parent heads no Lane",
+        ),
     ];
 
     for (issue, lane, name) in cases {
@@ -658,4 +665,220 @@ async fn classify_board_derives_promoted_slice_state_like_a_labelled_one() {
         let blockers: Vec<u64> = slice.blockers.iter().map(|b| b.number).collect();
         assert_eq!(blockers, case.expected_blockers, "#{} blockers", case.issue);
     }
+}
+
+/// Board fixture for **Suggested PRD** Lanes: canned issues, so a test can edit a
+/// PRD's body between two reads of the "same" board.
+#[derive(Clone)]
+struct IssuesPort(Vec<RawIssue>);
+
+#[async_trait]
+impl application::GitHubPort for IssuesPort {
+    async fn load_issues(&self, _repo: &RepoRef) -> AppResult<Vec<RawIssue>> {
+        Ok(self.0.clone())
+    }
+
+    async fn sweep_open_prs(&self, _repo: &RepoRef) -> AppResult<Vec<RawLinkedPr>> {
+        Ok(vec![])
+    }
+
+    async fn list_projects(&self) -> AppResult<Vec<Project>> {
+        Ok(vec![])
+    }
+
+    async fn assign_self(&self, _repo: &RepoRef, _issue_number: u64) -> AppAction {
+        Ok(())
+    }
+
+    async fn add_label(&self, _repo: &RepoRef, _issue_number: u64, _label: &str) -> AppAction {
+        Ok(())
+    }
+}
+
+const SUGGESTED_PRD: u64 = 300;
+const CONFIDENT_PRD: u64 = 310;
+const PRD_TEMPLATE: &str = "## Problem Statement\n\nX.\n\n## User Stories\n\n1. Y.\n";
+
+/// One unlabelled PRD and one labelled PRD with the same family of children, and
+/// a bug whose sub-tasks must stay off the board. `suggested_prd_body` is what
+/// the unlabelled PRD's body currently says.
+fn suggested_prd_issues(suggested_prd_body: &str) -> Vec<RawIssue> {
+    vec![
+        raw_slice_issue(SUGGESTED_PRD, suggested_prd_body, &[], false),
+        raw_slice_issue(CONFIDENT_PRD, "The plan.", &["prd"], false),
+        raw_slice_issue(320, "A bug report.", &["bug"], false),
+        // Children of the Suggested PRD, by every route to it.
+        raw_slice_issue(301, "## Parent\n\n#300\n", &[], false),
+        raw_slice_issue(302, "## Parent\n\n#300\n", &["ready-for-agent"], false),
+        native_parented_issue(303, SUGGESTED_PRD, ""),
+        RawIssue {
+            labels: vec!["slice".to_string()],
+            ..native_parented_issue(304, SUGGESTED_PRD, "")
+        },
+        // Children of the confident PRD.
+        raw_slice_issue(311, "## Parent\n\n#310\n", &[], false),
+        native_parented_issue(312, CONFIDENT_PRD, ""),
+        // A Parent that is neither kind of PRD promotes nothing.
+        raw_slice_issue(321, "## Parent\n\n#320\n", &[], false),
+    ]
+}
+
+async fn classify_issues(issues: Vec<RawIssue>) -> ClassifiedBoard {
+    BoardService::new(IssuesPort(issues))
+        .classify_board(&RepoRef::new("funkode-io", "zfirot"))
+        .await
+        .expect("fixture port should classify the board")
+}
+
+/// `(lane's PRD number, whether its header is unconfirmed, its Slices)`, in board
+/// order, as the board would lay them out.
+fn lane_shape(board: &ClassifiedBoard) -> Vec<(Option<u64>, bool, Vec<u64>)> {
+    group_into_lanes(board.slices.clone())
+        .into_iter()
+        .map(|lane| {
+            (
+                lane.prd.as_ref().map(|prd| prd.number),
+                lane.prd.is_some_and(|prd| prd.suggested),
+                lane.slices.iter().map(|slice| slice.number).collect(),
+            )
+        })
+        .collect()
+}
+
+/// An issue with the PRD headings and no label heads a Lane marked unconfirmed,
+/// its children reach it by the same rules as a labelled PRD's, and the labelled
+/// PRD's own Lane is untouched. Confident Lanes come first, though the suggested
+/// PRD was fetched first.
+#[tokio::test]
+async fn classify_board_heads_a_lane_with_a_suggested_prd() {
+    let board = classify_issues(suggested_prd_issues(PRD_TEMPLATE)).await;
+
+    assert_eq!(
+        lane_shape(&board),
+        vec![
+            (Some(CONFIDENT_PRD), false, vec![311, 312]),
+            (Some(SUGGESTED_PRD), true, vec![301, 302, 303, 304]),
+        ]
+    );
+}
+
+/// A Parent that is neither a PRD nor a Suggested PRD still promotes nothing, and
+/// a Suggested PRD with no active Slices has no Lane, so like any PRD-shaped
+/// suggestion it stays in the tray with its Confirm action.
+#[tokio::test]
+async fn classify_board_promotes_only_against_prds_and_suggested_prds() {
+    let board = classify_issues(suggested_prd_issues(PRD_TEMPLATE)).await;
+
+    let tray: Vec<(u64, IssueClassification)> = board
+        .other
+        .iter()
+        .map(|issue| (issue.number, issue.classification.clone()))
+        .collect();
+    assert_eq!(
+        tray,
+        vec![
+            (SUGGESTED_PRD, IssueClassification::SuggestedPrd),
+            (320, IssueClassification::Unclassified),
+            (321, IssueClassification::Unclassified),
+        ]
+    );
+
+    let childless = classify_issues(vec![raw_slice_issue(400, PRD_TEMPLATE, &[], false)]).await;
+    assert!(
+        lane_shape(&childless).is_empty(),
+        "an empty Lane is omitted, as for a confident PRD"
+    );
+    assert_eq!(
+        childless.other[0].classification,
+        IssueClassification::SuggestedPrd
+    );
+}
+
+/// Editing the body out of the template drops the Lane. Its prose-parented Slices
+/// go with it: an unlabelled one back to the tray, a labelled one to "No PRD",
+/// since a label still makes it a Slice. A labelled Slice with a native link keeps
+/// its Lane, now unmarked because nothing says its head is a PRD. An unlabelled
+/// native child looks exactly like a bug's sub-task once the heading evidence is
+/// gone, so it leaves too.
+#[tokio::test]
+async fn classify_board_drops_a_suggested_lane_whose_body_no_longer_matches() {
+    let board = classify_issues(suggested_prd_issues("## Summary\n\nReworded.\n")).await;
+
+    assert_eq!(
+        lane_shape(&board),
+        vec![
+            (Some(SUGGESTED_PRD), false, vec![304]),
+            (Some(CONFIDENT_PRD), false, vec![311, 312]),
+            (None, false, vec![302]),
+        ]
+    );
+
+    let tray: Vec<u64> = board.other.iter().map(|issue| issue.number).collect();
+    assert_eq!(tray, vec![SUGGESTED_PRD, 320, 301, 303, 321]);
+
+    // With no natively linked Slice to hold it open, the Lane is gone outright.
+    let issues = vec![
+        raw_slice_issue(SUGGESTED_PRD, "## Summary\n\nReworded.\n", &[], false),
+        raw_slice_issue(301, "## Parent\n\n#300\n", &[], false),
+    ];
+    assert!(lane_shape(&classify_issues(issues).await).is_empty());
+}
+
+/// Both passes read only their input, so the board does not depend on the order
+/// GitHub lists issues in beyond first-seen ordering: a child listed before its
+/// Suggested PRD still lands on its Lane.
+#[tokio::test]
+async fn classify_board_promotes_a_child_listed_before_its_suggested_prd() {
+    let mut issues = suggested_prd_issues(PRD_TEMPLATE);
+    issues.reverse();
+
+    let board = classify_issues(issues.clone()).await;
+
+    let lanes = lane_shape(&board);
+    assert!(
+        lanes
+            .iter()
+            .any(|(prd, marked, slices)| *prd == Some(SUGGESTED_PRD)
+                && *marked
+                && slices == &vec![304, 303, 302, 301]),
+        "unexpected lanes: {lanes:?}"
+    );
+    assert_eq!(
+        board,
+        classify_issues(issues).await,
+        "the same facts classify to the same board"
+    );
+}
+
+/// A Suggested PRD with a Parent of its own is still a PRD by its headings, not a
+/// Slice: it heads its Lane and keeps its Confirm card in the tray, whatever that
+/// Parent resolves to, rather than being a card on one Lane and the head of another.
+#[tokio::test]
+async fn classify_board_never_promotes_a_suggested_prd_by_its_parent() {
+    let with_parent = |parent: u64| format!("{PRD_TEMPLATE}\n## Parent\n\n#{parent}\n");
+    let board = classify_issues(vec![
+        raw_slice_issue(500, "The plan.", &["prd"], false),
+        raw_slice_issue(501, &with_parent(500), &[], false),
+        raw_slice_issue(502, "## Parent\n\n#501\n", &[], false),
+        raw_slice_issue(503, &with_parent(999), &[], false),
+        raw_slice_issue(504, "## Parent\n\n#503\n", &[], false),
+    ])
+    .await;
+
+    assert_eq!(
+        lane_shape(&board),
+        vec![(Some(501), true, vec![502]), (Some(503), true, vec![504]),]
+    );
+    let tray: Vec<(u64, IssueClassification)> = board
+        .other
+        .iter()
+        .map(|issue| (issue.number, issue.classification.clone()))
+        .collect();
+    assert_eq!(
+        tray,
+        vec![
+            (501, IssueClassification::SuggestedPrd),
+            (503, IssueClassification::SuggestedPrd),
+        ]
+    );
 }

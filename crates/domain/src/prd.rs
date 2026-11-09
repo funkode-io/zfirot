@@ -24,4 +24,8 @@ pub struct PrdRef {
     pub title: String,
     /// The PRD issue's URL on GitHub.
     pub url: String,
+    /// `true` when this is a **Suggested PRD**: an issue that reads like a PRD by
+    /// its headings alone, with no `prd` label. Its Lane header is marked
+    /// unconfirmed, so a guess is never mistaken for a fact.
+    pub suggested: bool,
 }
