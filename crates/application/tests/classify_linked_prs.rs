@@ -296,3 +296,27 @@ fn a_second_pr_stays_visible_after_the_first_merges_and_closes_their_issue() {
         assert_eq!(unlinked, vec![91], "{name}");
     }
 }
+
+/// A PR closing an issue that its Parent promoted sits on that Slice's card, so
+/// it is no longer an Unlinked PR, and it moves the Slice to WIP like any other.
+#[test]
+fn a_pr_closing_a_promoted_slice_is_linked_not_unlinked() {
+    let prd = RawIssue {
+        labels: vec!["prd".to_string()],
+        ..slice_issue(1)
+    };
+    let promoted = RawIssue {
+        labels: vec![],
+        body: Some("## Parent\n\n#1\n".to_string()),
+        ..slice_issue(2)
+    };
+
+    let board = classify(
+        &[prd, promoted],
+        &[swept_pr(10, PrStatus::AwaitingReview, vec![2])],
+    );
+
+    assert_eq!(badges(&board, 2), vec![10]);
+    assert_eq!(state(&board, 2), SliceState::Wip);
+    assert!(board.unlinked_prs.is_empty());
+}
