@@ -1,7 +1,7 @@
 //! Application layer: use-cases and the port traits that infrastructure
 //! implements (dependency inversion). Depends only on `domain`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -59,6 +59,25 @@ pub trait GitHubPort: Send + Sync {
         self.load_issues(repo).await
     }
 
+    /// **Hydrate** specific issues by number: their full detail, in as few
+    /// requests as the adapter can keep inside GitHub's node limit. `numbers` is
+    /// sorted and free of duplicates.
+    ///
+    /// A number GitHub cannot resolve (a deleted or transferred issue) is simply
+    /// absent from the answer rather than a failure: absence means gone. An issue
+    /// that still exists comes back with its current state, closed or not.
+    ///
+    /// The default is a **safe full-load fallback**: it delegates to
+    /// [`load_issues`](Self::load_issues) and keeps the requested numbers. That
+    /// answer may leave out a closed issue instead of reporting it closed, which
+    /// means the same thing here. Adapters override this to fetch just those
+    /// issues.
+    async fn hydrate_issues(&self, repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
+        let mut issues = self.load_issues(repo).await?;
+        issues.retain(|issue| numbers.binary_search(&issue.number).is_ok());
+        Ok(issues)
+    }
+
     /// List the repositories the token can access, for the home screen. Ordering
     /// is the adapter's best effort; [`ProjectsService`] re-sorts by recency.
     async fn list_projects(&self) -> AppResult<Vec<Project>>;
@@ -101,6 +120,10 @@ impl<P: GitHubPort + ?Sized> GitHubPort for Arc<P> {
         since: DateTime<Utc>,
     ) -> AppResult<Vec<RawIssue>> {
         (**self).load_issues_since(repo, since).await
+    }
+
+    async fn hydrate_issues(&self, repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
+        (**self).hydrate_issues(repo, numbers).await
     }
 
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
@@ -219,12 +242,23 @@ impl BoardSnapshot {
         Self::new(raw_issues, self.linked_prs.clone(), fetched_at)
     }
 
-    /// This snapshot with its **Linked PR** collection replaced — the only write
-    /// the hot path makes. `fetched_at` deliberately does not move: the hot path
-    /// fetches no issues, so advancing the issue-side watermark would skip issue
-    /// changes the structural path has not seen yet (ADR 0008).
+    /// This snapshot with its **Linked PR** collection replaced — the hot path's
+    /// own write. `fetched_at` deliberately does not move: the hot path sweeps no
+    /// issues, so advancing the issue-side watermark would skip issue changes the
+    /// structural path has not seen yet (ADR 0008).
     fn with_linked_prs(&self, linked_prs: Vec<RawLinkedPr>) -> Self {
         Self::new(self.raw_issues.clone(), linked_prs, self.fetched_at)
+    }
+
+    /// This snapshot with a **Cascade**'s answer written over the issues it asked
+    /// for. `fetched_at` stays put for the same reason as in
+    /// [`Self::with_linked_prs`]: those few issues say nothing about the rest.
+    fn with_hydrated_issues(&self, requested: &[u64], hydrated: &[RawIssue]) -> Self {
+        Self::new(
+            merge_hydrated_issues(&self.raw_issues, requested, hydrated),
+            self.linked_prs.clone(),
+            self.fetched_at,
+        )
     }
 
     /// The board this snapshot paints: the pure join of its two collections.
@@ -312,6 +346,77 @@ fn merge_issues(retained: &[RawIssue], delta: &[RawIssue]) -> Vec<RawIssue> {
         }
     }
     merged
+}
+
+/// The issues a **Cascade** must hydrate: those on either end of a closing edge
+/// that one sweep has and the other does not. That covers a PR that appeared, a
+/// PR that vanished (whose issues only the previous set still names) and a PR
+/// retargeted to another issue. A PR whose status alone changed moves no edge and
+/// says nothing about its issue, so it hydrates nothing. Sorted, as
+/// [`GitHubPort::hydrate_issues`] expects.
+fn cascade_issues(previous: &[RawLinkedPr], swept: &[RawLinkedPr]) -> Vec<u64> {
+    fn closing_edges(linked_prs: &[RawLinkedPr]) -> HashSet<(u64, u64)> {
+        linked_prs
+            .iter()
+            .flat_map(|linked| linked.closes.iter().map(|issue| (linked.pr.number, *issue)))
+            .collect()
+    }
+
+    let (previous, swept) = (closing_edges(previous), closing_edges(swept));
+    let moved: BTreeSet<u64> = previous
+        .symmetric_difference(&swept)
+        .map(|(_, issue)| *issue)
+        .collect();
+    moved.into_iter().collect()
+}
+
+/// `retained` with a hydrate's answer applied: every issue it returned is merged
+/// by number, and a requested number it did not return is gone (ADR 0008).
+fn merge_hydrated_issues(
+    retained: &[RawIssue],
+    requested: &[u64],
+    hydrated: &[RawIssue],
+) -> Vec<RawIssue> {
+    let answered: HashSet<u64> = hydrated.iter().map(|issue| issue.number).collect();
+    let survivors: Vec<RawIssue> = retained
+        .iter()
+        .filter(|issue| answered.contains(&issue.number) || !requested.contains(&issue.number))
+        .cloned()
+        .collect();
+    merge_issues(&survivors, hydrated)
+}
+
+/// An issue-side result with whatever landed in the cache while it was in flight
+/// laid back over it. An issue the cache holds differently from the `base` this
+/// fetch started from was written by a **Cascade** meanwhile, and that write
+/// wins: this fetch may have read the issue before the PR merged, and would
+/// otherwise put a closed Slice back on the board. If this fetch was in fact the
+/// newer read, the next one heals it, since its window starts before this fetch.
+fn with_issues_written_meanwhile(
+    fetched: &[RawIssue],
+    base: &[RawIssue],
+    cached: &[RawIssue],
+) -> Vec<RawIssue> {
+    let by_number = |issues: &'_ [RawIssue]| -> HashMap<u64, RawIssue> {
+        issues
+            .iter()
+            .map(|issue| (issue.number, issue.clone()))
+            .collect()
+    };
+    let (base, cached_by_number) = (by_number(base), by_number(cached));
+    let dropped_meanwhile =
+        |number: &u64| base.contains_key(number) && !cached_by_number.contains_key(number);
+    let written_meanwhile: Vec<RawIssue> = cached
+        .iter()
+        .filter(|issue| base.get(&issue.number) != Some(issue))
+        .cloned()
+        .collect();
+    let survivors: Vec<RawIssue> = fetched
+        .iter()
+        .filter(|issue| !dropped_meanwhile(&issue.number))
+        .cloned()
+        .collect();
+    merge_issues(&survivors, &written_meanwhile)
 }
 
 /// Resolve an issue number to a [`DependencyRef`] (number + title + url) against
@@ -761,6 +866,17 @@ impl<P: GitHubPort> BoardService<P> {
         Ok(linked_prs)
     }
 
+    /// **Hydrate** `numbers`, the second half of a **Cascade**.
+    async fn hydrate_issues(&self, repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
+        self.port
+            .hydrate_issues(repo, numbers)
+            .await
+            .map_err(|err| {
+                err.with_context("repo", repo)
+                    .with_context("issues", format!("{numbers:?}"))
+            })
+    }
+
     /// Refresh against a retained snapshot and report whether the board changed.
     ///
     /// This is the **issue side** of a refresh, and it writes only issues: a
@@ -877,7 +993,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     ) -> AppResult<BoardRefresh> {
         let refresh = self.board.refresh(repo, snapshot).await?;
         let refresh = self
-            .with_freshest_linked_prs(repo, snapshot, refresh)
+            .with_freshest_hot_facts(repo, snapshot, refresh)
             .await?;
         let snapshot_to_cache = match &refresh {
             BoardRefresh::Changed(loaded) => &loaded.snapshot,
@@ -893,13 +1009,21 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     /// The **hot** refresh: sweep the repo's open Pull Requests, replace the
     /// board's Linked PR collection with the result, and rewrite the cache
     /// **only** when the open-PR set actually changed — an identical sweep
-    /// repaints nothing and writes nothing.
+    /// repaints nothing, hydrates nothing and writes nothing.
     ///
     /// This is the 15-second path of the Freshness contract, and the only writer
-    /// of PR facts. It fetches no issues at all, so it can neither be delayed by
-    /// a structural refresh walking a large repo nor advance the issue-side
+    /// of PR facts. It sweeps no issues, so it can neither be delayed by a
+    /// structural refresh walking a large repo nor advance the issue-side
     /// watermark; it writes its sweep onto the freshest issues known rather than
     /// onto the ones its caller happened to be holding (ADR 0008).
+    ///
+    /// A change to which PRs close which issues also **Cascades**: those issues
+    /// are hydrated in the same operation. A PR merges, its Slice reads closed,
+    /// and the Slices it blocked derive **Ready** in the same repaint, with no
+    /// further fetch, because `classify` derives blocker openness from the board.
+    /// The sweep and its hydrate land together or not at all: writing the PRs
+    /// alone would make the next sweep look unchanged and lose the cascade, so a
+    /// failed hydrate fails the refresh and the next tick finds the same change.
     pub async fn hot_refresh_cached(
         &self,
         repo: &RepoRef,
@@ -916,7 +1040,18 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         if same_open_prs(&linked_prs, &freshest.linked_prs) {
             return Ok(BoardRefresh::Unchanged(freshest));
         }
-        let loaded = freshest.with_linked_prs(linked_prs).loaded();
+        let cascade = cascade_issues(&freshest.linked_prs, &linked_prs);
+        let loaded = if cascade.is_empty() {
+            freshest.with_linked_prs(linked_prs)
+        } else {
+            let hydrated = self.board.hydrate_issues(repo, &cascade).await?;
+            // The hydrate yielded, so the issue side may have written meanwhile.
+            self.freshest_snapshot(repo, snapshot)
+                .await?
+                .with_linked_prs(linked_prs)
+                .with_hydrated_issues(&cascade, &hydrated)
+        }
+        .loaded();
         self.cache
             .cache_board(repo, &loaded.snapshot)
             .await
@@ -950,10 +1085,11 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
         Ok(cached.unwrap_or_else(|| base.clone()))
     }
 
-    /// Re-decide an issue-side refresh's outcome against the freshest Linked PRs
-    /// available, so its result carries the hot path's PR facts rather than the
-    /// (possibly older) ones its base snapshot was captured with.
-    async fn with_freshest_linked_prs(
+    /// Re-decide an issue-side refresh's outcome against everything the hot path
+    /// wrote while it was in flight, so its result carries the hot path's PR facts
+    /// and **Cascade** rather than the (possibly older) ones its base snapshot was
+    /// captured with.
+    async fn with_freshest_hot_facts(
         &self,
         repo: &RepoRef,
         base: &BoardSnapshot,
@@ -963,11 +1099,19 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
             BoardRefresh::Changed(loaded) => &loaded.snapshot,
             BoardRefresh::Unchanged(snapshot) => snapshot,
         };
-        let linked_prs = self.freshest_snapshot(repo, base).await?.linked_prs;
-        if linked_prs == refreshed.linked_prs {
+        let freshest = self.freshest_snapshot(repo, base).await?;
+        let raw_issues = with_issues_written_meanwhile(
+            &refreshed.raw_issues,
+            &base.raw_issues,
+            &freshest.raw_issues,
+        );
+        if freshest.linked_prs == refreshed.linked_prs && raw_issues == refreshed.raw_issues {
             return Ok(refresh);
         }
-        Ok(refresh_outcome(refreshed.with_linked_prs(linked_prs), base))
+        Ok(refresh_outcome(
+            BoardSnapshot::new(raw_issues, freshest.linked_prs, refreshed.fetched_at),
+            base,
+        ))
     }
 
     /// Full-load reconcile against a retained snapshot.
@@ -986,7 +1130,7 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
     ) -> AppResult<BoardRefresh> {
         let refresh = self.board.reload_issues(repo, snapshot).await?;
         let refresh = self
-            .with_freshest_linked_prs(repo, snapshot, refresh)
+            .with_freshest_hot_facts(repo, snapshot, refresh)
             .await?;
         let loaded = match refresh {
             BoardRefresh::Changed(loaded) => loaded,

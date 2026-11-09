@@ -16,7 +16,8 @@ mod secure_store;
 
 pub use board_cache::{FakeBoardCache, FileBoardCache};
 pub use github::{
-    parse_issues_response, parse_open_prs_response, parse_projects_response, GitHubClient,
+    parse_hydrate_response, parse_issues_response, parse_open_prs_response,
+    parse_projects_response, GitHubClient,
 };
 pub use project_store::{FakeProjectStore, FileProjectStore};
 pub use secure_store::{EnvSecureStore, FakeSecureStore, KeyringSecureStore};

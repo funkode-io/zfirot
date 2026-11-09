@@ -1,5 +1,7 @@
 //! The real [`GitHubPort`] adapter: one GraphQL query per board-classification load.
 
+use std::collections::HashMap;
+
 use application::GitHubPort;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -108,6 +110,46 @@ query OpenPullRequests($owner: String!, $name: String!, $cursor: String) {
   }
 }
 "#;
+
+/// How many issues one **Hydrate** request asks for. Every alias repeats
+/// [`HYDRATE_ISSUE_SELECTION`], so this is a node budget like any page size:
+/// `every_query_fits_githubs_node_limit` prices a full chunk.
+const HYDRATE_CHUNK_SIZE: usize = 50;
+
+/// What a **Hydrate** reads of each issue: the same fields as a page of
+/// [`ISSUES_QUERY`], which `parse_hydrate_response` shares a node shape with.
+const HYDRATE_ISSUE_SELECTION: &str = r#"
+        number
+        title
+        url
+        body
+        state
+        labels(first: 20) { nodes { name } }
+        assignees(first: 1) { nodes { login avatarUrl } }
+        parent { number labels(first: 20) { nodes { name } } }
+        blockedBy(first: 50) { nodes { number } }
+"#;
+
+/// The **Hydrate** requests for `numbers`: one query per chunk, each aliasing one
+/// `issue(number:)` per number so a single round trip reads them all and a number
+/// GitHub cannot resolve fails only its own alias.
+fn hydrate_queries(numbers: &[u64]) -> Vec<String> {
+    numbers
+        .chunks(HYDRATE_CHUNK_SIZE)
+        .map(|chunk| {
+            let aliases: String = chunk
+                .iter()
+                .map(|number| {
+                    format!("    i{number}: issue(number: {number}) {{{HYDRATE_ISSUE_SELECTION}    }}\n")
+                })
+                .collect();
+            format!(
+                "query HydrateIssues($owner: String!, $name: String!) {{\n  \
+                 repository(owner: $owner, name: $name) {{\n{aliases}  }}\n}}\n"
+            )
+        })
+        .collect()
+}
 
 /// The viewer's accessible repositories, most-recently-pushed first, for the
 /// home screen. One page of up to 50 is plenty for a recent-projects list;
@@ -347,6 +389,41 @@ impl GitHubClient {
         response.text().await.map_err(|err| {
             AppError::unavailable("Could not read GitHub's response")
                 .with_operation("GitHubClient::fetch_open_prs_page")
+                .with_source(err)
+        })
+    }
+
+    /// Run one chunk of [`hydrate_queries`] against `repo`.
+    async fn fetch_hydrate_chunk(&self, repo: &RepoRef, query: &str) -> AppResult<String> {
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "owner": repo.owner, "name": repo.name },
+        });
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                AppError::unavailable("Could not reach GitHub")
+                    .with_operation("GitHubClient::fetch_hydrate_chunk")
+                    .with_source(err)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(
+                status,
+                &response,
+                "GitHubClient::fetch_hydrate_chunk",
+            ));
+        }
+
+        response.text().await.map_err(|err| {
+            AppError::unavailable("Could not read GitHub's response")
+                .with_operation("GitHubClient::fetch_hydrate_chunk")
                 .with_source(err)
         })
     }
@@ -610,6 +687,15 @@ impl GitHubPort for GitHubClient {
         Ok(linked_prs)
     }
 
+    async fn hydrate_issues(&self, repo: &RepoRef, numbers: &[u64]) -> AppResult<Vec<RawIssue>> {
+        let mut issues = Vec::with_capacity(numbers.len());
+        for query in hydrate_queries(numbers) {
+            let body = self.fetch_hydrate_chunk(repo, &query).await?;
+            issues.extend(parse_hydrate_response(&body)?);
+        }
+        Ok(issues)
+    }
+
     async fn list_projects(&self) -> AppResult<Vec<Project>> {
         let mut projects = Vec::new();
         let mut cursor: Option<String> = None;
@@ -817,6 +903,58 @@ pub fn parse_open_prs_response(body: &str) -> AppResult<(Vec<RawLinkedPr>, Optio
         AppError::not_found("Repository not found or not visible to the token")
             .with_operation("parse_open_prs_response"),
     )
+}
+
+/// Parse one [`hydrate_queries`] response into the issues GitHub resolved, sorted
+/// by number. Pure and offline.
+///
+/// A number GitHub cannot resolve answers with a null alias and a `NOT_FOUND`
+/// beside it, which is how a deleted or transferred issue reads: it is left out of
+/// the result, not reported as a failure, and the rest of the batch stands. A null
+/// alias for any *other* reason (say a `FORBIDDEN`) says nothing about whether the
+/// issue exists, so that fails the request rather than dropping a live Slice off
+/// the board. Field-level errors beside a resolved issue are tolerated, as in
+/// [`parse_issues_response`].
+pub fn parse_hydrate_response(body: &str) -> AppResult<Vec<RawIssue>> {
+    const OPERATION: &str = "parse_hydrate_response";
+
+    let response: HydrateResponse = serde_json::from_str(body).map_err(|err| {
+        AppError::internal("GitHub returned a malformed response")
+            .with_operation(OPERATION)
+            .with_source(err)
+    })?;
+    let errors = response.errors.unwrap_or_default();
+
+    let Some(aliases) = response.data.and_then(|data| data.repository) else {
+        if errors.is_empty() {
+            return Err(
+                AppError::not_found("Repository not found or not visible to the token")
+                    .with_operation(OPERATION),
+            );
+        }
+        return Err(repository_query_error(errors, OPERATION));
+    };
+
+    let unexplained: Vec<GraphQlError> = errors
+        .into_iter()
+        .filter(|error| !is_unresolvable_issue(error))
+        .collect();
+    if !unexplained.is_empty() && aliases.values().any(Option::is_none) {
+        return Err(repository_query_error(unexplained, OPERATION));
+    }
+
+    let mut issues: Vec<RawIssue> = aliases.into_values().flatten().map(map_issue_raw).collect();
+    issues.sort_unstable_by_key(|issue| issue.number);
+    Ok(issues)
+}
+
+/// Whether a GraphQL error is GitHub saying an aliased issue does not exist here.
+fn is_unresolvable_issue(error: &GraphQlError) -> bool {
+    error.error_type.as_deref() == Some("NOT_FOUND")
+        || error
+            .message
+            .to_lowercase()
+            .contains("could not resolve to an issue")
 }
 
 /// Parse a GraphQL projects response into a page of [`Project`]s and the cursor
@@ -1496,6 +1634,21 @@ struct RawIssueNode {
     blocked_by: BlockerConnection,
 }
 
+// ── Hydrate query (aliased issues) ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct HydrateResponse {
+    data: Option<HydrateData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct HydrateData {
+    /// One entry per alias (`i42`). The alias itself carries nothing the node's
+    /// own `number` does not.
+    repository: Option<HashMap<String, Option<RawIssueNode>>>,
+}
+
 #[derive(Deserialize)]
 struct NameConnection {
     nodes: Vec<NameNode>,
@@ -1723,6 +1876,51 @@ mod tests {
     }
 
     #[test]
+    fn even_the_largest_hydrate_batch_stays_inside_the_node_limit() {
+        // Far more than a repo's open issues: however large the batch, no single
+        // request grows with it.
+        let numbers: Vec<u64> = (1..=5_000).collect();
+
+        let queries = hydrate_queries(&numbers);
+
+        assert_eq!(queries.len(), 100, "5,000 numbers fill 100 chunks of 50");
+        for query in &queries {
+            let nodes = worst_case_nodes(query);
+            assert!(
+                nodes <= GITHUB_NODE_LIMIT,
+                "a hydrate chunk requests up to {nodes} possible nodes, over GitHub's limit of {GITHUB_NODE_LIMIT}"
+            );
+            assert!(nodes > 0, "the estimator must actually price the aliases");
+        }
+        let asked: usize = queries
+            .iter()
+            .map(|query| query.matches(": issue(number:").count())
+            .sum();
+        assert_eq!(
+            asked,
+            numbers.len(),
+            "every number is asked for exactly once"
+        );
+    }
+
+    #[test]
+    fn hydrating_no_issues_sends_no_request() {
+        assert!(hydrate_queries(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_hydrate_reads_the_same_issue_fields_as_a_full_load() {
+        // They share `RawIssueNode`, so a field missing here would fail every
+        // hydrate at parse time, which recorded bodies cannot catch (the since
+        // query once lost `avatarUrl` that way).
+        let squeeze = |query: &str| query.split_whitespace().collect::<String>();
+        assert!(
+            squeeze(ISSUES_QUERY).contains(&squeeze(HYDRATE_ISSUE_SELECTION)),
+            "HYDRATE_ISSUE_SELECTION has drifted from ISSUES_QUERY's selection",
+        );
+    }
+
+    #[test]
     fn no_issue_side_query_requests_pull_request_data() {
         // Linked PRs are read from the PR side by the sweep (ADR 0008). An issue
         // query that reached back into pull requests would reintroduce both the
@@ -1731,6 +1929,7 @@ mod tests {
         for (name, query) in [
             ("ISSUES_QUERY", ISSUES_QUERY),
             ("ISSUES_SINCE_QUERY", ISSUES_SINCE_QUERY),
+            ("HYDRATE_ISSUE_SELECTION", HYDRATE_ISSUE_SELECTION),
         ] {
             let lowered = query.to_lowercase();
             assert!(
