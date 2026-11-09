@@ -103,6 +103,7 @@ pub fn PrdLane(
                     GraphLane {
                         columns: graph.columns,
                         edges: graph.edges,
+                        rail: graph.rail,
                         on_assign,
                         highlighted,
                         on_highlight,
@@ -138,6 +139,7 @@ fn slices_pill_label(total_slices: usize) -> String {
 fn GraphLane(
     columns: Vec<Vec<Slice>>,
     edges: Vec<LaneGraphEdge>,
+    rail: Vec<Slice>,
     on_assign: EventHandler<u64>,
     highlighted: Option<u64>,
     on_highlight: EventHandler<Option<u64>>,
@@ -147,6 +149,8 @@ fn GraphLane(
     const NODE_WIDTH: usize = 320;
     const COLUMN_GAP: usize = 56;
     const ROW_GAP: usize = 20;
+    // Wider than a column gap, so the rail never reads as the next depth.
+    const RAIL_GAP: usize = 96;
 
     // Real, measured geometry of each rendered node, in viewport pixels:
     // number -> (x, y, width, height). Edges are drawn from these anchors so an
@@ -158,7 +162,7 @@ fn GraphLane(
     // re-expressed relative to the SVG overlay that fills it.
     let mut origin = use_signal(|| None::<(f64, f64)>);
 
-    if columns.is_empty() {
+    if columns.is_empty() && rail.is_empty() {
         return rsx! {
             div { class: "text-sm opacity-60", "No active Slices" }
         };
@@ -166,11 +170,12 @@ fn GraphLane(
 
     let rects = node_rects.read().clone();
     let origin_val = origin();
+    let rail_margin = if columns.is_empty() { 0 } else { RAIL_GAP };
 
     rsx! {
-        div { class: "overflow-x-auto",
+        div { class: "overflow-x-auto flex items-stretch",
             div {
-                class: "relative inline-flex items-start",
+                class: "relative inline-flex items-start shrink-0",
                 style: "gap: {COLUMN_GAP}px;",
                 onmounted: move |evt| {
                     spawn(async move {
@@ -248,6 +253,30 @@ fn GraphLane(
                                     highlighted,
                                     on_highlight,
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            // A sibling of the graph, outside its edge overlay and measurements.
+            // Absent when empty, so an empty rail takes no space.
+            if !rail.is_empty() {
+                aside {
+                    class: "flex flex-col shrink-0 border-l-2 border-dashed border-base-content/30 pl-6",
+                    style: "margin-left: {rail_margin}px; gap: {ROW_GAP}px;",
+                    "aria-label": "Slices off the dependency graph",
+                    h4 {
+                        class: "text-xs font-semibold uppercase tracking-wide opacity-60",
+                        title: "Blocked, with no dependency in this lane, so they have no place on the dependency axis",
+                        "Off the graph"
+                    }
+                    for slice in rail.iter() {
+                        div { key: "{slice.number}", style: "width: {NODE_WIDTH}px;",
+                            SliceCard {
+                                slice: slice.clone(),
+                                on_assign,
+                                highlighted,
+                                on_highlight,
                             }
                         }
                     }
