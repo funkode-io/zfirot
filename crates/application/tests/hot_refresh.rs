@@ -1438,6 +1438,127 @@ async fn an_issue_side_write_between_ticks_keeps_the_second_look_due() {
     );
 }
 
+/// An issue-side write landing during the Cascade's hydrate discards that read, but
+/// says nothing about whether the close has happened: the issue still reads open on
+/// the board, so its second look is still due.
+#[tokio::test]
+async fn a_cascade_read_discarded_by_an_issue_side_write_keeps_the_second_look_due() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(60), slice_blocked_by(61, 60)],
+            vec![vec![open_pr(600, 60)]],
+        )
+        .with_deltas(vec![vec![RawIssue {
+            title: "Retitled by a maintainer".to_string(),
+            ..slice_issue(60)
+        }]]),
+        cache.clone(),
+    );
+    let opened = seeded(&seeding).await;
+    let structural = changed(
+        seeding
+            .refresh_cached(&repo(), &opened)
+            .await
+            .expect("structural refresh should succeed"),
+        "the retitle changes the board",
+    )
+    .snapshot;
+    cache
+        .cache_board(&repo(), &opened)
+        .await
+        .expect("the fake cache's write should succeed");
+
+    let github = Arc::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_issue(slice_issue(60))
+            .with_write_during_fetch(cache.clone(), structural),
+    );
+    let service = CachedBoardService::new(github.clone(), cache.clone());
+    let in_the_gap = changed(
+        service
+            .hot_refresh_cached(&repo(), &opened)
+            .await
+            .expect("hot refresh should succeed"),
+        "the vanished PR's badge must leave the board",
+    );
+    assert_eq!(slice(&in_the_gap.board, 61).state, SliceState::Blocked);
+
+    github.update_issue(closed(slice_issue(60)));
+    let next_tick = changed(
+        service
+            .hot_refresh_cached(&repo(), &in_the_gap.snapshot)
+            .await
+            .expect("hot refresh should succeed"),
+        "the next tick must still notice the issue closing",
+    );
+    assert_eq!(slice(&next_tick.board, 61).state, SliceState::Ready);
+}
+
+/// The same for the second look itself: a read that was thrown away has not looked,
+/// so it must not use up the look.
+#[tokio::test]
+async fn a_second_look_discarded_by_an_issue_side_write_stays_due() {
+    let cache = Arc::new(CountingBoardCache::default());
+    let seeding = CachedBoardService::new(
+        ScriptedGitHub::new(
+            vec![slice_issue(62), slice_blocked_by(63, 62)],
+            vec![vec![open_pr(620, 62)], vec![]],
+        )
+        .with_deltas(vec![vec![RawIssue {
+            title: "Retitled by a maintainer".to_string(),
+            ..slice_issue(62)
+        }]]),
+        cache.clone(),
+    );
+    let opened = seeded(&seeding).await;
+    let in_the_gap = changed(
+        seeding
+            .hot_refresh_cached(&repo(), &opened)
+            .await
+            .expect("hot refresh should succeed"),
+        "the vanished PR's badge must leave the board",
+    )
+    .snapshot;
+    let structural = changed(
+        seeding
+            .refresh_cached(&repo(), &in_the_gap)
+            .await
+            .expect("structural refresh should succeed"),
+        "the retitle changes the board",
+    )
+    .snapshot;
+    cache
+        .cache_board(&repo(), &in_the_gap)
+        .await
+        .expect("the fake cache's write should succeed");
+
+    let github = Arc::new(
+        ScriptedGitHub::new(vec![], vec![vec![]])
+            .with_issue(slice_issue(62))
+            .with_write_during_fetch(cache.clone(), structural),
+    );
+    let service = CachedBoardService::new(github.clone(), cache.clone());
+    let discarded = service
+        .hot_refresh_cached(&repo(), &in_the_gap)
+        .await
+        .expect("hot refresh should succeed");
+    let after_discard = match discarded {
+        BoardRefresh::Changed(loaded) => loaded.snapshot,
+        BoardRefresh::Unchanged(snapshot) => snapshot,
+    };
+
+    github.update_issue(closed(slice_issue(62)));
+    let next_tick = changed(
+        service
+            .hot_refresh_cached(&repo(), &after_discard)
+            .await
+            .expect("hot refresh should succeed"),
+        "the next tick must still notice the issue closing",
+    );
+    assert_eq!(slice(&next_tick.board, 63).state, SliceState::Ready);
+}
+
 /// A PR that loses its closing reference is still open and is not merging, so its
 /// old issue has no close on the way: the Cascade's one read is enough for it.
 #[tokio::test]

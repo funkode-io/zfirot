@@ -389,17 +389,21 @@ fn cascade_issues(previous: &[RawLinkedPr], swept: &[RawLinkedPr]) -> Vec<u64> {
     moved.into_iter().collect()
 }
 
-/// The issues to read once more on the next hot refresh: those closed by a PR gone
-/// from the sweep that this hydrate still read as open. Only a PR that left the
-/// sweep can be a merge; one merely retargeted is still open, so no close is on the
-/// way. Sorted, as [`GitHubPort::hydrate_issues`] expects.
+/// The issues to read once more on the next hot refresh: those still open on the
+/// `merged` board that were closed by a PR gone from the sweep, or whose earlier
+/// look was `undone` because the read was discarded. Only a PR that left the sweep
+/// can be a merge; one merely retargeted is still open, so no close is on the way.
+/// Judged on the merged issues, so a read an issue-side write discarded still counts
+/// when that write left the issue open. Sorted, as [`GitHubPort::hydrate_issues`]
+/// expects.
 fn issues_awaiting_close(
     previous: &[RawLinkedPr],
     swept: &[RawLinkedPr],
-    hydrated: &[RawIssue],
+    undone: impl IntoIterator<Item = u64>,
+    merged: &[RawIssue],
 ) -> Vec<u64> {
     let still_swept: HashSet<u64> = swept.iter().map(|linked| linked.pr.number).collect();
-    let read_open: HashSet<u64> = hydrated
+    let open: HashSet<u64> = merged
         .iter()
         .filter(|issue| !issue.closed)
         .map(|issue| issue.number)
@@ -408,7 +412,8 @@ fn issues_awaiting_close(
         .iter()
         .filter(|linked| !still_swept.contains(&linked.pr.number))
         .flat_map(|linked| linked.closes.iter().copied())
-        .filter(|issue| read_open.contains(issue))
+        .chain(undone)
+        .filter(|issue| open.contains(issue))
         .collect();
     awaiting.into_iter().collect()
 }
@@ -1134,12 +1139,19 @@ impl<G: GitHubPort, C: BoardCachePort> CachedBoardService<G, C> {
                 .into_iter()
                 .filter(|issue| !written.contains(&issue.number))
                 .collect();
-            let awaiting_close =
-                issues_awaiting_close(&freshest.linked_prs, &linked_prs, &hydrated);
             let mut merged = current
                 .with_linked_prs(linked_prs)
                 .with_hydrated_issues(&cascade, &hydrated);
-            merged.awaiting_close = awaiting_close;
+            merged.awaiting_close = issues_awaiting_close(
+                &freshest.linked_prs,
+                &merged.linked_prs,
+                freshest
+                    .awaiting_close
+                    .iter()
+                    .copied()
+                    .filter(|number| written.contains(number)),
+                &merged.raw_issues,
+            );
             // Even an issue the cache never held can have closed in that window,
             // leaving no write to compare. So a read that lands while the
             // watermark moved takes it back: the next delta reads those issues
