@@ -75,3 +75,5 @@ make dev     # hot-reloading desktop app (dx auto-runs Tailwind)
 
 See [AGENTS.md](AGENTS.md) and [CONTEXT.md](CONTEXT.md) for architecture and
 domain language.
+
+<!-- ci docs-only proof, do not merge -->
