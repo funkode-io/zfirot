@@ -23,10 +23,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A PR checks out the merge commit; its first parent is the base tip,
+          # so depth 2 is enough to diff the PR against its base.
+          fetch-depth: 2
+
+      # `check` is a required status check, so the job must always run and
+      # report success (`paths-ignore` on the trigger would leave it pending).
+      # Instead, a PR whose changed files are all docs skips the heavy steps.
+      # Pushes to main and any non-docs change run the full gate.
+      - name: Detect docs-only change
+        id: scope
+        run: |
+          code=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            echo "$changed"
+            if [ -n "$changed" ] && ! echo "$changed" | grep -qvE '\.md$|^docs/'; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "full gate: $code"
 
       # Dioxus 0.7 desktop (wry/tao) needs the system WebKitGTK stack to compile
       # the presentation crate, which `cargo test` at the workspace root builds.
       - name: Install desktop build dependencies
+        if: steps.scope.outputs.code == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -38,19 +61,24 @@ jobs:
             librsvg2-dev
 
       - name: Install Rust toolchain
+        if: steps.scope.outputs.code == 'true'
         run: rustup component add rustfmt clippy
 
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.code == 'true'
         with:
           node-version: 20
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.code == 'true'
 
       # The generated stylesheet is untracked (built by dx/tailwind locally), but
       # the `asset!("/assets/tailwind.css")` macro needs it to exist at build
       # time. Generate it before the Rust build.
       - name: Build stylesheet
+        if: steps.scope.outputs.code == 'true'
         run: make css
 
       - name: make check (fmt + clippy + test)
+        if: steps.scope.outputs.code == 'true'
         run: make check
