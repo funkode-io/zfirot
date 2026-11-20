@@ -34,7 +34,9 @@ only when it is relevant to your current task.**
   Two-tier issue classification with a confirm-and-label action. See the
   data-auth-classification guideline.
 - **UI:** Dioxus + daisyUI + Iconify; home (recent projects) -> Kanban board;
-  callback-only reusable components. See the ui guideline.
+  callback-only reusable components. Keep a write button only when the right
+  option is obvious or easy; otherwise highlight it and let the user edit tags
+  on GitHub. See the ui guideline.
 - **Testing:** primary seam is the `GitHubPort` trait with fakes; pure
   `SliceState` derivation is table-tested. See the testing guideline.
 - **Errors:** a single `AppError` categorised by what the caller can do, with
