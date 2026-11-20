@@ -59,6 +59,8 @@ never references the deleted code. Guard against it:
   `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`) and
   blocks the push if any step fails. Fix the failure rather than bypassing.
 - Bypass only in a genuine emergency with `git push --no-verify`.
+- CI's `check` job always reports, but skips the heavy gate on a PR that changes
+  only `*.md` or `docs/**` (it is a required check, so it cannot be path-filtered).
 
 ## During code review
 
